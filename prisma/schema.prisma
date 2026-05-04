@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Mod {
+  id            Int      @id @default(autoincrement())
+  modId         String   @map("mod_id")
+  displayName   String   @map("display_name")
+  version       String
+  mcVersion     String   @map("mc_version")
+  loader        String   // fabric | neoforge | forge | quilt | unknown
+  jarPath       String   @unique @map("jar_path")
+  sha256        String?
+  murmur2       String?
+  sha512        String?
+  sourcePath    String?  @map("source_path")
+  decompPath    String?  @map("decomp_path")
+  decompiled    Boolean  @default(false)
+  modrinthId    String?  @map("modrinth_id")
+  curseforgeId  Int?     @map("curseforge_id")
+  hasMixins     Boolean  @default(false) @map("has_mixins")
+  hasAt         Boolean  @default(false) @map("has_at")
+  hasAw         Boolean  @default(false) @map("has_aw")
+  mixinConfigs  String[] @map("mixin_configs")
+  mixinTargets  Json     @default("[]") @map("mixin_targets")
+  atEntries     Json     @default("[]") @map("at_entries")
+  awEntries     Json     @default("[]") @map("aw_entries")
+  dependencies  Json     @default("[]")
+  metadata      Json     @default("{}")
+  ingestedAt    DateTime @default(now()) @map("ingested_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  classes       ModClass[]
+
+  @@unique([modId, version, mcVersion, loader])
+  @@index([modId])
+  @@index([mcVersion])
+  @@index([loader])
+  @@index([modrinthId])
+  @@index([curseforgeId])
+  @@map("mods")
+}
+
+model ModClass {
+  id          Int      @id @default(autoincrement())
+  modId       Int      @map("mod_id")
+  className   String   @map("class_name")
+  superClass  String?  @map("super_class")
+  interfaces  String[] 
+  accessFlags Int      @default(0) @map("access_flags")
+
+  mod         Mod      @relation(fields: [modId], references: [id], onDelete: Cascade)
+
+  @@unique([modId, className])
+  @@index([className])
+  @@index([modId])
+  @@map("mod_classes")
+}

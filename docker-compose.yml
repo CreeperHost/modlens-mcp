@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: modlens-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: modlens
+      POSTGRES_PASSWORD: modlens
+      POSTGRES_DB: modlens
+    ports:
+      - "5433:5432"
+    volumes:
+      - modlens-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U modlens"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  modlens-pgdata:
