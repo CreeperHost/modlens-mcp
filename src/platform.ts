@@ -1,6 +1,11 @@
+import { createWriteStream } from "fs";
+import { pipeline } from "stream/promises";
+import { join } from "path";
+import { CACHE_ROOT, ensureDir, exists } from "./cache.js";
+
 const PISTON_META = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+const NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge";
 const NEOFORGE_META = "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge";
-const FABRIC_API_META = "https://api.modrinth.com/v2/project/P7dR8mSH/version?game_versions=[%221.21.1%22,%221.21.4%22,%221.21.5%22,%221.20.6%22]&loaders=[%22fabric%22]";
 
 export interface MCVersion {
     id: string;
@@ -80,4 +85,55 @@ export async function listFabricApiVersions(mcVersion?: string, limit = 20): Pro
         mcVersion: v.game_versions[0] ?? "unknown",
         datePublished: v.date_published,
     }));
+}
+
+async function downloadJar(url: string, destPath: string): Promise<string> {
+    await ensureDir(destPath);
+    if (await exists(destPath)) return destPath;
+    const res = await fetch(url, { headers: { "User-Agent": "modlens-mcp/1.0" } });
+    if (!res.ok) throw new Error(`Download failed (${res.status}): ${url}`);
+    const writer = createWriteStream(destPath);
+    await pipeline(res.body as unknown as NodeJS.ReadableStream, writer);
+    return destPath;
+}
+
+/**
+ * Download the NeoForge universal JAR for a given version.
+ * Version format: "21.1.228" (maps to MC 1.21.1).
+ * Returns the local JAR path.
+ */
+export async function downloadNeoForge(version: string): Promise<string> {
+    const destPath = join(CACHE_ROOT, "loaders", "neoforge", `neoforge-${version}-universal.jar`);
+    const url = `${NEOFORGE_MAVEN}/${version}/neoforge-${version}-universal.jar`;
+    return downloadJar(url, destPath);
+}
+
+/**
+ * Download the Fabric API JAR for a given version from Modrinth.
+ * Version format: "0.116.11+1.21.1".
+ * Returns the local JAR path.
+ */
+export async function downloadFabricApi(version: string): Promise<string> {
+    const destPath = join(CACHE_ROOT, "loaders", "fabric-api", `fabric-api-${version}.jar`);
+    if (await exists(destPath)) return destPath;
+
+    // Fetch the version file list from Modrinth
+    const res = await fetch(
+        `https://api.modrinth.com/v2/project/P7dR8mSH/version?loaders=%5B%22fabric%22%5D`,
+        { headers: { "User-Agent": "modlens-mcp/1.0" } }
+    );
+    if (!res.ok) throw new Error(`Modrinth lookup failed: ${res.status}`);
+
+    const versions = await res.json() as Array<{
+        version_number: string;
+        files: Array<{ url: string; primary: boolean; filename: string }>;
+    }>;
+
+    const match = versions.find((v) => v.version_number === version);
+    if (!match) throw new Error(`Fabric API version "${version}" not found on Modrinth`);
+
+    const file = match.files.find((f) => f.primary) ?? match.files[0];
+    if (!file) throw new Error(`No download file found for Fabric API ${version}`);
+
+    return downloadJar(file.url, destPath);
 }

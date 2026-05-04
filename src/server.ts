@@ -11,7 +11,7 @@ import {
 } from "./tools/bytecode.js";
 import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries } from "./tools/mixins.js";
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource } from "./tools/platform.js";
-import { listMcVersions, listNeoForgeVersions, listFabricApiVersions } from "./platform.js";
+import { listMcVersions, listNeoForgeVersions, listFabricApiVersions, downloadNeoForge, downloadFabricApi } from "./platform.js";
 import { disconnect } from "./db.js";
 
 // Load .env
@@ -386,6 +386,44 @@ server.tool(
     async ({ mcVersion, limit }) => {
         const versions = await listFabricApiVersions(mcVersion, limit ?? 20);
         return { content: [{ type: "text", text: JSON.stringify(versions, null, 2) }] };
+    }
+);
+
+server.tool(
+    "ingest_neoforge",
+    "Download a NeoForge universal JAR from Maven and ingest it into the database. Use list_neoforge_versions to find version strings (e.g. '21.1.228'). Once ingested all bytecode tools work on it: search_mod_class, get_mod_class_members, find_mod_references, get_mod_inheritance, etc.",
+    {
+        version: z.string().describe("NeoForge version string, e.g. '21.1.228'"),
+        skipIndex: z.boolean().optional().default(false).describe("Skip class indexing (faster but search won't work until reindex_classes is run)"),
+    },
+    async ({ version, skipIndex }) => {
+        const jarPath = await downloadNeoForge(version);
+        const result = await ingestMod(jarPath, true);
+        if (result.status === "already_ingested") {
+            return { content: [{ type: "text", text: `Already ingested. DB id: ${(result.mod as { id: number }).id}` }] };
+        }
+        const mod = result.mod as { id: number; modId: string };
+        if (!skipIndex) await reindexClasses(mod.id);
+        return { content: [{ type: "text", text: JSON.stringify({ ...result, jarPath }, null, 2) }] };
+    }
+);
+
+server.tool(
+    "ingest_fabric_api",
+    "Download a Fabric API JAR from Modrinth and ingest it into the database. Use list_fabric_api_versions to find version strings (e.g. '0.116.11+1.21.1'). Once ingested all bytecode tools work on it.",
+    {
+        version: z.string().describe("Fabric API version string, e.g. '0.116.11+1.21.1'"),
+        skipIndex: z.boolean().optional().default(false).describe("Skip class indexing"),
+    },
+    async ({ version, skipIndex }) => {
+        const jarPath = await downloadFabricApi(version);
+        const result = await ingestMod(jarPath, true);
+        if (result.status === "already_ingested") {
+            return { content: [{ type: "text", text: `Already ingested. DB id: ${(result.mod as { id: number }).id}` }] };
+        }
+        const mod = result.mod as { id: number; modId: string };
+        if (!skipIndex) await reindexClasses(mod.id);
+        return { content: [{ type: "text", text: JSON.stringify({ ...result, jarPath }, null, 2) }] };
     }
 );
 
