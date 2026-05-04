@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { ingestMod, decompileMod } from "./tools/ingest.js";
+import { ingestMod, decompileMod, reindexClasses } from "./tools/ingest.js";
 import { listMods, getModDetails, searchMods, getDbStats, getDependencies } from "./tools/catalog.js";
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
 import {
@@ -11,7 +11,7 @@ import {
 } from "./tools/bytecode.js";
 import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries } from "./tools/mixins.js";
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource } from "./tools/platform.js";
-import { listMcVersions } from "./platform.js";
+import { listMcVersions, listNeoForgeVersions, listFabricApiVersions } from "./platform.js";
 import { disconnect } from "./db.js";
 
 // Load .env
@@ -339,6 +339,16 @@ server.tool(
     }
 );
 
+server.tool(
+    "reindex_classes",
+    "Index (or re-index) class names for mods that have no class records yet. Run this after batch ingest. Omit dbId to process all un-indexed mods.",
+    { dbId: z.number().optional().describe("Limit to a specific mod's database ID") },
+    async ({ dbId }) => {
+        const result = await reindexClasses(dbId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
 // ── MC versions ───────────────────────────────────────────────────────────────
 
 server.tool(
@@ -349,6 +359,32 @@ server.tool(
     },
     async ({ type }) => {
         const versions = await listMcVersions(type ?? "release");
+        return { content: [{ type: "text", text: JSON.stringify(versions, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_neoforge_versions",
+    "List NeoForge loader versions from the NeoForge Maven repository. Optionally filter by MC version (e.g. '1.21.1').",
+    {
+        mcVersion: z.string().optional().describe("Filter by Minecraft version, e.g. '1.21.1'"),
+        limit: z.number().optional().default(20),
+    },
+    async ({ mcVersion, limit }) => {
+        const versions = await listNeoForgeVersions(mcVersion, limit ?? 20);
+        return { content: [{ type: "text", text: JSON.stringify(versions, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_fabric_api_versions",
+    "List Fabric API versions from Modrinth. Optionally filter by MC version (e.g. '1.21.1').",
+    {
+        mcVersion: z.string().optional().describe("Filter by Minecraft version, e.g. '1.21.1'"),
+        limit: z.number().optional().default(20),
+    },
+    async ({ mcVersion, limit }) => {
+        const versions = await listFabricApiVersions(mcVersion, limit ?? 20);
         return { content: [{ type: "text", text: JSON.stringify(versions, null, 2) }] };
     }
 );

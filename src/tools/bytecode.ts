@@ -85,13 +85,14 @@ export async function getModInheritance(dbId: number, className: string) {
     const jarPath = await getModJar(dbId);
     const internal = className.replace(/\./g, "/");
     const index = await indexJar(jarPath);
-    const target = index.classes.find((c) => c.name === internal);
+    const classes = Object.values(index.classes);
+    const target = classes.find((c) => c.name === internal);
     if (!target) throw new Error(`Class not found: ${internal}`);
 
-    const subclasses = index.classes
+    const subclasses = classes
         .filter((c) => c.superName === internal)
         .map((c) => c.name);
-    const implementors = index.classes
+    const implementors = classes
         .filter((c) => c.interfaces.includes(internal))
         .map((c) => c.name);
 

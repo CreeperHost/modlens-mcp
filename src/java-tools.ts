@@ -22,7 +22,7 @@ export interface ClassInfo {
 }
 
 export interface JarIndex {
-    classes: ClassInfo[];
+    classes: Record<string, ClassInfo>;
     references: Record<string, string[]>;
 }
 
@@ -43,20 +43,16 @@ function runProcess(cmd: string, args: string[]): Promise<string> {
 
 async function findJava(): Promise<string> {
     const exe = process.platform === "win32" ? "java.exe" : "java";
-    const candidates = [
-        process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", exe) : null,
+    const searchDirs = [
         "C:/Program Files/Eclipse Adoptium",
         "C:/Program Files/Java",
         "C:/Program Files/Microsoft",
         "/usr/lib/jvm",
         "/usr/local/lib/jvm",
-    ].filter(Boolean) as string[];
+    ];
 
-    for (const base of candidates) {
-        if (base.endsWith(exe)) {
-            if (await exists(base)) return base;
-            continue;
-        }
+    // Prefer JDK 21+ from well-known install dirs
+    for (const base of searchDirs) {
         try {
             const { readdir } = await import("fs/promises");
             const entries = await readdir(base).catch(() => [] as string[]);
@@ -72,6 +68,13 @@ async function findJava(): Promise<string> {
             continue;
         }
     }
+
+    // Fall back to JAVA_HOME if it's set
+    if (process.env.JAVA_HOME) {
+        const p = join(process.env.JAVA_HOME, "bin", exe);
+        if (await exists(p)) return p;
+    }
+
     return exe; // fall back to PATH
 }
 

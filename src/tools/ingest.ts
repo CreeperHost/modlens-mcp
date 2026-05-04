@@ -80,9 +80,10 @@ export async function ingestMod(jarPath: string, skipSource = false) {
     // Index classes in background (non-blocking)
     indexJar(jarPath)
         .then(async (index) => {
-            if (!index.classes.length) return;
+            const classes = Object.values(index.classes);
+            if (!classes.length) return;
             await db().modClass.createMany({
-                data: index.classes.map((c) => ({
+                data: classes.map((c) => ({
                     modId: mod.id,
                     className: c.name,
                     superClass: c.superName || null,
@@ -95,6 +96,39 @@ export async function ingestMod(jarPath: string, skipSource = false) {
         .catch(() => { /* non-fatal — class index can be retried */ });
 
     return { status: "ingested", mod: await db().mod.findUnique({ where: { id: mod.id } }) };
+}
+
+export async function reindexClasses(dbId?: number): Promise<{ indexed: number; failed: number; skipped: number }> {
+    const mods = dbId
+        ? await db().mod.findMany({ where: { id: dbId } })
+        : await db().mod.findMany();
+
+    let indexed = 0, failed = 0, skipped = 0;
+
+    for (const mod of mods) {
+        const existing = await db().modClass.count({ where: { modId: mod.id } });
+        if (existing > 0) { skipped++; continue; }
+        try {
+            const index = await indexJar(mod.jarPath);
+            const classes = Object.values(index.classes);
+            if (!classes.length) { skipped++; continue; }
+            await db().modClass.createMany({
+                data: classes.map((c) => ({
+                    modId: mod.id,
+                    className: c.name,
+                    superClass: c.superName || null,
+                    interfaces: c.interfaces,
+                    accessFlags: c.accessFlags,
+                })),
+                skipDuplicates: true,
+            });
+            indexed++;
+        } catch {
+            failed++;
+        }
+    }
+
+    return { indexed, failed, skipped };
 }
 
 export async function decompileMod(dbId: number): Promise<string> {

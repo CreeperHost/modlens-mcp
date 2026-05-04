@@ -1,15 +1,19 @@
 /**
  * Batch ingest all JARs from a directory into modlens.
- * Usage: node --env-file=.env dist/batch-ingest.js <directory>
+ * Usage: node dist/batch-ingest.js <directory> [--index]
+ *   --index  Also run class indexing after ingest (slower but populates mod_classes table)
  */
-import { ingestMod } from "./tools/ingest.js";
+import { ingestMod, reindexClasses } from "./tools/ingest.js";
 import { disconnect } from "./db.js";
 import { readdir } from "fs/promises";
 import { join, resolve } from "path";
 
-const dir = process.argv[2];
+const args = process.argv.slice(2);
+const dir = args.find((a) => !a.startsWith("--"));
+const doIndex = args.includes("--index");
+
 if (!dir) {
-    console.error("Usage: node dist/batch-ingest.js <directory>");
+    console.error("Usage: node dist/batch-ingest.js <directory> [--index]");
     process.exit(1);
 }
 
@@ -44,4 +48,11 @@ for (let i = 0; i < jars.length; i++) {
 }
 
 console.log(`\n✓ ingested: ${ok}  skipped: ${skip}  failed: ${fail}`);
+
+if (doIndex) {
+    console.log("\nIndexing classes for all mods (this may take a while)...");
+    const result = await reindexClasses();
+    console.log(`✓ indexed: ${result.indexed}  already had classes: ${result.skipped}  failed: ${result.failed}`);
+}
+
 await disconnect();
