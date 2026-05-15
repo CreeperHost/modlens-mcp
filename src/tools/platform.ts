@@ -129,3 +129,106 @@ export async function downloadSource(dbId: number): Promise<string> {
     await db().mod.update({ where: { id: dbId }, data: { sourcePath: outDir } });
     return outDir;
 }
+
+/**
+ * Batch sync Modrinth + CurseForge metadata for all mods that haven't been
+ * looked up yet, then optionally download actual GitHub source ZIPs.
+ *
+ * Phases (all optional via flags):
+ *   syncModrinth   — SHA-512 lookup on Modrinth  (default true)
+ *   syncCurseforge — Murmur2 lookup on CurseForge (default true)
+ *   downloadSources — download GitHub source ZIPs for matched mods (default false)
+ */
+export async function batchSyncSources(opts: {
+    syncModrinth?: boolean;
+    syncCurseforge?: boolean;
+    downloadSources?: boolean;
+    modIdFilter?: string;
+    limit?: number;
+} = {}): Promise<object> {
+    const {
+        syncModrinth: doMR = true,
+        syncCurseforge: doCF = true,
+        downloadSources: doGH = false,
+        modIdFilter,
+        limit = 500,
+    } = opts;
+
+    const mods = await db().mod.findMany({
+        where: {
+            ...(modIdFilter ? { modId: { contains: modIdFilter } } : {}),
+        },
+        select: { id: true, modId: true, version: true, sha512: true, murmur2: true,
+                  modrinthId: true, curseforgeId: true, sourcePath: true, metadata: true },
+        orderBy: { id: "asc" },
+        take: limit,
+    });
+
+    let mrMatched = 0, mrSkipped = 0, mrFailed = 0;
+    let cfMatched = 0, cfSkipped = 0, cfFailed = 0;
+    let ghDownloaded = 0, ghFailed = 0;
+    const results: Array<{ modId: string; version: string; modrinth?: string; curseforge?: string; source?: string; error?: string }> = [];
+
+    for (const mod of mods) {
+        const row: (typeof results)[0] = { modId: mod.modId, version: mod.version };
+
+        // ── Modrinth ──────────────────────────────────────────────────────────
+        if (doMR && !mod.modrinthId && mod.sha512) {
+            try {
+                const r = await syncModrinth(mod.id);
+                if (r.matched) { mrMatched++; row.modrinth = `matched: ${r.slug}`; }
+                else { mrSkipped++; }
+            } catch (e) {
+                mrFailed++;
+                row.error = `MR: ${(e instanceof Error ? e.message : String(e)).slice(0, 80)}`;
+            }
+        } else if (doMR && mod.modrinthId) {
+            mrSkipped++;
+        }
+
+        // ── CurseForge ────────────────────────────────────────────────────────
+        if (doCF && !mod.curseforgeId && mod.murmur2) {
+            try {
+                const r = await syncCurseforge(mod.id);
+                if (r.matched) { cfMatched++; row.curseforge = `matched: ${r.slug}`; }
+                else { cfSkipped++; }
+            } catch (e) {
+                cfFailed++;
+                row.error = (row.error ? row.error + " | " : "") +
+                    `CF: ${(e instanceof Error ? e.message : String(e)).slice(0, 80)}`;
+            }
+        } else if (doCF && mod.curseforgeId) {
+            cfSkipped++;
+        }
+
+        // ── GitHub source download ─────────────────────────────────────────────
+        if (doGH && !mod.sourcePath) {
+            // Re-read metadata after potential sync above
+            const fresh = await db().mod.findUnique({ where: { id: mod.id }, select: { metadata: true } });
+            const sourceUrl = (fresh?.metadata as Record<string, string>)?.sourceUrl;
+            if (sourceUrl) {
+                try {
+                    const outDir = await downloadSource(mod.id);
+                    ghDownloaded++;
+                    row.source = `downloaded: ${outDir}`;
+                } catch (e) {
+                    ghFailed++;
+                    row.error = (row.error ? row.error + " | " : "") +
+                        `GH: ${(e instanceof Error ? e.message : String(e)).slice(0, 80)}`;
+                }
+            }
+        }
+
+        if (row.modrinth || row.curseforge || row.source || row.error) {
+            results.push(row);
+        }
+    }
+
+    return {
+        total: mods.length,
+        modrinth:   doMR ? { matched: mrMatched, skipped: mrSkipped, failed: mrFailed } : "skipped",
+        curseforge: doCF ? { matched: cfMatched, skipped: cfSkipped, failed: cfFailed } : "skipped",
+        github:     doGH ? { downloaded: ghDownloaded, failed: ghFailed } : "skipped",
+        results,
+    };
+}

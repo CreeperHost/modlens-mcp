@@ -1,0 +1,69 @@
+/**
+ * Vanilla Minecraft JAR download + version listing.
+ * Adapted from mcsrc-mcp's mojang.ts — uses modlens's CACHE_ROOT.
+ */
+import { createWriteStream } from "fs";
+import { pipeline } from "stream/promises";
+import { join } from "path";
+import { CACHE_ROOT, ensureDir, exists } from "./cache.js";
+
+const VERSIONS_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+
+export interface McVersionEntry {
+    id: string;
+    type: "release" | "snapshot" | "old_beta" | "old_alpha";
+    url: string;
+    releaseTime: string;
+}
+
+let manifestCache: McVersionEntry[] | null = null;
+
+export async function fetchMcVersionList(includeSnapshots = false): Promise<McVersionEntry[]> {
+    if (!manifestCache) {
+        const res = await fetch(VERSIONS_URL);
+        if (!res.ok) throw new Error(`Failed to fetch MC version manifest: ${res.status}`);
+        const data = await res.json() as { versions: McVersionEntry[] };
+        // Filter to 1.14+ (first release with Mojang mappings, 2019-04-23)
+        manifestCache = data.versions.filter(
+            (v) => v.type !== "old_beta" && v.type !== "old_alpha" &&
+                new Date(v.releaseTime) >= new Date("2019-04-23")
+        );
+    }
+    return includeSnapshots
+        ? manifestCache
+        : manifestCache.filter((v) => v.type === "release");
+}
+
+/** Paths under ~/.modlens-cache for vanilla MC assets. */
+export const mcPaths = {
+    jar:          (version: string) => join(CACHE_ROOT, "mc-jars", `${version}.jar`),
+    index:        (version: string) => join(CACHE_ROOT, "mc-index", `${version}.json`),
+    decompiled:   (version: string) => join(CACHE_ROOT, "mc-decompiled", version),
+    classFile:    (version: string, className: string) =>
+        join(CACHE_ROOT, "mc-decompiled", version, `${className}.java`),
+};
+
+/** Download the MC client JAR for a version if not cached, return local path. */
+export async function getMcJarPath(version: string): Promise<string> {
+    const jarPath = mcPaths.jar(version);
+    if (await exists(jarPath)) return jarPath;
+
+    const versions = await fetchMcVersionList(true);
+    const entry = versions.find((v) => v.id === version);
+    if (!entry) throw new Error(`Unknown Minecraft version: ${version}. Use list_mc_versions to see valid IDs.`);
+
+    const manifestRes = await fetch(entry.url);
+    if (!manifestRes.ok) throw new Error(`Failed to fetch manifest for ${version}: ${manifestRes.status}`);
+
+    const manifest = await manifestRes.json() as {
+        downloads: { client: { url: string } };
+    };
+
+    await ensureDir(jarPath);
+    const jarRes = await fetch(manifest.downloads.client.url);
+    if (!jarRes.ok || !jarRes.body)
+        throw new Error(`Failed to download MC JAR for ${version}: ${jarRes.status}`);
+
+    await pipeline(jarRes.body as unknown as NodeJS.ReadableStream, createWriteStream(jarPath));
+    return jarPath;
+}

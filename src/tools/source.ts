@@ -2,7 +2,7 @@ import { db } from "../db.js";
 import { readdir, readFile, stat } from "fs/promises";
 import { join, relative } from "path";
 import { exists } from "../cache.js";
-import { decompileMod } from "./ingest.js";
+import { decompileMod, decompileModStatus } from "./ingest.js";
 import { decompileClass as decompileClassJava } from "../java-tools.js";
 import { paths } from "../cache.js";
 
@@ -10,8 +10,17 @@ async function getDecompPath(dbId: number): Promise<string> {
     const mod = await db().mod.findUnique({ where: { id: dbId } });
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     if (mod.decompPath && await exists(mod.decompPath)) return mod.decompPath;
-    // Auto-decompile on demand
-    return decompileMod(dbId);
+    // Auto-decompile on demand — kick off background job then poll
+    const kicked = await decompileMod(dbId);
+    if (kicked.status === "done") return kicked.outDir;
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const s = await decompileModStatus(dbId);
+        if (s.status === "done") return s.outDir;
+        if (s.status === "error") throw new Error(`Vineflower failed for mod #${dbId}`);
+    }
+    throw new Error(`Decompile timed out for mod #${dbId}`);
 }
 
 export async function getModSource(dbId: number, path?: string): Promise<string> {

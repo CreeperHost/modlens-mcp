@@ -12,10 +12,23 @@ function parseMixinTargetsFromJavap(output: string): string[] {
     // Grab a reasonable chunk after the annotation name
     const block = output.slice(annotationIdx, annotationIdx + 2000);
 
-    // value=[class net.minecraft.X, class net.minecraft.Y]  (dot-separated)
-    for (const m of block.matchAll(/class\s+([\w.$]+)/g)) {
-        const cls = m[1].replace(/\./g, "/");
-        if (!targets.includes(cls)) targets.push(cls);
+    /** Normalise a raw class token to internal slash-separated form, stripping
+     *  bytecode descriptor prefix/suffix (e.g. "Lnet/minecraft/X;" → "net/minecraft/X"). */
+    function normalise(raw: string): string {
+        let s = raw;
+        // Strip leading 'L' and trailing ';' (bytecode descriptor)
+        if (s.startsWith("L") && s.endsWith(";")) s = s.slice(1, -1);
+        else if (s.startsWith("L") && s.includes("/")) s = s.slice(1);
+        // Dot-notation → slash-notation
+        if (!s.includes("/")) s = s.replace(/\./g, "/");
+        return s;
+    }
+
+    // value=[class net.minecraft.X] or value=[class net/minecraft/X] or value=[class Lnet/minecraft/X;]
+    // Allow slashes and semicolons in addition to word chars and dots
+    for (const m of block.matchAll(/class\s+([\w.$\\/;]+)/g)) {
+        const cls = normalise(m[1]);
+        if (cls.includes("/") && !targets.includes(cls)) targets.push(cls);
     }
 
     // targets=["net/minecraft/X"] or targets={"net/minecraft/X"}  (slash-separated strings)

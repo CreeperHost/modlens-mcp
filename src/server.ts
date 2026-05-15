@@ -2,16 +2,55 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { ingestMod, decompileMod, reindexClasses } from "./tools/ingest.js";
-import { listMods, getModDetails, searchMods, getDbStats, getDependencies } from "./tools/catalog.js";
+import { ingestMod, decompileMod, decompileModStatus, reindexClasses, batchIngest } from "./tools/ingest.js";
+import { listMods, getModDetails, searchMods, getDbStats, getDependencies, findVersionConflicts, getDependencyGraph, listModSourceUrls } from "./tools/catalog.js";
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
 import {
     searchModClass, getModClassMembers, getModClassBytecode,
     findModReferences, getModInheritance, diffModVersions,
 } from "./tools/bytecode.js";
 import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets } from "./tools/mixins.js";
-import { syncModrinth, syncCurseforge, checkUpdates, downloadSource } from "./tools/platform.js";
+import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources } from "./tools/platform.js";
 import { listMcVersions, listNeoForgeVersions, listFabricApiVersions, downloadNeoForge, downloadFabricApi } from "./platform.js";
+import {
+    searchMinecraftClass, getMinecraftSource, getMcClassBytecode, getMcClassMembers,
+    findMcReferences, getMcInheritance, diffMcVersions,
+    decompileMcVersion, decompileMcVersionStatus, searchMcCode,
+    validateAccessWidener, analyzeMixin,
+} from "./tools/vanilla.js";
+import { indexMcVersion, searchMcIndexed } from "./tools/mc-fts.js";
+import { findMapping, remapModJar, getParchment, listParchmentVersions, getParchmentSummary } from "./tools/mappings.js";
+import { ingestDocumentation, getDocumentation, searchDocumentation, listDocumentation, deleteDocumentation, seedDefaultDocumentation } from "./tools/docs.js";
+import {
+    getMcmetaVersions, getMcBlocks, getMcCommands, getMcRegistries, getMcSounds, getMcItemComponents,
+    getMcDataFile, getMcAssetFile, listMcDataFiles, diffMcData, getMcAtlas, getMcmetaRaw, getRegistryEntries,
+    compareVersions, getVersionChangelog,
+} from "./tools/mcmeta.js";
+import {
+    ingestPrimer, getPrimer, getPrimersByVersionRange, searchPrimers, listPrimers, deletePrimer, seedDefaultPrimers,
+} from "./tools/primers.js";
+import {
+    getMcTags, findTagsForEntry,
+    listRecipes, getRecipe,
+    listLootTables, getLootTable,
+    getLangEntries,
+    getBlockstate, getMcModel,
+    listBiomes, getBiome,
+    listDamageTypes,
+    listEnchantments, getEnchantment,
+    listAdvancements, getAdvancement,
+} from "./tools/vanilla-data.js";
+import {
+    indexModTags, indexAllModTags, listTagNamespaces, getTagContributors,
+    getModTagList, findTagConflicts, searchModTags,
+} from "./tools/mod-tags.js";
+import {
+    listModsWithMixins, getMixinConflictMatrix, getMixinClassDetail, getMixinHotspots, batchResolveMixins,
+} from "./tools/mixin-scan.js";
+import {
+    getModGradleFiles, searchGradleFiles, compareGradleDeps,
+} from "./tools/gradle.js";
+import { generateReport } from "./tools/reports.js";
 import { disconnect } from "./db.js";
 
 // Load .env
@@ -114,11 +153,21 @@ server.tool(
 
 server.tool(
     "decompile_mod",
-    "Decompile an entire mod JAR using Vineflower. Downloads Vineflower automatically on first use. Results cached.",
+    "Decompile an entire mod JAR using Vineflower. Downloads Vineflower automatically on first use. Results cached. Runs in background — call decompile_mod_status to poll for completion.",
     { dbId: z.number().describe("Database ID of the mod") },
     async ({ dbId }) => {
-        const outDir = await decompileMod(dbId);
-        return { content: [{ type: "text", text: `Decompiled to: ${outDir}` }] };
+        const result = await decompileMod(dbId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "decompile_mod_status",
+    "Check the status of a background decompile job started by decompile_mod. Returns done/running/error/not_started and marks the DB record when complete.",
+    { dbId: z.number().describe("Database ID of the mod") },
+    async ({ dbId }) => {
+        const result = await decompileModStatus(dbId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
 );
 
@@ -340,6 +389,22 @@ server.tool(
 );
 
 server.tool(
+    "batch_sync_sources",
+    "Run Modrinth + CurseForge lookups for all mods that haven't been matched yet, populating source URLs. Optionally also download the actual GitHub source ZIPs. Use modIdFilter and limit to scope the run.",
+    {
+        syncModrinth:    z.boolean().optional().describe("Run Modrinth SHA-512 lookup (default true)"),
+        syncCurseforge:  z.boolean().optional().describe("Run CurseForge Murmur2 lookup (default true)"),
+        downloadSources: z.boolean().optional().describe("Also download GitHub source ZIPs for matched mods (default false)"),
+        modIdFilter:     z.string().optional().describe("Limit to mods whose modId contains this string"),
+        limit:           z.number().optional().describe("Max mods to process (default 500)"),
+    },
+    async (opts) => {
+        const result = await batchSyncSources(opts);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
     "download_source",
     "Download the GitHub/GitLab source code for a mod (requires sync_modrinth or sync_curseforge to have been run first to discover the source URL).",
     { dbId: z.number() },
@@ -434,6 +499,1129 @@ server.tool(
         const mod = result.mod as { id: number; modId: string; };
         if (!skipIndex) await reindexClasses(mod.id);
         return { content: [{ type: "text", text: JSON.stringify({ ...result, jarPath }, null, 2) }] };
+    }
+);
+
+// ── Vanilla Minecraft analysis ────────────────────────────────────────────────
+
+server.tool(
+    "search_minecraft_class",
+    "Search for a class in a vanilla Minecraft JAR by name. Supports CamelCase acronyms (e.g. 'LE' → LivingEntity), prefix, and substring matching. Downloads the JAR automatically on first use.",
+    {
+        version: z.string().describe("MC version ID, e.g. '26.1.2' or '1.21.4'"),
+        query: z.string().describe("Class name query"),
+    },
+    async ({ version, query }) => {
+        const results = await searchMinecraftClass(version, query);
+        return { content: [{ type: "text", text: results.length === 0 ? "No classes found." : results.join("\n") }] };
+    }
+);
+
+server.tool(
+    "get_minecraft_source",
+    "Get decompiled Java source for a vanilla Minecraft class. Downloads + decompiles automatically on first use (cached). Optional line-range parameters to return only a slice of the file.",
+    {
+        version: z.string().describe("MC version ID, e.g. '26.1.2'"),
+        className: z.string().describe("Internal class name (slashes or dots), e.g. 'net/minecraft/world/entity/LivingEntity'"),
+        startLine: z.number().optional().describe("First line to return (1-based, inclusive)"),
+        endLine: z.number().optional().describe("Last line to return (1-based, inclusive)"),
+        maxLines: z.number().optional().describe("Maximum lines to return (used when only startLine is given)"),
+    },
+    async ({ version, className, startLine, endLine, maxLines }) => {
+        const source = await getMinecraftSource(version, className, startLine, endLine, maxLines);
+        return { content: [{ type: "text", text: source }] };
+    }
+);
+
+server.tool(
+    "get_mc_class_bytecode",
+    "Get raw JVM bytecode (javap output) for a vanilla Minecraft class. Useful for verifying method signatures.",
+    {
+        version: z.string().describe("MC version ID"),
+        className: z.string().describe("Internal class name, e.g. 'net/minecraft/world/entity/LivingEntity'"),
+    },
+    async ({ version, className }) => {
+        const bytecode = await getMcClassBytecode(version, className);
+        return { content: [{ type: "text", text: bytecode }] };
+    }
+);
+
+server.tool(
+    "get_mc_class_members",
+    "List all methods and fields of a vanilla Minecraft class with @Inject mixin target strings, @Shadow annotations, and Access Widener / Access Transformer strings.",
+    {
+        version: z.string().describe("MC version ID"),
+        className: z.string().describe("Internal class name, e.g. 'net/minecraft/world/entity/LivingEntity'"),
+    },
+    async ({ version, className }) => {
+        const members = await getMcClassMembers(version, className);
+        return { content: [{ type: "text", text: JSON.stringify(members, null, 2) }] };
+    }
+);
+
+server.tool(
+    "find_mc_references",
+    "Find all classes in a vanilla Minecraft JAR that reference a given class, method, or field. Target formats: class 'net/minecraft/X', method 'net/minecraft/X:tick:()V', field 'net/minecraft/X:id:I'. Builds and caches an index on first call per version.",
+    {
+        version: z.string().describe("MC version ID"),
+        target: z.string().describe("Class, method, or field reference target"),
+    },
+    async ({ version, target }) => {
+        const result = await findMcReferences(version, target);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_inheritance",
+    "Get the full inheritance hierarchy of a vanilla Minecraft class: superclass, interfaces, direct subclasses, and implementors.",
+    {
+        version: z.string().describe("MC version ID"),
+        className: z.string().describe("Internal class name, e.g. 'net/minecraft/world/entity/LivingEntity'"),
+    },
+    async ({ version, className }) => {
+        const result = await getMcInheritance(version, className);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "diff_minecraft_versions",
+    "Compare two vanilla Minecraft versions and list added and removed classes.",
+    {
+        versionA: z.string().describe("Earlier version, e.g. '26.1.1'"),
+        versionB: z.string().describe("Later version, e.g. '26.1.2'"),
+    },
+    async ({ versionA, versionB }) => {
+        const result = await diffMcVersions(versionA, versionB);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "decompile_minecraft_version",
+    "Bulk-decompile an entire vanilla Minecraft JAR using Vineflower. Runs in the background — returns immediately with status 'started'. Required before search_minecraft_code or index_minecraft_version.",
+    {
+        version: z.string().describe("MC version ID, e.g. '26.1.2'"),
+        force: z.boolean().optional().default(false).describe("Re-decompile even if already done"),
+    },
+    async ({ version, force }) => {
+        const result = await decompileMcVersion(version, force ?? false);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "decompile_minecraft_version_status",
+    "Check the status of a background decompile started by decompile_minecraft_version. Returns done/running/error/not_started.",
+    {
+        version: z.string().describe("MC version ID"),
+    },
+    async ({ version }) => {
+        const result = await decompileMcVersionStatus(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "search_minecraft_code",
+    "Regex or text search across all decompiled vanilla Minecraft source files. Requires decompile_minecraft_version to have completed first. searchType: 'class' matches class/interface declarations, 'method' matches method signatures, 'field' matches field declarations, 'content'/'all' searches raw file body.",
+    {
+        version: z.string().describe("MC version ID"),
+        query: z.string().describe("Search query (plain text or regex when isRegex=true)"),
+        searchType: z.enum(["class", "method", "field", "content", "all"]).default("content"),
+        isRegex: z.boolean().optional().default(false),
+        limit: z.number().optional().default(50),
+    },
+    async ({ version, query, searchType, isRegex, limit }) => {
+        const results = await searchMcCode(version, query, searchType, isRegex ?? false, limit ?? 50);
+        return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    }
+);
+
+server.tool(
+    "validate_access_widener",
+    "Validate a Fabric/Quilt Access Widener file against a vanilla Minecraft version. Checks every class, method, and field target exists in the JAR. Returns errors with similarity suggestions for typos.",
+    {
+        content: z.string().describe("Full text content of the .accesswidener file"),
+        mcVersion: z.string().describe("MC version ID to validate against, e.g. '26.1.2'"),
+    },
+    async ({ content, mcVersion }) => {
+        const result = await validateAccessWidener(content, mcVersion);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "analyze_mixin",
+    "Parse and validate a Mixin class against vanilla Minecraft source. Extracts @Mixin target, all @Inject/@Redirect/@ModifyArg/@Overwrite method targets, and @Shadow declarations. Validates each against the decompiled MC class and reports errors with suggestions.",
+    {
+        source: z.string().describe("Full Java source code of the mixin class"),
+        mcVersion: z.string().describe("MC version ID to validate against, e.g. '26.1.2'"),
+    },
+    async ({ source, mcVersion }) => {
+        const result = await analyzeMixin(source, mcVersion);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "index_minecraft_version",
+    "Index a decompiled vanilla Minecraft version into PostgreSQL for fast full-text search. Requires decompile_minecraft_version to be done first. Run once per version — subsequent search_mc_indexed calls are instant.",
+    {
+        version: z.string().describe("MC version ID, e.g. '26.1.2'"),
+        force: z.boolean().optional().default(false).describe("Re-index even if already indexed"),
+    },
+    async ({ version, force }) => {
+        const result = await indexMcVersion(version, force ?? false);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "search_mc_indexed",
+    "Fast full-text search across indexed vanilla Minecraft source using PostgreSQL FTS. Supports keywords, AND/OR phrases. Much faster than search_minecraft_code for broad queries. Run index_minecraft_version first.",
+    {
+        query: z.string().describe("Search query — plain keywords or boolean: 'Entity AND tick', 'hurt damage'"),
+        version: z.string().describe("MC version ID, e.g. '26.1.2'"),
+        limit: z.number().optional().default(20),
+    },
+    async ({ query, version, limit }) => {
+        const results = await searchMcIndexed(query, version, limit ?? 20);
+        return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    }
+);
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+
+// ── Mappings ──────────────────────────────────────────────────────────────────
+
+server.tool(
+    "find_mapping",
+    "Translate a Minecraft symbol (class, method, or field name) between naming namespaces: official (obfuscated), intermediary (Fabric stable), yarn (Fabric human-readable), mojmap (Mojang ProGuard names). For MC 26.1+ the JAR is already unobfuscated so no translation is needed.",
+    {
+        symbol:    z.string().describe("Symbol to translate, e.g. a class like 'net/minecraft/world/entity/Entity' or a method name like 'tick'"),
+        version:   z.string().describe("Minecraft version, e.g. '1.21.1' or '26.1.2'"),
+        sourceNs:  z.enum(["official", "intermediary", "yarn", "mojmap"]).describe("Source namespace"),
+        targetNs:  z.enum(["official", "intermediary", "yarn", "mojmap"]).describe("Target namespace"),
+    },
+    async ({ symbol, version, sourceNs, targetNs }) => {
+        const result = await findMapping(symbol, version, sourceNs, targetNs);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "remap_mod_jar",
+    "Remap a mod JAR from obfuscated (official) names to yarn or mojmap using TinyRemapper. Downloads TinyRemapper and mapping data automatically. For MC 26.1+ (unobfuscated) this is a no-op and returns the input path.",
+    {
+        inputJar:  z.string().describe("Absolute path to the input JAR to remap"),
+        outputJar: z.string().describe("Absolute path for the remapped output JAR"),
+        version:   z.string().describe("Minecraft version the mod targets, e.g. '1.21.1'"),
+        toMapping: z.enum(["yarn", "mojmap"]).describe("Target mapping namespace"),
+    },
+    async ({ inputJar, outputJar, version, toMapping }) => {
+        const result = await remapModJar(inputJar, outputJar, version, toMapping);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_parchment",
+    "Get Parchment parameter names and javadocs for a specific class in a Minecraft version. Parchment enriches mojmap names with community-documented parameter names. Class name should be slash-separated: 'net/minecraft/world/entity/Entity'.",
+    {
+        className: z.string().describe("Class name in slash or dot form, e.g. 'net/minecraft/world/entity/Entity'"),
+        mcVersion: z.string().describe("Minecraft version, e.g. '1.21.1'"),
+    },
+    async ({ className, mcVersion }) => {
+        const result = await getParchment(className, mcVersion);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_parchment_versions",
+    "List available Parchment mapping builds for a Minecraft version from the ParchmentMC Maven repository.",
+    {
+        mcVersion: z.string().describe("Minecraft version, e.g. '1.21.1'"),
+    },
+    async ({ mcVersion }) => {
+        const result = await listParchmentVersions(mcVersion);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_parchment_summary",
+    "Return a summary of all classes with Parchment data for a given Minecraft version (class names + method/field/param counts). Useful for gauging parchment coverage before calling get_parchment on individual classes.",
+    {
+        mcVersion: z.string().describe("Minecraft version, e.g. '1.21.1'"),
+    },
+    async ({ mcVersion }) => {
+        const result = await getParchmentSummary(mcVersion);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Documentation ─────────────────────────────────────────────────────────────
+
+server.tool(
+    "ingest_documentation",
+    "Add one or more documentation entries to the database. Each entry has a URL, title, optional class name (for MC class-specific docs), category (minecraft|neoforge|fabric|forge|quilt|mod|other), namespace, and tags. Existing entries with the same URL+className are updated in place.",
+    {
+        entries: z.array(z.object({
+            className: z.string().optional().describe("Fully-qualified class name (dot or slash separated)"),
+            title:     z.string().describe("Human-readable title"),
+            summary:   z.string().optional().describe("Short summary / description"),
+            url:       z.string().describe("URL to the documentation page"),
+            category:  z.enum(["minecraft", "neoforge", "fabric", "forge", "quilt", "mod", "other"]).optional().default("minecraft"),
+            namespace: z.string().optional().default("vanilla").describe("namespace tag, e.g. vanilla|neoforge|fabric|forge|parchment"),
+            tags:      z.array(z.string()).optional().default([]),
+            source:    z.string().optional().default("manual"),
+        })).min(1).describe("One or more documentation entries to ingest"),
+    },
+    async ({ entries }) => {
+        const result = await ingestDocumentation(entries);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "seed_default_documentation",
+    "Populate the documentation database with the built-in defaults: ~20 Fabric/vanilla MC class entries, Fabric wiki topics, NeoForge docs pages, and mapping reference links. Safe to run multiple times — existing entries are updated, not duplicated.",
+    {},
+    async () => {
+        const result = await seedDefaultDocumentation();
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_documentation",
+    "Look up documentation for a Minecraft class name or keyword. Searches class name first, then falls back to title/summary keyword search.",
+    {
+        query: z.string().describe("Class name (e.g. 'net.minecraft.entity.Entity') or keyword"),
+    },
+    async ({ query }) => {
+        const result = await getDocumentation(query);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "search_documentation",
+    "Full-text search across all documentation entries (title, summary, class name). Optionally filter by category or namespace.",
+    {
+        query:     z.string().describe("Search keywords"),
+        category:  z.string().optional().describe("Filter by category: minecraft|neoforge|fabric|forge|quilt|mod|other"),
+        namespace: z.string().optional().describe("Filter by namespace: vanilla|neoforge|fabric|forge|parchment"),
+    },
+    async ({ query, category, namespace }) => {
+        const result = await searchDocumentation(query, category, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_documentation",
+    "List all documentation entries. Filter by category, namespace, or tag. Returns up to 100 entries by default.",
+    {
+        category:  z.string().optional().describe("Filter by category"),
+        namespace: z.string().optional().describe("Filter by namespace"),
+        tag:       z.string().optional().describe("Filter by tag (exact match on any tag in the tags array)"),
+        limit:     z.number().optional().default(100),
+    },
+    async ({ category, namespace, tag, limit }) => {
+        const result = await listDocumentation(category, namespace, tag, limit ?? 100);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "delete_documentation",
+    "Delete a documentation entry by its database ID. Use list_documentation or get_documentation to find the ID first.",
+    {
+        id: z.number().describe("Database ID of the doc entry to delete"),
+    },
+    async ({ id }) => {
+        const result = await deleteDocumentation(id);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── mcmeta ────────────────────────────────────────────────────────────────────
+
+server.tool(
+    "get_mcmeta_versions",
+    "List all Minecraft versions tracked by misode/mcmeta, including data_version, resource_pack_version, and release date. Filter by 'release', 'snapshot', or 'all'.",
+    {
+        filter: z.enum(["release", "snapshot", "all"]).optional().default("all"),
+    },
+    async ({ filter }) => {
+        const result = await getMcmetaVersions(filter ?? "all");
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_blocks",
+    "Get block state property definitions (valid values and defaults) for a Minecraft version from misode/mcmeta.",
+    {
+        version: z.string().optional().describe("MC version ID. Omit for latest."),
+    },
+    async ({ version }) => {
+        const result = await getMcBlocks(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_commands",
+    "Get the full Brigadier command tree for a Minecraft version from misode/mcmeta.",
+    {
+        version: z.string().optional().describe("MC version ID. Omit for latest."),
+    },
+    async ({ version }) => {
+        const result = await getMcCommands(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_registries",
+    "Get registry contents for a Minecraft version. With no registry specified returns all registry keys; with a registry specified returns its entries.",
+    {
+        version:  z.string().optional().describe("MC version ID. Omit for latest."),
+        registry: z.string().optional().describe("Registry key, e.g. 'block', 'item', 'entity_type'. Supports both 'block' and 'minecraft:block' formats."),
+    },
+    async ({ version, registry }) => {
+        const result = await getMcRegistries(version, registry);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_sounds",
+    "Get the sounds.json registry (all sound event IDs and their variants) for a Minecraft version from misode/mcmeta.",
+    {
+        version: z.string().optional().describe("MC version ID. Omit for latest."),
+    },
+    async ({ version }) => {
+        const result = await getMcSounds(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_item_components",
+    "Get item component definitions (data-driven item properties) for a Minecraft version from misode/mcmeta.",
+    {
+        version: z.string().optional().describe("MC version ID. Omit for latest."),
+    },
+    async ({ version }) => {
+        const result = await getMcItemComponents(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_data_file",
+    "Fetch a specific file from the vanilla datapack (data branch) for a Minecraft version. Use list_mc_data_files to explore available paths.",
+    {
+        filePath: z.string().describe("Relative path within the branch, e.g. 'minecraft/recipes/iron_sword.json'"),
+        version:  z.string().optional().describe("MC version ID. Omit for latest."),
+        jsonOnly: z.boolean().optional().default(false).describe("Use the data-json branch (JSON files only, smaller)"),
+    },
+    async ({ filePath, version, jsonOnly }) => {
+        const result = await getMcDataFile(filePath, version, jsonOnly ?? false);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_asset_file",
+    "Fetch a specific file from the vanilla resource pack (assets branch) for a Minecraft version. Binary files (png, ogg) are cached to disk and the local path is returned.",
+    {
+        filePath: z.string().describe("Relative path within the branch, e.g. 'minecraft/models/block/stone.json'"),
+        version:  z.string().optional().describe("MC version ID. Omit for latest."),
+        jsonOnly: z.boolean().optional().default(false).describe("Use the assets-json branch (JSON only, no textures/sounds)"),
+    },
+    async ({ filePath, version, jsonOnly }) => {
+        const result = await getMcAssetFile(filePath, version, jsonOnly ?? false);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mc_data_files",
+    "List files/directories within a path on a given mcmeta branch and Minecraft version. Reads from local cache if available, otherwise queries the GitHub tree API.",
+    {
+        dirPath: z.string().describe("Directory path to list, e.g. 'minecraft/recipes' or '' for root"),
+        version: z.string().describe("MC version ID, e.g. '26.1.2'"),
+        branch:  z.enum(["data", "data-json", "assets", "assets-json", "assets-tiny", "registries", "summary", "diff", "atlas"]).describe("mcmeta branch"),
+    },
+    async ({ dirPath, version, branch }) => {
+        const result = await listMcDataFiles(dirPath, version, branch);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "diff_mc_data",
+    "Compare a data or asset file between two Minecraft versions using misode/mcmeta. Returns the raw content from each version side-by-side.",
+    {
+        filePath: z.string().describe("Path to the file within the branch"),
+        versionA: z.string().describe("First MC version"),
+        versionB: z.string().describe("Second MC version"),
+        branch:   z.enum(["data", "data-json", "assets", "assets-json", "registries", "summary"]).optional().default("data"),
+    },
+    async ({ filePath, versionA, versionB, branch }) => {
+        const result = await diffMcData(filePath, versionA, versionB, branch ?? "data");
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_atlas",
+    "Get texture atlas definitions for a Minecraft version from the mcmeta atlas branch. Atlases describe which textures go into each sprite sheet (blocks, items, etc.).",
+    {
+        version: z.string().optional().describe("MC version ID. Omit for latest."),
+        atlas:   z.string().optional().describe("Atlas name, e.g. 'blocks', 'items'. Omit to list all available atlases."),
+    },
+    async ({ version, atlas }) => {
+        const result = await getMcAtlas(version, atlas);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_registry_entries",
+    "Get all entries for a specific Minecraft registry from the mcmeta registries branch. More complete than get_mc_registries for specific registry contents.",
+    {
+        registry: z.string().describe("Registry key, e.g. 'block', 'item', 'entity_type', 'biome'"),
+        version:  z.string().optional().describe("MC version ID. Omit for latest."),
+    },
+    async ({ registry, version }) => {
+        const result = await getRegistryEntries(registry, version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mcmeta_raw",
+    "Fetch any raw file from misode/mcmeta by specifying the full git ref and file path. Useful for branches/paths not covered by other tools.",
+    {
+        ref:      z.string().describe("Git ref, e.g. '26.1.2-data', '26.1.2-summary', 'summary'"),
+        filePath: z.string().describe("Path within the ref, e.g. 'minecraft/recipes/iron_sword.json'"),
+    },
+    async ({ ref, filePath }) => {
+        const result = await getMcmetaRaw(ref, filePath);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "compare_mc_versions",
+    "Compare two Minecraft versions using the GitHub compare API on the given mcmeta branch. Returns a list of files added, modified, and removed. Use the 'diff' branch for a combined view of all changes (data+assets+summary). Results are cached locally. Note: GitHub API caps at 300 files per comparison.",
+    {
+        versionA: z.string().describe("Earlier MC version, e.g. '1.21.1'"),
+        versionB: z.string().describe("Newer MC version, e.g. '26.1.2'"),
+        branch:   z.string().optional().describe("Branch to compare on: diff (default), data, assets, summary, registries"),
+    },
+    async ({ versionA, versionB, branch }) => {
+        const result = await compareVersions(versionA, versionB, branch);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_version_changelog",
+    "Get the list of files changed in a specific Minecraft version compared to the previous version, using the mcmeta GitHub commit for that version. Shows what was added, modified, or removed. Uses the 'diff' branch by default which combines data+assets+summary changes.",
+    {
+        version: z.string().describe("Minecraft version, e.g. '26.1.2'"),
+        branch:  z.string().optional().describe("Branch to check: diff (default), data, assets, summary"),
+    },
+    async ({ version, branch }) => {
+        const result = await getVersionChangelog(version, branch);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Primers ───────────────────────────────────────────────────────────────────
+
+server.tool(
+    "ingest_primer",
+    "Add one or more version migration primers to the database. Primers document how to migrate mods between Minecraft/loader versions (e.g. NeoForge migration guides, Forge breaking changes). fromVersion and toVersion should be Minecraft version IDs like '1.21.1' or '26.1.2'. Set fetchContent=true to automatically download and store the full text of the primer URL.",
+    {
+        entries: z.array(z.object({
+            fromVersion:  z.string().describe("Starting MC version, e.g. '1.20.4'"),
+            toVersion:    z.string().describe("Target MC version, e.g. '1.21.1'"),
+            modloader:    z.string().optional().describe("neoforge | forge | fabric | quilt | vanilla | other"),
+            title:        z.string(),
+            summary:      z.string().optional(),
+            url:          z.string().describe("URL to the primer/migration guide"),
+            content:      z.string().optional().describe("Full text content (optional)"),
+            tags:         z.array(z.string()).optional(),
+            source:       z.string().optional().describe("manual | seed | scraped"),
+            fetchContent: z.boolean().optional().describe("If true, auto-fetch and store the primer URL text"),
+        })).describe("One or more primer entries to ingest"),
+    },
+    async ({ entries }) => {
+        const result = await ingestPrimer(entries);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_primer",
+    "Get a specific primer by its database ID.",
+    { id: z.number().describe("Primer database ID") },
+    async ({ id }) => {
+        const result = await getPrimer(id);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_primers_by_version_range",
+    "Get all primers that cover a given Minecraft version range. For example, fromVersion='1.20.4' toVersion='26.1.2' returns every migration guide that falls within or overlaps that span. Uses numeric data_version comparison when possible for accuracy. Optionally filter by modloader (neoforge|forge|fabric|quilt).",
+    {
+        fromVersion: z.string().describe("Start of range, e.g. '1.20.4'"),
+        toVersion:   z.string().describe("End of range, e.g. '26.1.2'"),
+        modloader:   z.string().optional().describe("Filter by loader: neoforge | forge | fabric | quilt"),
+    },
+    async ({ fromVersion, toVersion, modloader }) => {
+        const result = await getPrimersByVersionRange(fromVersion, toVersion, modloader);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "search_primers",
+    "Full-text search primers by keyword. Searches title, summary, content, and tags. Optionally filter by modloader and/or a version range.",
+    {
+        query:       z.string().describe("Search keyword(s)"),
+        modloader:   z.string().optional(),
+        fromVersion: z.string().optional().describe("Minimum MC version (inclusive)"),
+        toVersion:   z.string().optional().describe("Maximum MC version (inclusive)"),
+        limit:       z.number().optional().describe("Max results (default 20)"),
+    },
+    async ({ query, modloader, fromVersion, toVersion, limit }) => {
+        const result = await searchPrimers(query, modloader, fromVersion, toVersion, limit);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_primers",
+    "List all primers in the database, optionally filtered by modloader. Returns id, version range, title, summary, and URL.",
+    {
+        modloader: z.string().optional().describe("Filter by loader: neoforge | forge | fabric | quilt | all"),
+        limit:     z.number().optional().describe("Max results (default 50)"),
+    },
+    async ({ modloader, limit }) => {
+        const result = await listPrimers(modloader, limit);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "delete_primer",
+    "Remove a primer from the database by ID.",
+    { id: z.number().describe("Primer database ID") },
+    async ({ id }) => {
+        const result = await deletePrimer(id);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "seed_default_primers",
+    "Populate the primers database with the built-in defaults: NeoForge migration guides (1.20.1→26.1.2), MinecraftForge primers (1.18.2→1.20.1), and Fabric migration notes. Safe to run multiple times — existing entries are updated, not duplicated.",
+    {},
+    async () => {
+        const result = await seedDefaultPrimers();
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Vanilla data browsers ────────────────────────────────────────────────────
+
+server.tool(
+    "get_mc_tags",
+    "Browse vanilla MC tags from the mcmeta data branch. No args: list tag registries. Registry only: list all tag IDs. Registry + tagId: return full tag values array.",
+    {
+        version:   z.string().optional().describe("MC version (default 26.1.2)"),
+        registry:  z.string().optional().describe("Tag registry: block | item | entity_type | fluid | game_event | …"),
+        tagId:     z.string().optional().describe("Specific tag ID within the registry, e.g. 'logs', 'planks'"),
+        namespace: z.string().optional().describe("Namespace (default minecraft)"),
+    },
+    async ({ version, registry, tagId, namespace }) => {
+        const result = await getMcTags(version, registry, tagId, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "find_tags_for_entry",
+    "Reverse tag lookup: find all tags in a registry that contain a specific entry. E.g. find all block tags that include 'minecraft:iron_ore'.",
+    {
+        entry:     z.string().describe("Entry to search for, e.g. 'minecraft:iron_ore' or 'iron_ore'"),
+        registry:  z.string().describe("Tag registry: block | item | entity_type | fluid | …"),
+        version:   z.string().optional().describe("MC version (default 26.1.2)"),
+        namespace: z.string().optional().describe("Tag namespace to search (default minecraft)"),
+    },
+    async ({ entry, registry, version, namespace }) => {
+        const result = await findTagsForEntry(entry, registry, version, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_recipes",
+    "List vanilla MC recipes. Without filters returns all recipe IDs. With type/outputItem filters, loads and searches each recipe (results cached).",
+    {
+        version:    z.string().optional().describe("MC version (default 26.1.2)"),
+        type:       z.string().optional().describe("Recipe type substring: 'crafting_shaped', 'smelting', 'smithing', 'blasting', 'stonecutting'"),
+        outputItem: z.string().optional().describe("Output item substring to filter by, e.g. 'iron_ingot'"),
+    },
+    async ({ version, type, outputItem }) => {
+        const result = await listRecipes(version, type, outputItem);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_recipe",
+    "Get the full JSON for a specific vanilla recipe by its ID (e.g. 'crafting_table', 'iron_ingot_from_nuggets').",
+    {
+        recipeId: z.string().describe("Recipe ID, e.g. 'crafting_table' or 'minecraft:iron_ingot_from_nuggets'"),
+        version:  z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ recipeId, version }) => {
+        const result = await getRecipe(version, recipeId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_loot_tables",
+    "List vanilla loot tables. Without category returns top-level categories (blocks, entities, chests, gameplay). With category lists all tables in it.",
+    {
+        version:  z.string().optional().describe("MC version (default 26.1.2)"),
+        category: z.string().optional().describe("Category: blocks | entities | chests | gameplay | equipment | …"),
+    },
+    async ({ version, category }) => {
+        const result = await listLootTables(version, category);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_loot_table",
+    "Get the full JSON for a specific vanilla loot table. path examples: 'blocks/iron_ore', 'chests/dungeon', 'entities/creeper'.",
+    {
+        path:    z.string().describe("Loot table path, e.g. 'blocks/iron_ore' or 'chests/dungeon'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ path, version }) => {
+        const result = await getLootTable(version, path);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_lang_entries",
+    "Search vanilla en_us.json translation keys and values. Returns key→value pairs matching the filter substring. Useful for finding translationKey strings for items, entities, effects.",
+    {
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+        filter:  z.string().optional().describe("Substring to match against key or value (case-insensitive)"),
+        limit:   z.number().optional().describe("Max entries to return (default 100)"),
+    },
+    async ({ version, filter, limit }) => {
+        const result = await getLangEntries(version, filter, limit);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_blockstate",
+    "Get the blockstate JSON for a vanilla block — shows all variant definitions and the model path each maps to.",
+    {
+        block:   z.string().describe("Block ID, e.g. 'stone', 'oak_door', 'minecraft:grass_block'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ block, version }) => {
+        const result = await getBlockstate(version, block);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_model",
+    "Get a vanilla model JSON and its resolved parent chain with merged texture keys. modelPath: e.g. 'block/stone', 'item/iron_sword', 'block/cube_all'.",
+    {
+        modelPath:      z.string().describe("Model path, e.g. 'block/stone', 'item/diamond_sword'"),
+        version:        z.string().optional().describe("MC version (default 26.1.2)"),
+        resolveParents: z.boolean().optional().describe("Follow parent chain and merge textures (default true)"),
+    },
+    async ({ modelPath, version, resolveParents }) => {
+        const result = await getMcModel(version, modelPath, resolveParents);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_biomes",
+    "List all vanilla biomes for a MC version (from the worldgen/biome data pack directory).",
+    {
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ version }) => {
+        const result = await listBiomes(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_biome",
+    "Get the full worldgen biome JSON for a specific vanilla biome (spawners, features, climate data).",
+    {
+        biomeId: z.string().describe("Biome ID, e.g. 'minecraft:desert', 'deep_dark', 'windswept_hills'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ biomeId, version }) => {
+        const result = await getBiome(version, biomeId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_damage_types",
+    "List all vanilla damage types with full JSON definitions: message_id, scaling, exhaustion, effects, death_message_type.",
+    {
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ version }) => {
+        const result = await listDamageTypes(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_enchantments",
+    "List all vanilla enchantments for a MC version.",
+    {
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ version }) => {
+        const result = await listEnchantments(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_enchantment",
+    "Get the full JSON definition of a vanilla enchantment (effects, slots, supported items, exclusions, max level).",
+    {
+        id:      z.string().describe("Enchantment ID, e.g. 'minecraft:sharpness', 'looting', 'protection'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ id, version }) => {
+        const result = await getEnchantment(version, id);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_advancements",
+    "List vanilla advancements. Without category returns tabs (story, nether, end, adventure, husbandry). With category lists all advancements in it.",
+    {
+        version:  z.string().optional().describe("MC version (default 26.1.2)"),
+        category: z.string().optional().describe("Tab: story | nether | end | adventure | husbandry"),
+    },
+    async ({ version, category }) => {
+        const result = await listAdvancements(version, category);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_advancement",
+    "Get the full JSON for a specific vanilla advancement. id: e.g. 'story/mine_stone', 'nether/root', 'adventure/kill_a_mob'.",
+    {
+        id:      z.string().describe("Advancement path, e.g. 'story/mine_stone' or 'nether/all_effects'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ id, version }) => {
+        const result = await getAdvancement(version, id);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Mod tag indexing + cross-mod tag queries ───────────────────────────────────
+
+server.tool(
+    "index_mod_tags",
+    "Scan a mod JAR and index all its data/<ns>/tags/<registry>/... JSON files into the mod_tags table. Safe to re-run — replaces existing entries.",
+    {
+        modId: z.union([z.string(), z.number()]).describe("Mod ID string or DB integer id"),
+    },
+    async ({ modId }) => {
+        const result = await indexModTags(modId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "index_all_mod_tags",
+    "Scan and index tag files for ALL ingested mods. Returns a per-mod summary of how many tag entries were indexed.",
+    {},
+    async () => {
+        const result = await indexAllModTags();
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_tag_namespaces",
+    "List all tag namespaces and registries present across all indexed mods (e.g. 'c', 'forge', 'minecraft', 'mymod' under 'block', 'item', etc.).",
+    {},
+    async () => {
+        const result = await listTagNamespaces();
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_tag_contributors",
+    "Show every mod that contributes to a specific tag path (e.g. 'c:ores/iron', 'forge:storage_blocks'). Highlights replace:true conflicts.",
+    {
+        tagPath:  z.string().describe("Tag path, e.g. 'c:ores/iron' or '#forge:storage_blocks'"),
+        registry: z.string().optional().describe("Registry hint: block | item | entity_type | fluid | …"),
+    },
+    async ({ tagPath, registry }) => {
+        const result = await getTagContributors(tagPath, registry);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_tag_list",
+    "List all tags registered by a specific mod, grouped by registry.",
+    {
+        modId:    z.union([z.string(), z.number()]).describe("Mod ID string or DB integer id"),
+        registry: z.string().optional().describe("Filter by registry: block | item | entity_type | …"),
+    },
+    async ({ modId, registry }) => {
+        const result = await getModTagList(modId, registry);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "find_tag_conflicts",
+    "Find tag conflicts across all indexed mods. Hard conflicts: multiple mods set replace:true on the same tag. Soft conflicts: one mod silences others' entries with replace:true.",
+    {
+        registry: z.string().optional().describe("Limit to one registry: block | item | entity_type | …"),
+    },
+    async ({ registry }) => {
+        const result = await findTagConflicts(registry);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "search_mod_tags",
+    "Search tag paths across all indexed mods by substring. Returns grouped results showing all contributors per tag.",
+    {
+        query:    z.string().describe("Substring to match in tag paths, e.g. 'ores', 'storage', 'logs'"),
+        registry: z.string().optional().describe("Limit to one registry"),
+        limit:    z.number().optional().describe("Max results (default 50)"),
+    },
+    async ({ query, registry, limit }) => {
+        const result = await searchModTags(query, registry, limit);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Cross-mod mixin analysis ───────────────────────────────────────────────────
+
+server.tool(
+    "list_mods_with_mixins",
+    "List all ingested mods that have mixins, with their resolved target classes. Filter by loader or MC version.",
+    {
+        loader:    z.string().optional().describe("fabric | neoforge | forge | quilt"),
+        mcVersion: z.string().optional().describe("MC version substring filter"),
+    },
+    async ({ loader, mcVersion }) => {
+        const result = await listModsWithMixins(loader, mcVersion);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mixin_conflict_matrix",
+    "Full cross-mod mixin conflict matrix: every class targeted by 2+ mods, with all mods listed. Includes hotspot summary.",
+    {
+        loader:       z.string().optional().describe("fabric | neoforge | forge | quilt"),
+        mcVersion:    z.string().optional().describe("MC version substring filter"),
+        minConflicts: z.number().optional().describe("Min number of mods to count as a conflict (default 2)"),
+    },
+    async ({ loader, mcVersion, minConflicts }) => {
+        const result = await getMixinConflictMatrix(loader, mcVersion, minConflicts);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mixin_class_detail",
+    "Show every mod that mixes into a specific class, with loader and MC version context.",
+    {
+        targetClass: z.string().describe("Fully-qualified class name, e.g. 'net/minecraft/world/entity/player/Player'"),
+    },
+    async ({ targetClass }) => {
+        const result = await getMixinClassDetail(targetClass);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mixin_hotspots",
+    "Top-N most contested classes by number of mods targeting them.",
+    {
+        top:    z.number().optional().describe("How many to return (default 20)"),
+        loader: z.string().optional().describe("fabric | neoforge | forge | quilt"),
+    },
+    async ({ top, loader }) => {
+        const result = await getMixinHotspots(top, loader);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Gradle build file tools ────────────────────────────────────────────────────
+
+server.tool(
+    "get_mod_gradle_files",
+    "Get parsed build.gradle / build.gradle.kts files for a mod's source directory, including extracted dependencies, plugins, and repository URLs.",
+    {
+        modId: z.union([z.string(), z.number()]).describe("Mod ID string or DB integer id"),
+    },
+    async ({ modId }) => {
+        const result = await getModGradleFiles(modId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "search_gradle_files",
+    "Search gradle build files across all mods for a pattern. Returns matching lines with surrounding context.",
+    {
+        query:       z.string().describe("Text to search for, e.g. 'jarJar', 'cursemaven', 'modrinth', a group:artifact"),
+        modIdFilter: z.string().optional().describe("Limit search to mods whose ID contains this string"),
+        limit:       z.number().optional().describe("Max results (default 20)"),
+    },
+    async ({ query, modIdFilter, limit }) => {
+        const result = await searchGradleFiles(query, modIdFilter, limit);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "compare_gradle_deps",
+    "Compare gradle dependencies across all mods. Find who uses the same library, who uses conflicting versions, who embeds vs. compileOnly.",
+    {
+        groupFilter: z.string().optional().describe("Filter by group:artifact substring, e.g. 'curse.maven', 'net.minecraftforge'"),
+        modIdFilter: z.string().optional().describe("Limit to mods whose ID contains this string"),
+    },
+    async ({ groupFilter, modIdFilter }) => {
+        const result = await compareGradleDeps(groupFilter, modIdFilter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Dependency graph + version conflict tools ──────────────────────────────────
+
+server.tool(
+    "find_version_conflicts",
+    "Detect version conflicts: multiple ingested versions of the same modId, and dependency version ranges that may not be satisfied by ingested mods.",
+    {},
+    async () => {
+        const result = await findVersionConflicts();
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_dependency_graph",
+    "Build a full dependency graph across all ingested mods: for each mod, what it requires and what requires it. Includes source URLs.",
+    {
+        mcVersion: z.string().optional().describe("Filter to a specific MC version substring"),
+    },
+    async ({ mcVersion }) => {
+        const result = await getDependencyGraph(mcVersion);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_source_urls",
+    "Show source URLs (GitHub, GitLab, etc.) for all ingested mods, extracted from their JAR manifests at ingest time.",
+    {
+        query: z.string().optional().describe("Filter by mod ID or display name substring"),
+    },
+    async ({ query }) => {
+        const result = await listModSourceUrls(query);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Markdown report generator ─────────────────────────────────────────────────
+
+server.tool(
+    "generate_report",
+    "Generate a human-readable Markdown report from modlens data. Optionally save to a file. Reports: mixin_conflicts | tag_conflicts | version_conflicts | mod_overview | gradle_deps.",
+    {
+        report:      z.enum(["mixin_conflicts", "tag_conflicts", "version_conflicts", "mod_overview", "gradle_deps"]).describe("Which report to generate"),
+        savePath:    z.string().optional().describe("Absolute path to save the .md file, e.g. 'C:/reports/mixin_conflicts.md'"),
+        modId:       z.union([z.string(), z.number()]).optional().describe("Required for mod_overview report"),
+        loader:      z.string().optional().describe("Loader filter for mixin_conflicts"),
+        mcVersion:   z.string().optional().describe("MC version filter for mixin_conflicts"),
+        registry:    z.string().optional().describe("Registry filter for tag_conflicts"),
+        minConflicts: z.number().optional().describe("Min mods for mixin conflict (default 2)"),
+        groupFilter: z.string().optional().describe("Dep group filter for gradle_deps"),
+        modIdFilter: z.string().optional().describe("Mod filter for gradle_deps"),
+    },
+    async ({ report, savePath, modId, loader, mcVersion, registry, minConflicts, groupFilter, modIdFilter }) => {
+        const result = await generateReport({ report, savePath, modId, loader, mcVersion, registry, minConflicts, groupFilter, modIdFilter });
+        return { content: [{ type: "text", text: result.savedTo ? `Saved to: ${result.savedTo}\n\n${result.markdown}` : result.markdown }] };
+    }
+);
+
+server.tool(
+    "batch_resolve_mixins",
+    "Resolve @Mixin bytecode annotations for every hasMixins=true mod in the DB and update mixinTargets. Run this after ingesting new mods or after fixing the mixin parser. Returns a per-mod status + totals.",
+    {
+        loader:    z.string().optional().describe("Limit to a specific loader: neoforge | fabric | forge"),
+        mcVersion: z.string().optional().describe("Limit to mods whose mcVersion contains this string"),
+    },
+    async ({ loader, mcVersion }) => {
+        const result = await batchResolveMixins(loader, mcVersion);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "batch_ingest",
+    "Ingest all JAR files found in a directory. Skips already-ingested files. Returns per-file results plus totals (ingested / skipped / failed).",
+    {
+        directory:    z.string().describe("Absolute path to the directory containing JAR files"),
+        skipSource:   z.boolean().optional().describe("Skip Modrinth/CurseForge source lookup (default true)"),
+        indexClasses: z.boolean().optional().describe("Run class indexing immediately after each ingest (slower but thorough)"),
+    },
+    async ({ directory, skipSource, indexClasses }) => {
+        const result = await batchIngest(directory, skipSource ?? true, indexClasses ?? false);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
 );
 

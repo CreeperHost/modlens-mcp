@@ -165,6 +165,26 @@ function parseForgeToml(raw: string, loader: "neoforge" | "forge", entries: stri
     };
     const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
     const mcDep = raw.match(/modId\s*=\s*["']minecraft["'][^]*?versionRange\s*=\s*["']([^"']+)["']/);
+
+    // Extract source URL from displayURL, issueTrackerURL, or any GitHub URL in the file
+    const displayUrl = get("displayURL");
+    const issueUrl   = get("issueTrackerURL");
+    const ghMatch    = raw.match(/https:\/\/github\.com\/[^\s"']+/);
+    const sourceUrl  = displayUrl || issueUrl || (ghMatch ? ghMatch[0] : null);
+
+    // Extract [[dependencies.<modId>]] blocks
+    const deps: ParsedManifest["dependencies"] = [];
+    const depBlockRe = /\[\[dependencies\.[^\]]+\]\]([\s\S]*?)(?=\[\[|\[(?!(?:dependencies))|$)/g;
+    for (const block of raw.matchAll(depBlockRe)) {
+        const blockText = block[1];
+        const depId  = (blockText.match(/^\s*modId\s*=\s*["']([^"']+)["']/m) ?? [])[1];
+        const depVer = (blockText.match(/^\s*versionRange\s*=\s*["']([^"']+)["']/m) ?? [])[1];
+        const reqStr = (blockText.match(/^\s*mandatory\s*=\s*(true|false)/m) ?? [])[1];
+        if (depId && depId !== "minecraft" && depId !== "neoforge" && depId !== "forge") {
+            deps.push({ id: depId, version: depVer ?? "*", required: reqStr !== "false" });
+        }
+    }
+
     return {
         modId: get("modId") || "unknown",
         displayName: get("displayName") || get("modId") || "unknown",
@@ -172,8 +192,8 @@ function parseForgeToml(raw: string, loader: "neoforge" | "forge", entries: stri
         mcVersion: mcDep ? mcDep[1] : "",
         loader,
         description: get("description"),
-        sourceUrl: null,
-        dependencies: [],
+        sourceUrl,
+        dependencies: deps,
         mixinConfigs,
         hasMixins: mixinConfigs.length > 0,
         hasAt: entries.includes("META-INF/accesstransformer.cfg"),

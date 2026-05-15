@@ -150,9 +150,60 @@ export async function decompileClass(
     throw new Error(`Decompiled file not found at ${outFile}`);
 }
 
+/** Sentinel files written by the background decompile process */
+export function decompileSentinelDone(outputDir: string) { return outputDir + "/.decompile.done"; }
+export function decompileSentinelErr(outputDir: string)  { return outputDir + "/.decompile.error"; }
+
+export async function isDecompileDone(outputDir: string): Promise<"done" | "error" | "running" | "not_started"> {
+    if (await exists(decompileSentinelDone(outputDir))) return "done";
+    if (await exists(decompileSentinelErr(outputDir)))  return "error";
+    if (await exists(outputDir)) return "running";
+    return "not_started";
+}
+
+/**
+ * Launches Vineflower as a detached background process and returns immediately.
+ * Writes `outputDir/.decompile.done` or `outputDir/.decompile.error` when finished.
+ * Call `isDecompileDone(outputDir)` to poll status.
+ */
 export async function decompileJar(jarPath: string, outputDir: string): Promise<void> {
     const vf = await ensureVineflower();
     await ensureDir(outputDir + "/");
     const java = await findJava();
-    await runProcess(java, ["-jar", vf, jarPath, outputDir]);
+
+    // Remove stale sentinels from a previous attempt
+    const { unlink } = await import("fs/promises");
+    await unlink(decompileSentinelDone(outputDir)).catch(() => {});
+    await unlink(decompileSentinelErr(outputDir)).catch(() => {});
+
+    const { writeFile } = await import("fs/promises");
+
+    // Spawn detached so the MCP process doesn't block waiting for it
+    const proc = spawn(java, ["-jar", vf, jarPath, outputDir], {
+        stdio: "ignore",
+        detached: true,
+    });
+    proc.unref();
+
+    // Write sentinel asynchronously — this promise is NOT awaited by the caller
+    const pid = proc.pid;
+    (async () => {
+        await new Promise<void>((resolve) => {
+            proc.on("close", (code) => {
+                const sentinel = code === 0
+                    ? decompileSentinelDone(outputDir)
+                    : decompileSentinelErr(outputDir);
+                writeFile(sentinel, String(code ?? "signal")).catch(() => {});
+                resolve();
+            });
+            proc.on("error", () => {
+                writeFile(decompileSentinelErr(outputDir), "spawn-error").catch(() => {});
+                resolve();
+            });
+        });
+    })();
+
+    // Give the process a moment to confirm it actually started
+    await new Promise<void>((res) => setTimeout(res, 300));
+    if (!pid) throw new Error("Failed to spawn Vineflower process");
 }
