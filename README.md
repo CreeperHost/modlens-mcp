@@ -119,174 +119,181 @@ fabric-api-versions  --mc-version=1.21.1  --limit=20
 
 ## MCP Tools Reference
 
-### Database & Catalog
+### Ingest & Catalog
 
-#### `ingest_mod`
-Process a mod JAR: parse manifest, extract mixin/AT/AW info, compute hashes, look up on Modrinth/CurseForge, and store in the database.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `jarPath` | string | — | Absolute path to the mod `.jar` file |
-| `skipSource` | boolean | `false` | Skip Modrinth/CurseForge source lookup |
-
-#### `list_mods`
-List mods in the database.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `loader` | enum | — | `fabric`, `neoforge`, `forge`, `quilt`, `unknown` |
-| `mcVersion` | string | — | Partial MC version match, e.g. `1.21` |
-| `hasMixins` | boolean | — | Filter to mods with mixin configs |
-| `decompiled` | boolean | — | Filter to mods that have been decompiled |
-| `limit` | number | `50` | Max results |
-
-#### `get_mod_details`
-Get full metadata for a mod by its database ID (number) or `mod_id` string.
-
-#### `search_mods`
-Search mods by name, `mod_id`, or description. Supports `loader` and `mcVersion` filters.
-
-#### `get_dependencies`
-Get the dependency list for a mod. Set `recursive: true` to resolve transitive dependencies that are also in the database.
-
-#### `get_db_stats`
-Database statistics: total mods, decompiled count, loader breakdown, indexed class count.
-
----
+| Tool | Description |
+|------|-------------|
+| `ingest_mod` | Ingest a single mod JAR (parse manifest, hashes, Modrinth/CurseForge lookup) |
+| `batch_ingest` | Ingest all JARs in a directory; skips already-ingested files |
+| `ingest_neoforge` | Download + ingest a NeoForge universal JAR by version string |
+| `ingest_fabric_api` | Download + ingest a Fabric API JAR by version string |
+| `reindex_classes` | Index (or re-index) class names for un-indexed mods |
+| `list_mods` | List mods; filter by `loader`, `mcVersion`, `hasMixins`, `decompiled` |
+| `get_mod_details` | Full metadata for a mod by DB id or modId string |
+| `search_mods` | Search mods by name/id/description |
+| `get_dependencies` | Dependency list for a mod (`recursive` flag for transitive) |
+| `get_db_stats` | Total mods, classes, loader breakdown |
+| `find_version_conflicts` | Duplicate modIds in DB + unsatisfied dep version ranges |
+| `get_dependency_graph` | Full requires/requiredBy adjacency list across all mods |
+| `list_mod_source_urls` | Source/GitHub URLs extracted from all ingested mods |
 
 ### Source & Decompile
 
-#### `decompile_mod`
-Decompile an entire mod JAR using Vineflower. Downloads Vineflower automatically on first use. Results are cached.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `dbId` | number | Database ID of the mod |
-
-#### `decompile_mod_class`
-Decompile a single class from a mod JAR on demand. Much faster than decompiling the whole JAR.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `dbId` | number | Database ID of the mod |
-| `className` | string | Internal class name (slashes or dots), e.g. `com/example/mymod/MyClass` |
-
-#### `get_mod_source`
-Browse or read decompiled source files for a mod. Omit `path` for a directory listing.
-
-#### `search_source`
-Search across decompiled source files using text or regex. Scope to a single mod with `dbId`.
-
----
+| Tool | Description |
+|------|-------------|
+| `decompile_mod` | Decompile entire mod JAR with Vineflower (cached) |
+| `decompile_mod_status` | Check decompile progress for a mod |
+| `decompile_mod_class` | Decompile a single class on demand (faster) |
+| `get_mod_source` | Browse or read decompiled source files |
+| `search_source` | Grep decompiled source by text or regex |
 
 ### Bytecode Analysis
 
-#### `search_mod_class`
-Search for a class in a mod JAR by name. Supports CamelCase acronyms, prefix, and substring matching.
-
-#### `get_mod_class_members`
-List all methods and fields for a class, including `@Inject` mixin targets, `@Shadow` annotations, and AT/AW strings.
-
-#### `get_mod_class_bytecode`
-Get raw JVM bytecode (`javap` output) for a class.
-
-#### `find_mod_references`
-Find all classes in a mod that reference a given class, method, or field.
-
-| Target format | Example |
-|---------------|---------|
-| Class | `com/example/MyClass` |
-| Method | `com/example/MyClass:myMethod:(I)V` |
-| Field | `com/example/MyClass:myField:I` |
-
-#### `get_mod_inheritance`
-Get the inheritance chain for a class: superclass, interfaces, subclasses, and implementors.
-
-#### `diff_mod_versions`
-Compare two mod JARs (by database ID) and list added and removed classes.
-
----
+| Tool | Description |
+|------|-------------|
+| `search_mod_class` | Find a class by name (CamelCase, prefix, substring) |
+| `get_mod_class_members` | Methods, fields, annotations for a class |
+| `get_mod_class_bytecode` | Raw `javap` output for a class |
+| `find_mod_references` | All classes referencing a given class/method/field |
+| `get_mod_inheritance` | Superclass, interfaces, subclasses |
+| `diff_mod_versions` | Added/removed classes between two mod versions |
 
 ### Mixin Analysis
 
-#### `get_mixin_targets`
-Get the list of Minecraft classes that a mod injects into via `@Mixin`, plus which mixin config files are present.
+| Tool | Description |
+|------|-------------|
+| `get_mixin_targets` | MC classes a mod injects into (from DB) |
+| `resolve_mixin_targets` | Parse `@Mixin` bytecode for one mod → update DB |
+| `batch_resolve_mixins` | Re-resolve `@Mixin` targets for all mixin mods (run after ingest or after fixing parser) |
+| `get_mixin_conflicts` | All mods injecting into a specific MC class |
+| `list_mods_with_mixins` | All hasMixins=true mods with their target lists |
+| `get_mixin_conflict_matrix` | Full cross-mod conflict matrix; classes targeted by 2+ mods |
+| `get_mixin_class_detail` | Every mod targeting one specific class |
+| `get_mixin_hotspots` | Top-N most contested MC classes |
+| `get_at_entries` | Access Transformer entries for a mod |
+| `get_aw_entries` | Access Widener entries for a mod |
+| `analyze_mixin` | Parse + validate a mixin class against decompiled MC source |
+| `validate_access_widener` | Validate an AW file against MC class definitions |
+| `remap_mod_jar` | Remap a mod JAR using Tiny mappings |
 
-#### `resolve_mixin_targets`
-Read the `@Mixin` annotations from a mod's bytecode to discover the actual Minecraft target classes (e.g. `net/minecraft/world/entity/LivingEntity`). Updates the database so `get_mixin_conflicts` works correctly. **Run once per mod after ingest.**
+### Mod Tag Analysis (JAR-Shipped Tags)
 
-#### `get_mixin_conflicts`
-Find all mods in the database that inject into the same Minecraft target class.
+| Tool | Description |
+|------|-------------|
+| `index_mod_tags` | Scan one mod's JAR for `data/<ns>/tags/…` files → DB |
+| `index_all_mod_tags` | Scan all ingested mods for tag files → DB |
+| `list_tag_namespaces` | All distinct tag namespaces+registries across mods |
+| `get_tag_contributors` | Every mod contributing to `#c:ores/iron` etc.; flags `replace:true` conflicts |
+| `get_mod_tag_list` | All tags a specific mod registers, optionally filtered by registry |
+| `find_tag_conflicts` | Hard conflicts (2+ mods with `replace:true`) + soft conflicts (one replacer silences others) |
+| `search_mod_tags` | Substring search across all tag paths |
 
-```
-get_mixin_conflicts("net/minecraft/world/entity/LivingEntity")
-```
+### Gradle Analysis
 
-#### `get_at_entries`
-Get all Access Transformer entries declared by a mod (NeoForge/Forge AT format).
-
-#### `get_aw_entries`
-Get all Access Widener entries declared by a mod (Fabric/Quilt AW format).
-
----
+| Tool | Description |
+|------|-------------|
+| `get_mod_gradle_files` | Parse `build.gradle[.kts]` for a mod: deps, plugins, repos |
+| `search_gradle_files` | Cross-mod grep across all gradle files with context |
+| `compare_gradle_deps` | Dependency comparison matrix; flags version conflicts |
 
 ### Platform Integration
 
-#### `sync_modrinth`
-Look up a mod on Modrinth by its SHA-512 hash and store the project ID, slug, and source URL.
+| Tool | Description |
+|------|-------------|
+| `sync_modrinth` | SHA-512 lookup → store `modrinthId` + `sourceUrl` |
+| `sync_curseforge` | Murmur2 lookup → store `curseforgeId` + `sourceUrl` (needs `CURSEFORGE_API_KEY`) |
+| `batch_sync_sources` | Run Modrinth + CurseForge lookups for all unmatched mods; optionally download GitHub source ZIPs |
+| `check_updates` | Check Modrinth/CurseForge for newer versions |
+| `download_source` | Download GitHub/GitLab source ZIP for a mod |
 
-#### `sync_curseforge`
-Look up a mod on CurseForge by its Murmur2 fingerprint. Requires `CURSEFORGE_API_KEY`.
+### Minecraft Source & Mappings
 
-#### `check_updates`
-Check both Modrinth and CurseForge for a newer version of a mod.
+| Tool | Description |
+|------|-------------|
+| `index_minecraft_version` | Index a Minecraft version's classes for search |
+| `decompile_minecraft_version` | Decompile a full MC version with Vineflower |
+| `decompile_minecraft_version_status` | Check decompile progress |
+| `get_minecraft_source` | Browse/read decompiled MC source |
+| `search_minecraft_code` | Grep decompiled MC source |
+| `search_minecraft_class` | Find an MC class by name |
+| `search_mc_indexed` | Full-text search across indexed MC classes |
+| `get_mc_class_members` | Methods + fields for an MC class |
+| `get_mc_class_bytecode` | Raw bytecode for an MC class |
+| `get_mc_inheritance` | Inheritance chain for an MC class |
+| `find_mc_references` | Find MC classes referencing a target |
+| `diff_minecraft_versions` | Class-level diff between two MC versions |
+| `compare_mc_versions` | Side-by-side MC version comparison |
+| `find_mapping` | Look up a class/method/field mapping (Mojmap, Intermediary, Yarn) |
+| `get_parchment` | Parchment parameter/javadoc mappings for a class |
+| `get_parchment_summary` | Parchment coverage summary for a version |
+| `list_parchment_versions` | Available Parchment mapping versions |
 
-#### `download_source`
-Download the GitHub/GitLab source code for a mod. Requires `sync_modrinth` or `sync_curseforge` to have run first.
+### Vanilla Data (requires indexed MC version)
 
----
+| Tool | Description |
+|------|-------------|
+| `get_mc_tags` | Vanilla tag entries (e.g. `minecraft:mineable/pickaxe`) |
+| `find_tags_for_entry` | Which tags contain a given registry entry |
+| `get_recipe` | Recipe JSON by id |
+| `list_recipes` | All recipes, filter by type/result |
+| `get_loot_table` | Loot table JSON |
+| `list_loot_tables` | All loot tables |
+| `get_lang_entries` | Translation strings |
+| `get_blockstate` | Blockstate definition |
+| `get_mc_model` | Block/item model JSON |
+| `get_mc_atlas` | Texture atlas JSON |
+| `get_biome` | Biome JSON data |
+| `list_biomes` | All biomes |
+| `get_damage_types` (via `list_damage_types`) | Damage type registry entries |
+| `get_enchantment` | Enchantment data |
+| `list_enchantments` | All enchantments |
+| `get_advancement` | Advancement JSON |
+| `list_advancements` | All advancements |
+| `get_mc_blocks` | Block registry |
+| `get_mc_commands` | Command tree |
+| `get_mc_item_components` | Item component schemas |
+| `get_mc_registries` | All MC registries |
+| `get_mc_registry_entries` | Entries for a registry |
+| `get_mc_sounds` | Sound event list |
+| `get_mc_asset_file` | Raw asset file from MC jar |
+| `get_mc_data_file` | Raw data file from MC jar |
+| `list_mc_data_files` | List all data files |
+| `diff_mc_data` | Diff a data file between two MC versions |
+| `get_mcmeta_versions` | Version list from version.json |
+| `get_mcmeta_raw` | Raw version manifest data |
+| `get_version_changelog` | Changelog for an MC version |
 
-### Class Indexing
+### Versions
 
-#### `reindex_classes`
-Index (or re-index) class names for mods that have no class records yet. Run after batch ingest. Omit `dbId` to process all un-indexed mods.
+| Tool | Description |
+|------|-------------|
+| `list_mc_versions` | Minecraft versions from Mojang Piston Meta |
+| `list_neoforge_versions` | NeoForge versions from Maven |
+| `list_fabric_api_versions` | Fabric API versions from Modrinth |
 
----
+### Documentation & Primers
 
-### Version Listing
+| Tool | Description |
+|------|-------------|
+| `ingest_documentation` | Store documentation entries for AI retrieval |
+| `get_documentation` | Retrieve a documentation entry |
+| `search_documentation` | Search documentation entries |
+| `list_documentation` | List all documentation entries |
+| `delete_documentation` | Delete a documentation entry |
+| `seed_default_documentation` | Seed built-in modding documentation |
+| `ingest_primer` | Store a primer (structured tutorial/reference) |
+| `get_primer` | Retrieve a primer by id |
+| `search_primers` | Search primers |
+| `list_primers` | List all primers |
+| `get_primers_by_version_range` | Primers applicable to a MC version range |
+| `delete_primer` | Delete a primer |
+| `seed_default_primers` | Seed built-in modding primers |
 
-#### `list_mc_versions`
-List Minecraft versions from Mojang's Piston Meta.
+### Reports
 
-| Parameter | Type | Default |
-|-----------|------|---------|
-| `type` | enum | `release` | `release`, `snapshot`, or `all` |
-
-#### `list_neoforge_versions`
-List NeoForge loader versions from the NeoForge Maven repository. Optionally filter by `mcVersion` (e.g. `1.21.1`).
-
-#### `list_fabric_api_versions`
-List Fabric API versions from Modrinth. Optionally filter by `mcVersion`.
-
----
-
-### NeoForge / Fabric API Ingest
-
-#### `ingest_neoforge`
-Download a NeoForge universal JAR from Maven and ingest it. Use `list_neoforge_versions` to find version strings.
-
-```
-ingest_neoforge("21.1.228")
-```
-
-Once ingested, all bytecode tools work on it: `search_mod_class`, `get_mod_class_members`, `find_mod_references`, `get_mod_inheritance`, etc.
-
-#### `ingest_fabric_api`
-Download a Fabric API JAR from Modrinth and ingest it. Use `list_fabric_api_versions` to find version strings.
-
-```
-ingest_fabric_api("0.116.11+1.21.1")
-```
+| Tool | Description |
+|------|-------------|
+| `generate_report` | Generate a Markdown report. Types: `mixin_conflicts`, `tag_conflicts`, `version_conflicts`, `mod_overview`, `gradle_deps`. Optional `savePath` to write to disk. |
 
 ---
 
@@ -295,29 +302,48 @@ ingest_fabric_api("0.116.11+1.21.1")
 ### Ingest a modpack
 
 ```bash
-# 1. Ingest all mods and index classes
+# 1. Ingest all mods
 node dist/cli.js batch-ingest /path/to/mods --index
 
 # 2. Resolve mixin targets (enables conflict detection)
 node dist/cli.js batch-resolve-mixins
 
-# 3. Ingest the loader itself for cross-reference
+# 3. Sync Modrinth/CurseForge metadata
+# (via MCP: batch_sync_sources)
+
+# 4. Index mod-shipped tags
+# (via MCP: index_all_mod_tags)
+
+# 5. Ingest the loader for cross-reference
 node dist/cli.js ingest-neoforge 21.1.228
 ```
 
-### Find mixin conflicts
+### Detect mixin conflicts
 
 ```bash
+# via CLI (single class)
 node dist/cli.js mixin-conflicts net/minecraft/world/entity/LivingEntity
+
+# via MCP (full matrix)
+get_mixin_conflict_matrix
+generate_report  report=mixin_conflicts  savePath=C:/reports/mixin_conflicts.md
+```
+
+### Explore tag conflicts
+
+```bash
+# via MCP
+index_all_mod_tags
+find_tag_conflicts
+get_tag_contributors  tagPath=c:ores/iron
 ```
 
 ### Explore a mod
 
 ```bash
-node dist/cli.js search apotheosis            # find it
-node dist/cli.js get 2                         # view metadata
-node dist/cli.js mixin-targets 2               # what MC classes it injects into
-node dist/cli.js at-entries 2                  # access transformers
+node dist/cli.js get apotheosis
+node dist/cli.js mixin-targets apotheosis
+node dist/cli.js at-entries 2
 node dist/cli.js decompile-class 2 com/shadows/apotheosis/mixin/LivingEntityMixin
 ```
 
@@ -327,3 +353,10 @@ node dist/cli.js decompile-class 2 com/shadows/apotheosis/mixin/LivingEntityMixi
 node dist/cli.js sync-modrinth 2
 node dist/cli.js check-updates 2
 ```
+
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `jarPath` | string | — | Absolute path to the mod `.jar` file |
+| `skipSource` | boolean | `false` | Skip Modrinth/CurseForge source lookup |
+
