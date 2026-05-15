@@ -11,6 +11,8 @@
 import { readFile, writeFile, readdir } from "fs/promises";
 import { join } from "path";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
+import { db } from "../db.js";
+import { searchSource } from "./source.js";
 
 const RAW_BASE     = "https://raw.githubusercontent.com/misode/mcmeta";
 const MCMETA_CACHE = join(CACHE_ROOT, "mcmeta");
@@ -706,18 +708,91 @@ export async function getParticleData(id: string, version?: string): Promise<obj
 // ── Entity attributes ─────────────────────────────────────────────────────────
 
 /**
- * List the default attributes registered for vanilla entity types.
- * Reads from the entity_type registry data and cross-references attribute
- * data files where available. Falls back to known MC default table.
+ * Get default attributes for a vanilla or modded entity type.
  *
- * entity: e.g. "minecraft:zombie", "player" — omit to list all
+ * Vanilla: reads from data/minecraft/attribute/<entity>.json, falls back to a
+ *          built-in defaults table for the most common entity types.
+ * Modded:  provide modId to search the mod's decompiled source for
+ *          `createAttributes()` / `registerAttributes()` in the entity class.
+ *
+ * entity: e.g. "player", "zombie", "mymod:my_creature" — omit to list all vanilla attribute files
+ * modId:  DB modId string or numeric id (required for modded entities)
  */
-export async function getEntityAttributes(entity?: string, version?: string): Promise<object> {
+export async function getEntityAttributes(entity?: string, version?: string, modId?: string | number): Promise<object> {
     const v = version ?? "26.1.2";
 
-    // MC stores default attributes in data/minecraft/attribute/
-    // and entity-type-specific spawn attributes in data/minecraft/chat_type nearby.
-    // The canonical source is the attributes/ data pack folder (added in 1.21).
+    // ── Modded entity lookup ──────────────────────────────────────────────────
+    if (modId !== undefined || (entity && entity.includes(":") && !entity.startsWith("minecraft:"))) {
+        // Resolve mod record
+        const mod = modId !== undefined
+            ? (typeof modId === "number"
+                ? await db().mod.findUnique({ where: { id: modId } })
+                : await db().mod.findFirst({ where: { modId: { contains: String(modId) } } }))
+            : null;
+
+        if (!mod && modId !== undefined) {
+            return { error: `Mod not found: ${modId}` };
+        }
+
+        if (!entity) {
+            return { error: "entity is required when looking up modded attributes." };
+        }
+
+        // If not decompiled, we can't search source
+        if (!mod?.decompiled) {
+            return {
+                entity,
+                mod: mod?.modId ?? "unknown",
+                note: "Mod is not decompiled. Run decompile_mod first, then retry.",
+                attributes: [],
+            };
+        }
+
+        // Entity name heuristic: "mymod:my_creature" or just "my_creature"
+        const entityName = entity.includes(":") ? entity.split(":")[1] : entity;
+        // Convert snake_case to PascalCase class name heuristic
+        const className = entityName.split("_").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join("");
+
+        // Search decompiled source for createAttributes / registerAttributes in the entity class
+        const [createHits, registerHits] = await Promise.all([
+            searchSource(`createAttributes`, mod.id, false, 30),
+            searchSource(`registerAttributes`, mod.id, false, 20),
+        ]);
+
+        // Filter hits to those in files matching the entity class name
+        const classFilter = (hit: { file: string }) =>
+            hit.file.toLowerCase().includes(entityName.replace(/_/g, "").toLowerCase()) ||
+            hit.file.toLowerCase().includes(className.toLowerCase());
+
+        const relevant = [
+            ...createHits.filter(classFilter),
+            ...registerHits.filter(classFilter),
+        ];
+
+        if (relevant.length === 0) {
+            // Fallback: return all createAttributes hits from the mod
+            return {
+                entity,
+                mod: mod.modId,
+                entityClass: className,
+                note: `No createAttributes() / registerAttributes() found for class '${className}'. Showing all attribute-related hits in mod — narrow by class name manually.`,
+                allAttributeHits: [...createHits.slice(0, 20), ...registerHits.slice(0, 10)].map(h => ({
+                    file: h.file, line: h.line, text: h.text,
+                })),
+            };
+        }
+
+        return {
+            entity,
+            mod: mod.modId,
+            entityClass: className,
+            source: "decompiled source search",
+            note: "These are raw source snippets from createAttributes()/registerAttributes(). Attribute base values are in the method body.",
+            attributeHits: relevant.map(h => ({ file: h.file, line: h.line, text: h.text })),
+        };
+    }
+
+    // ── Vanilla entity lookup ─────────────────────────────────────────────────
     const basePath = "data/minecraft/attribute";
 
     if (entity) {
@@ -728,7 +803,7 @@ export async function getEntityAttributes(entity?: string, version?: string): Pr
                 versionRef(v, "data"),
                 `data/minecraft/attribute/${normalId}.json`,
             );
-            return { version: v, entity: `minecraft:${normalId}`, data };
+            return { version: v, entity: `minecraft:${normalId}`, source: "mcmeta data pack", data };
         } catch { /* fall through to known defaults table */ }
 
         // Known defaults table (most useful for modding)
@@ -770,6 +845,49 @@ export async function getEntityAttributes(entity?: string, version?: string): Pr
                 { id: "minecraft:movement_speed", base: 0.25 },
                 { id: "minecraft:follow_range", base: 16 },
             ],
+            spider: [
+                { id: "minecraft:max_health", base: 16 },
+                { id: "minecraft:movement_speed", base: 0.3 },
+                { id: "minecraft:attack_damage", base: 2 },
+                { id: "minecraft:follow_range", base: 16 },
+                { id: "minecraft:armor", base: 0 },
+            ],
+            enderman: [
+                { id: "minecraft:max_health", base: 40 },
+                { id: "minecraft:movement_speed", base: 0.3 },
+                { id: "minecraft:attack_damage", base: 7 },
+                { id: "minecraft:follow_range", base: 64 },
+                { id: "minecraft:armor", base: 0 },
+            ],
+            blaze: [
+                { id: "minecraft:max_health", base: 20 },
+                { id: "minecraft:movement_speed", base: 0.23 },
+                { id: "minecraft:attack_damage", base: 6 },
+                { id: "minecraft:follow_range", base: 48 },
+            ],
+            witch: [
+                { id: "minecraft:max_health", base: 26 },
+                { id: "minecraft:movement_speed", base: 0.25 },
+                { id: "minecraft:follow_range", base: 16 },
+            ],
+            villager: [
+                { id: "minecraft:max_health", base: 20 },
+                { id: "minecraft:movement_speed", base: 0.5 },
+                { id: "minecraft:follow_range", base: 48 },
+            ],
+            iron_golem: [
+                { id: "minecraft:max_health", base: 100 },
+                { id: "minecraft:movement_speed", base: 0.25 },
+                { id: "minecraft:attack_damage", base: 15 },
+                { id: "minecraft:knockback_resistance", base: 1 },
+            ],
+            wolf: [
+                { id: "minecraft:max_health", base: 8 },
+                { id: "minecraft:movement_speed", base: 0.3 },
+                { id: "minecraft:attack_damage", base: 4 },
+                { id: "minecraft:follow_range", base: 16 },
+                { id: "minecraft:armor", base: 0 },
+            ],
         };
 
         const key = normalId.split("/").pop()!;
@@ -777,21 +895,27 @@ export async function getEntityAttributes(entity?: string, version?: string): Pr
             return { version: v, entity: `minecraft:${normalId}`, source: "built-in defaults", attributes: KNOWN_DEFAULTS[key] };
         }
 
-        return { version: v, entity: `minecraft:${normalId}`, note: "No attribute data file found. For mod entities use get_mod_class_members on the entity class to see registerAttributes() / createAttributes() declarations.", attributes: [] };
+        return {
+            version: v,
+            entity: `minecraft:${normalId}`,
+            note: "No attribute data file found for this entity. For modded entities pass the modId parameter and ensure the mod is decompiled.",
+            tip: "Use get_mc_class_members on the entity class to see createAttributes() declarations.",
+            attributes: [],
+        };
     }
 
-    // List all attribute files
+    // List all vanilla attribute files
     try {
         const entries = await listMcmetaDir(v, "data", basePath);
         const attrs = entries
             .filter(e => e.type === "file" && e.name.endsWith(".json"))
             .map(e => `minecraft:${e.name.replace(".json", "")}`);
-        return { version: v, count: attrs.length, attributes: attrs };
+        return { version: v, source: "mcmeta data pack", count: attrs.length, attributes: attrs };
     } catch {
         return {
             version: v,
             note: "Attribute data folder not present in this version. Use get_mc_class_members on net/minecraft/world/entity/ai/attributes/Attributes to see all registered attributes.",
-            knownEntities: ["player", "zombie", "skeleton", "creeper"],
+            knownEntities: Object.keys({ player: 1, zombie: 1, skeleton: 1, creeper: 1, spider: 1, enderman: 1, blaze: 1, witch: 1, villager: 1, iron_golem: 1, wolf: 1 }),
         };
     }
 }

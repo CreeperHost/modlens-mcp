@@ -136,6 +136,7 @@ fabric-api-versions  --mc-version=1.21.1  --limit=20
 | `find_version_conflicts` | Duplicate modIds in DB + unsatisfied dep version ranges |
 | `get_dependency_graph` | Full requires/requiredBy adjacency list across all mods |
 | `list_mod_source_urls` | Source/GitHub URLs extracted from all ingested mods |
+| `list_mod_registry_entries` | **List entities, items, blocks, enchantments, or effects registered by a mod** — reads lang file from JAR, works without decompilation. `type`: `item` \| `block` \| `entity_type` \| `enchantment` \| `effect` \| `biome` \| `all` |
 
 ### Source & Decompile
 
@@ -157,6 +158,7 @@ fabric-api-versions  --mc-version=1.21.1  --limit=20
 | `find_mod_references` | All classes referencing a given class/method/field |
 | `get_mod_inheritance` | Superclass, interfaces, subclasses |
 | `diff_mod_versions` | Added/removed classes between two mod versions |
+| `find_implementors` | **Find all mod classes extending/implementing a target class or interface** (DB search, requires `reindex_classes`) |
 
 ### Mixin Analysis
 
@@ -188,6 +190,41 @@ fabric-api-versions  --mc-version=1.21.1  --limit=20
 | `find_tag_conflicts` | Hard conflicts (2+ mods with `replace:true`) + soft conflicts (one replacer silences others) |
 | `search_mod_tags` | Substring search across all tag paths |
 
+### Mod JAR Data (Parity with Vanilla Data Tools)
+
+Reads data/asset files directly from a mod JAR — no decompilation needed. Full parity with the vanilla data tools.
+
+| Tool | Vanilla Equivalent | Description |
+|------|-------------------|-------------|
+| `list_mod_jar_files` | `list_mc_data_files` | List all files under a path prefix in the mod JAR |
+| `get_mod_jar_file` | `get_mc_data_file` / `get_mc_asset_file` | Read any file from the mod JAR by internal path |
+| `list_mod_recipes` | `list_recipes` | All recipes shipped in the JAR |
+| `get_mod_recipe` | `get_recipe` | Full JSON for a specific recipe |
+| `list_mod_loot_tables` | `list_loot_tables` | All loot tables |
+| `get_mod_loot_table` | `get_loot_table` | Full JSON for a loot table |
+| `list_mod_advancements` | `list_advancements` | All advancements |
+| `get_mod_advancement` | `get_advancement` | Full JSON for an advancement |
+| `list_mod_blockstates` | _(list)_ | All blockstate files |
+| `get_mod_blockstate` | `get_blockstate` | Blockstate variant/model mapping |
+| `list_mod_models` | _(list)_ | All model JSON files |
+| `get_mod_model` | `get_mc_model` | Model JSON from the JAR |
+| `list_mod_biomes` | `list_biomes` | All worldgen biomes |
+| `get_mod_biome` | `get_biome` | Full JSON for a biome |
+| `list_mod_structures` | `list_structures` | All worldgen structures |
+| `get_mod_structure_data` | `get_structure_data` | Full JSON for a worldgen structure |
+| `get_mod_lang` | `get_lang_entries` | Translation strings with optional filter |
+| `get_mod_sounds` | `get_mc_sounds` | sounds.json — all registered sound events |
+| `list_mod_data_tags` | `get_mc_tags` | Data-pack tag files; filter by registry |
+| `get_mod_data_tag` | `get_mc_tags` | Entries for a specific tag |
+| `list_mod_particles` | `get_mc_particles` | All particle description files |
+| `get_mod_particle` | `get_particle_data` | Description JSON for a specific particle |
+| `list_mod_damage_types` | `list_damage_types` | All damage type data files |
+| `get_mod_damage_type` | _(get)_ | Full JSON for a damage type |
+| `get_mod_atlas` | `get_mc_atlas` | Texture atlas JSON |
+| `list_mod_enchantments` | `list_enchantments` | Enchantment data files (1.21+; use `list_mod_registry_entries` for older mods) |
+| `get_mod_enchantment` | `get_enchantment` | Full JSON for an enchantment |
+| `list_mod_registry_entries` | `get_mc_registry_entries` | Items/blocks/entities/effects from lang file — works without decompilation |
+
 ### Gradle Analysis
 
 | Tool | Description |
@@ -215,6 +252,7 @@ fabric-api-versions  --mc-version=1.21.1  --limit=20
 | `decompile_minecraft_version_status` | Check decompile progress |
 | `get_minecraft_source` | Browse/read decompiled MC source |
 | `search_minecraft_code` | Grep decompiled MC source |
+| `search_events` | **Find Event subclasses** in decompiled MC source; optional name filter (`Living`, `Player`, etc.) |
 | `search_minecraft_class` | Find an MC class by name |
 | `search_mc_indexed` | Full-text search across indexed MC classes |
 | `get_mc_class_members` | Methods + fields for an MC class |
@@ -236,11 +274,13 @@ fabric-api-versions  --mc-version=1.21.1  --limit=20
 | `find_tags_for_entry` | Which tags contain a given registry entry |
 | `get_recipe` | Recipe JSON by id |
 | `list_recipes` | All recipes, filter by type/result |
+| `find_recipes_for_item` | **Reverse recipe lookup** — find all recipes whose output is a given item |
 | `get_loot_table` | Loot table JSON |
 | `list_loot_tables` | All loot tables |
 | `get_lang_entries` | Translation strings |
 | `get_blockstate` | Blockstate definition |
 | `get_mc_model` | Block/item model JSON |
+| `get_model_tree` | **Full model parent chain** — follows all `parent` refs, returns merged texture map |
 | `get_mc_atlas` | Texture atlas JSON |
 | `get_biome` | Biome JSON data |
 | `list_biomes` | All biomes |
@@ -249,11 +289,18 @@ fabric-api-versions  --mc-version=1.21.1  --limit=20
 | `list_enchantments` | All enchantments |
 | `get_advancement` | Advancement JSON |
 | `list_advancements` | All advancements |
+| `list_structures` | **All vanilla worldgen structures** (`data/minecraft/worldgen/structure/`) |
+| `get_structure_data` | **Full JSON for a worldgen structure** |
+| `get_mc_particles` | **List all vanilla particle types** |
+| `get_particle_data` | **Description JSON for a specific particle** |
+| `get_entity_attributes` | **Default attributes for vanilla or modded entities** — mcmeta data pack, built-in table, or decompiled source search for modded |
 | `get_mc_blocks` | Block registry |
 | `get_mc_commands` | Command tree |
 | `get_mc_item_components` | Item component schemas |
 | `get_mc_registries` | All MC registries |
-| `get_mc_registry_entries` | Entries for a registry |
+| `get_mc_registry_entries` | Entries for any registry (block, item, entity_type, biome, …) |
+| `list_mc_entities` | **All vanilla entity types** — shortcut for `get_mc_registry_entries(entity_type)` |
+| `list_mc_items` | **All vanilla items** — shortcut for `get_mc_registry_entries(item)` |
 | `get_mc_sounds` | Sound event list |
 | `get_mc_asset_file` | Raw asset file from MC jar |
 | `get_mc_data_file` | Raw data file from MC jar |

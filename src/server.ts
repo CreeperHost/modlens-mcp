@@ -3,7 +3,23 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { ingestMod, decompileMod, decompileModStatus, reindexClasses, batchIngest } from "./tools/ingest.js";
-import { listMods, getModDetails, searchMods, getDbStats, getDependencies, findVersionConflicts, getDependencyGraph, listModSourceUrls } from "./tools/catalog.js";
+import { listMods, getModDetails, searchMods, getDbStats, getDependencies, findVersionConflicts, getDependencyGraph, listModSourceUrls, listModRegistryEntries } from "./tools/catalog.js";
+import {
+    listModJarFiles, getModJarFile,
+    listModRecipes, getModRecipe,
+    listModLootTables, getModLootTable,
+    listModAdvancements, getModAdvancement,
+    getModBlockstate, listModBlockstates,
+    getModModel, listModModels,
+    listModBiomes, getModBiome,
+    listModStructures, getModStructureData,
+    getModLang, getModSounds,
+    listModDataTags, getModDataTag,
+    listModParticles, getModParticle,
+    listModDamageTypes, getModDamageType,
+    getModAtlas,
+    listModEnchantments, getModEnchantment,
+} from "./tools/mod-data.js";
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
 import {
     searchModClass, getModClassMembers, getModClassBytecode,
@@ -1011,6 +1027,30 @@ server.tool(
 );
 
 server.tool(
+    "list_mc_entities",
+    "List all vanilla Minecraft entity types from the entity_type registry. Shortcut for get_mc_registry_entries with registry='entity_type'.",
+    {
+        version: z.string().optional().describe("MC version ID. Omit for latest."),
+    },
+    async ({ version }) => {
+        const result = await getRegistryEntries("entity_type", version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mc_items",
+    "List all vanilla Minecraft items from the item registry. Shortcut for get_mc_registry_entries with registry='item'.",
+    {
+        version: z.string().optional().describe("MC version ID. Omit for latest."),
+    },
+    async ({ version }) => {
+        const result = await getRegistryEntries("item", version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
     "get_mcmeta_raw",
     "Fetch any raw file from misode/mcmeta by specifying the full git ref and file path. Useful for branches/paths not covered by other tools.",
     {
@@ -1440,13 +1480,29 @@ server.tool(
 
 server.tool(
     "get_entity_attributes",
-    "List default attributes for a vanilla entity type, or list all known attribute data files. entity: e.g. 'player', 'zombie'. Omit to list all.",
+    "Get default attributes for a vanilla or modded entity. Vanilla: reads mcmeta data pack or built-in defaults table. Modded: searches decompiled source for createAttributes() — requires mod to be decompiled first.",
     {
-        entity:  z.string().optional().describe("Entity id, e.g. 'player', 'zombie', 'minecraft:skeleton'"),
-        version: z.string().optional().describe("MC version (default 26.1.2)"),
+        entity:  z.string().optional().describe("Entity id — 'player', 'zombie', 'mymod:my_creature'. Omit to list all vanilla attribute files."),
+        version: z.string().optional().describe("MC version (default 26.1.2, for vanilla lookups)"),
+        modId:   z.union([z.string(), z.number()]).optional().describe("Mod ID or numeric DB id for modded entity attribute lookup"),
     },
-    async ({ entity, version }) => {
-        const result = await getEntityAttributes(entity, version);
+    async ({ entity, version, modId }) => {
+        const result = await getEntityAttributes(entity, version, modId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_registry_entries",
+    "List entities, items, blocks, enchantments, or effects registered by a mod. Reads the mod's en_us.json lang file from the JAR — works without decompilation. type: 'item' | 'block' | 'entity_type' | 'enchantment' | 'effect' | 'biome' | 'all'.",
+    {
+        modId:  z.union([z.string(), z.number()]).describe("Mod ID string (e.g. 'mythicmounts') or numeric DB id"),
+        type:   z.enum(["item", "block", "entity_type", "enchantment", "effect", "biome", "all"]).optional().describe("Registry type to filter (default 'all')"),
+        filter: z.string().optional().describe("Optional name/display filter substring"),
+        limit:  z.number().optional().describe("Max entries returned (default 200)"),
+    },
+    async ({ modId, type, filter, limit }) => {
+        const result = await listModRegistryEntries(modId, type as "item" | "block" | "entity_type" | "enchantment" | "effect" | "biome" | "all", filter, limit);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
 );
@@ -1692,6 +1748,385 @@ server.tool(
     },
     async ({ query }) => {
         const result = await listModSourceUrls(query);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+// ── Mod JAR data/asset file access (parity with vanilla data tools) ───────────
+
+server.tool(
+    "list_mod_jar_files",
+    "List all files inside a mod JAR under an optional path prefix. Useful for exploring what data pack / resource pack content a mod ships.",
+    {
+        modId:  z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        prefix: z.string().optional().describe("Path prefix to scope listing, e.g. 'data/mymod/', 'assets/mymod/blockstates/'"),
+    },
+    async ({ modId, prefix }) => {
+        const result = await listModJarFiles(modId, prefix);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_jar_file",
+    "Read any file from a mod JAR by its internal path. Returns parsed JSON for .json files, raw text otherwise.",
+    {
+        modId: z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        path:  z.string().describe("Internal JAR path, e.g. 'data/mymod/recipe/iron_sword.json'"),
+    },
+    async ({ modId, path }) => {
+        const result = await getModJarFile(modId, path);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_recipes",
+    "List all recipes a mod ships in its JAR (data/<ns>/recipe/). Returns namespace:id pairs.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search (default: mod's own namespace)"),
+        filter:    z.string().optional().describe("Substring filter on recipe path"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModRecipes(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_recipe",
+    "Get the full JSON for a specific mod recipe. id: e.g. 'mymod:iron_sword' or just 'iron_sword'.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        id:        z.string().describe("Recipe id, e.g. 'mymod:iron_sword' or 'iron_sword'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, id, namespace }) => {
+        const result = await getModRecipe(modId, id, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_loot_tables",
+    "List all loot tables a mod ships in its JAR.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModLootTables(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_loot_table",
+    "Get the full JSON for a specific mod loot table.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        id:        z.string().describe("Loot table id, e.g. 'mymod:entities/my_mob'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, id, namespace }) => {
+        const result = await getModLootTable(modId, id, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_advancements",
+    "List all advancements a mod ships in its JAR.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModAdvancements(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_advancement",
+    "Get the full JSON for a specific mod advancement.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        id:        z.string().describe("Advancement id, e.g. 'mymod:my_advancement'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, id, namespace }) => {
+        const result = await getModAdvancement(modId, id, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_blockstates",
+    "List all blockstate files a mod ships (assets/<ns>/blockstates/).",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModBlockstates(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_blockstate",
+    "Get the blockstate JSON for a mod block — shows variant definitions and model path mappings.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        block:     z.string().describe("Block id, e.g. 'mymod:my_block' or just 'my_block'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, block, namespace }) => {
+        const result = await getModBlockstate(modId, block, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_models",
+    "List all model JSON files a mod ships (assets/<ns>/models/).",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter, e.g. 'block/' or 'item/'"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModModels(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_model",
+    "Get a model JSON from a mod JAR. modelPath: e.g. 'block/my_block', 'item/my_item', or 'mymod:block/my_block'.",
+    {
+        modId:      z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        modelPath:  z.string().describe("Model path, e.g. 'block/my_block' or 'mymod:item/my_item'"),
+        namespace:  z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, modelPath, namespace }) => {
+        const result = await getModModel(modId, modelPath, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_biomes",
+    "List all worldgen biomes a mod ships (data/<ns>/worldgen/biome/).",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModBiomes(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_biome",
+    "Get the full JSON for a mod worldgen biome.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        id:        z.string().describe("Biome id, e.g. 'mymod:my_biome'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, id, namespace }) => {
+        const result = await getModBiome(modId, id, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_structures",
+    "List all worldgen structures a mod ships (data/<ns>/worldgen/structure/).",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModStructures(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_structure_data",
+    "Get the full JSON for a mod worldgen structure.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        id:        z.string().describe("Structure id, e.g. 'mymod:my_dungeon'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, id, namespace }) => {
+        const result = await getModStructureData(modId, id, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_lang",
+    "Get translation strings from a mod's en_us.json. Supports substring filter on key or value.",
+    {
+        modId:  z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        filter: z.string().optional().describe("Substring filter on key or translated value"),
+        limit:  z.number().optional().describe("Max entries returned (default 200)"),
+    },
+    async ({ modId, filter, limit }) => {
+        const result = await getModLang(modId, filter, limit);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_sounds",
+    "Get the sounds.json for a mod — lists all registered sound events and their file mappings.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, namespace }) => {
+        const result = await getModSounds(modId, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_data_tags",
+    "List data-pack tag files shipped by a mod (data/<ns>/tags/). Filter by registry (item/block/entity_type/etc.) and/or substring.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        registry:  z.string().optional().describe("Tag registry folder, e.g. 'item', 'block', 'entity_type'"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter on tag path"),
+    },
+    async ({ modId, registry, namespace, filter }) => {
+        const result = await listModDataTags(modId, registry, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_data_tag",
+    "Get the entries JSON for a specific data-pack tag from a mod JAR.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        registry:  z.string().describe("Tag registry, e.g. 'item', 'block', 'entity_type'"),
+        id:        z.string().describe("Tag id, e.g. 'mymod:my_tag'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, registry, id, namespace }) => {
+        const result = await getModDataTag(modId, registry, id, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_particles",
+    "List all particle description files a mod ships (assets/<ns>/particles/).",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModParticles(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_particle",
+    "Get the description JSON for a specific mod particle type.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        id:        z.string().describe("Particle id, e.g. 'mymod:my_particle'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, id, namespace }) => {
+        const result = await getModParticle(modId, id, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_damage_types",
+    "List all damage type data files a mod ships (data/<ns>/damage_type/).",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModDamageTypes(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_damage_type",
+    "Get the full JSON for a mod damage type.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        id:        z.string().describe("Damage type id, e.g. 'mymod:my_damage'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, id, namespace }) => {
+        const result = await getModDamageType(modId, id, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_atlas",
+    "Get a texture atlas JSON from a mod JAR (assets/<ns>/atlases/<atlas>.json).",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        atlas:     z.string().optional().describe("Atlas name, e.g. 'blocks' (default), 'armor_trims'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, atlas, namespace }) => {
+        const result = await getModAtlas(modId, atlas, namespace);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_mod_enchantments",
+    "List enchantment data files a mod ships (data/<ns>/enchantment/). Note: older mods register enchantments in code — use list_mod_registry_entries with type='enchantment' as a fallback.",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        namespace: z.string().optional().describe("Namespace to scope search"),
+        filter:    z.string().optional().describe("Substring filter"),
+    },
+    async ({ modId, namespace, filter }) => {
+        const result = await listModEnchantments(modId, namespace, filter);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mod_enchantment",
+    "Get the full JSON for a mod enchantment data file (1.21+ data-driven enchantments).",
+    {
+        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        id:        z.string().describe("Enchantment id, e.g. 'mymod:my_enchant'"),
+        namespace: z.string().optional().describe("Namespace override"),
+    },
+    async ({ modId, id, namespace }) => {
+        const result = await getModEnchantment(modId, id, namespace);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
 );

@@ -1,4 +1,5 @@
 import { db } from "../db.js";
+import { extractEntry, listEntries } from "../jar.js";
 import type { Mod } from "@prisma/client";
 
 export async function listMods(opts: {
@@ -233,5 +234,108 @@ export async function listModSourceUrls(query?: string): Promise<object> {
 
     const withSource = results.filter((r) => r.sourceUrl);
     return { total: results.length, withSourceUrl: withSource.length, mods: results };
+}
+
+// ── Mod registry listing via lang files ────────────────────────────────────────
+// Lang keys follow the pattern <type>.<modid>.<name>, e.g. item.mymod.my_sword
+// We read the JAR's lang file to enumerate what a mod registers.
+
+type RegistryType = "item" | "block" | "entity_type" | "enchantment" | "effect" | "biome" | "all";
+
+interface ModRegistryEntry {
+    id: string;         // e.g. "mymod:my_sword"
+    displayName: string; // from lang file
+    langKey: string;    // raw key, e.g. "item.mymod.my_sword"
+}
+
+/** Read a mod's en_us.json and return registry entries filtered by type. */
+export async function listModRegistryEntries(
+    modId: string | number,
+    type: RegistryType = "all",
+    filter?: string,
+    limit = 200,
+): Promise<object> {
+    // Resolve mod
+    const mod = typeof modId === "number"
+        ? await db().mod.findUnique({ where: { id: modId } })
+        : await db().mod.findFirst({ where: { modId: { contains: modId } } });
+
+    if (!mod) return { error: `Mod not found: ${modId}` };
+
+    // Find lang file inside JAR — try common locations
+    const langCandidates = [
+        `assets/${mod.modId}/lang/en_us.json`,
+        `assets/${mod.modId}/lang/en_US.json`,
+    ];
+
+    let lang: Record<string, string> | null = null;
+    for (const path of langCandidates) {
+        const buf = extractEntry(mod.jarPath, path);
+        if (buf) {
+            try { lang = JSON.parse(buf.toString("utf8")); break; } catch { /* skip */ }
+        }
+    }
+
+    // Also try listing all lang files in case the modid folder differs
+    if (!lang) {
+        const allLang = listEntries(mod.jarPath, "assets/").filter(e => e.endsWith("/lang/en_us.json") || e.endsWith("/lang/en_US.json"));
+        for (const path of allLang) {
+            const buf = extractEntry(mod.jarPath, path);
+            if (buf) {
+                try { lang = JSON.parse(buf.toString("utf8")); break; } catch { /* skip */ }
+            }
+        }
+    }
+
+    if (!lang) {
+        return { mod: mod.modId, error: "No en_us.json lang file found in JAR.", jarPath: mod.jarPath };
+    }
+
+    // Key prefixes for each type
+    const PREFIX_MAP: Record<RegistryType, string[]> = {
+        item:        ["item."],
+        block:       ["block."],
+        entity_type: ["entity."],
+        enchantment: ["enchantment."],
+        effect:      ["effect."],
+        biome:       ["biome."],
+        all:         [],
+    };
+
+    const prefixes = PREFIX_MAP[type] ?? [];
+
+    const entries: ModRegistryEntry[] = [];
+    const filterLower = filter?.toLowerCase();
+
+    for (const [key, value] of Object.entries(lang)) {
+        // Type filter
+        if (prefixes.length > 0 && !prefixes.some(p => key.startsWith(p))) continue;
+        // Text filter
+        if (filterLower && !key.toLowerCase().includes(filterLower) && !value.toLowerCase().includes(filterLower)) continue;
+
+        // Convert lang key to registry id: "item.mymod.my_sword" → "mymod:my_sword"
+        const parts = key.split(".");
+        let registryId = key;
+        if (parts.length >= 3) {
+            // parts[0] = type prefix (item/block/entity/...)
+            // parts[1] = namespace
+            // parts[2..] = path (dots become underscores in registry, but keep as-is in id)
+            registryId = `${parts[1]}:${parts.slice(2).join(".")}`;
+        }
+
+        entries.push({ id: registryId, displayName: value, langKey: key });
+        if (entries.length >= limit) break;
+    }
+
+    return {
+        mod: mod.modId,
+        displayName: mod.displayName,
+        version: mod.version,
+        type,
+        filter: filter ?? "(none)",
+        count: entries.length,
+        note: entries.length === limit ? `Results capped at ${limit}. Use filter to narrow.` : undefined,
+        entries,
+    };
 }
 
