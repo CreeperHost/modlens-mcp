@@ -286,6 +286,13 @@ export async function getRegistryEntries(registry: string, version?: string): Pr
             return { version: version ?? "latest", registry, path: p, data };
         } catch { continue; }
     }
+    // Fall back to summary registries/data.json (same as getMcRegistries)
+    try {
+        const summaryRef = versionRef(version, "summary");
+        const summaryData = await fetchMcmetaJson<Record<string, unknown>>(summaryRef, "registries/data.json");
+        const entry = summaryData[registry] ?? summaryData[`minecraft:${registry}`];
+        if (entry) return { version: version ?? "latest", registry, source: "summary", data: entry };
+    } catch { /* ignore */ }
     return { version: version ?? "latest", registry, found: false, tried: paths };
 }
 
