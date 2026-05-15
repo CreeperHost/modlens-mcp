@@ -603,3 +603,66 @@ export async function analyzeMixin(source: string, mcVersion: string) {
         shadowResults,
     };
 }
+
+/**
+ * Search decompiled Minecraft (or NeoForge) source for Event subclasses.
+ * Returns class names + file paths for all classes that extend a known Event base.
+ *
+ * query: optional name filter, e.g. "Living", "Player", "Block"
+ * modloader: "neoforge" searches NeoForge-specific events (needs NeoForge ingested + decompiled)
+ *            "minecraft" (default) searches vanilla source for event-like classes
+ */
+export async function searchEvents(
+    version: string,
+    query?: string,
+    modloader: "minecraft" | "neoforge" = "minecraft",
+): Promise<object> {
+    // Event base class patterns per loader
+    const eventBases = modloader === "neoforge"
+        ? ["net.neoforged.bus.api.Event", "net.minecraftforge.eventbus.api.Event"]
+        : ["net.minecraft.server.level.progress", "net.minecraft.world.level"];
+
+    const outDir = mcPaths.decompiled(version);
+    const status = await isDecompileDone(outDir);
+    if (status !== "done") {
+        throw new Error(
+            `MC ${version} source not decompiled. Run decompile_minecraft_version first.`
+        );
+    }
+
+    // Search for classes extending Event-like bases using content search
+    const eventPattern = modloader === "neoforge"
+        ? `extends\\s+(\\w+\\.)*Event\\b`
+        : `extends\\s+(\\w+\\.)*Event\\b`;
+
+    const results = await searchMcCode(
+        version,
+        query
+            ? `class ${query}[\\w]* extends [\\w.]*Event`
+            : `extends [\\w.]*Event\\b`,
+        "content",
+        true,  // isRegex
+        200,
+    );
+
+    // Deduplicate by file
+    const seen = new Set<string>();
+    const events: Array<{ className: string; file: string; line: number }> = [];
+    for (const r of results) {
+        if (!seen.has(r.file)) {
+            seen.add(r.file);
+            // Extract class name from file path (e.g. net/minecraft/something/FooEvent.java)
+            const parts = r.file.replace(/\.java$/, "").split("/");
+            events.push({ className: parts.join("."), file: r.file, line: r.line });
+        }
+    }
+
+    return {
+        version,
+        modloader,
+        query: query ?? "(all events)",
+        count: events.length,
+        note: eventBases.map(b => `extends ${b}`).join(" | "),
+        events,
+    };
+}

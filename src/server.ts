@@ -7,7 +7,7 @@ import { listMods, getModDetails, searchMods, getDbStats, getDependencies, findV
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
 import {
     searchModClass, getModClassMembers, getModClassBytecode,
-    findModReferences, getModInheritance, diffModVersions,
+    findModReferences, getModInheritance, diffModVersions, findImplementors,
 } from "./tools/bytecode.js";
 import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets } from "./tools/mixins.js";
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources } from "./tools/platform.js";
@@ -16,7 +16,7 @@ import {
     searchMinecraftClass, getMinecraftSource, getMcClassBytecode, getMcClassMembers,
     findMcReferences, getMcInheritance, diffMcVersions,
     decompileMcVersion, decompileMcVersionStatus, searchMcCode,
-    validateAccessWidener, analyzeMixin,
+    validateAccessWidener, analyzeMixin, searchEvents,
 } from "./tools/vanilla.js";
 import { indexMcVersion, searchMcIndexed } from "./tools/mc-fts.js";
 import { findMapping, remapModJar, getParchment, listParchmentVersions, getParchmentSummary } from "./tools/mappings.js";
@@ -31,14 +31,17 @@ import {
 } from "./tools/primers.js";
 import {
     getMcTags, findTagsForEntry,
-    listRecipes, getRecipe,
+    listRecipes, getRecipe, findRecipesForItem,
     listLootTables, getLootTable,
     getLangEntries,
-    getBlockstate, getMcModel,
+    getBlockstate, getMcModel, getModelTree,
     listBiomes, getBiome,
     listDamageTypes,
     listEnchantments, getEnchantment,
     listAdvancements, getAdvancement,
+    listStructures, getStructureData,
+    getMcParticles, getParticleData,
+    getEntityAttributes,
 } from "./tools/vanilla-data.js";
 import {
     indexModTags, indexAllModTags, listTagNamespaces, getTagContributors,
@@ -1355,6 +1358,123 @@ server.tool(
     },
     async ({ id, version }) => {
         const result = await getAdvancement(version, id);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "find_recipes_for_item",
+    "Find all vanilla recipes whose output contains a given item. Reverse lookup from item → recipes.",
+    {
+        item:    z.string().describe("Item id, e.g. 'iron_ingot' or 'minecraft:iron_ingot'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ item, version }) => {
+        const result = await findRecipesForItem(item, version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_model_tree",
+    "Resolve the full block/item model inheritance chain, following 'parent' references until a builtin or root model is reached. Returns each model's JSON plus merged texture map.",
+    {
+        modelPath: z.string().describe("Model path, e.g. 'block/stone', 'item/diamond_sword'"),
+        version:   z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ modelPath, version }) => {
+        const result = await getModelTree(modelPath, version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "list_structures",
+    "List all vanilla worldgen structures (data/minecraft/worldgen/structure/*.json).",
+    {
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ version }) => {
+        const result = await listStructures(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_structure_data",
+    "Get the full JSON for a vanilla worldgen structure. id: e.g. 'minecraft:village_plains', 'bastion_remnant'.",
+    {
+        id:      z.string().describe("Structure id, e.g. 'village_plains' or 'minecraft:bastion_remnant'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ id, version }) => {
+        const result = await getStructureData(id, version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_mc_particles",
+    "List all vanilla particle types. Returns particle ids from the assets/minecraft/particles/ directory.",
+    {
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ version }) => {
+        const result = await getMcParticles(version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_particle_data",
+    "Get the description JSON for a specific vanilla particle type. id: e.g. 'dust', 'explosion'.",
+    {
+        id:      z.string().describe("Particle id, e.g. 'dust' or 'minecraft:dust'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ id, version }) => {
+        const result = await getParticleData(id, version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "get_entity_attributes",
+    "List default attributes for a vanilla entity type, or list all known attribute data files. entity: e.g. 'player', 'zombie'. Omit to list all.",
+    {
+        entity:  z.string().optional().describe("Entity id, e.g. 'player', 'zombie', 'minecraft:skeleton'"),
+        version: z.string().optional().describe("MC version (default 26.1.2)"),
+    },
+    async ({ entity, version }) => {
+        const result = await getEntityAttributes(entity, version);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "find_implementors",
+    "Find all mod classes in the DB that extend or implement a given class or interface. Requires reindex_classes to have run.",
+    {
+        target: z.string().describe("Class name (slash or dot notation), e.g. 'net/minecraft/world/entity/Entity' or 'net.neoforged.neoforge.common.extensions.IEntityExtension'"),
+        modId:  z.union([z.string(), z.number()]).optional().describe("Limit to a specific mod (id or numeric DB id)"),
+        limit:  z.number().optional().describe("Max results per category (default 100)"),
+    },
+    async ({ target, modId, limit }) => {
+        const result = await findImplementors(target, modId, limit);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+);
+
+server.tool(
+    "search_events",
+    "Search decompiled Minecraft source for Event subclasses. Requires decompile_minecraft_version to have run first.",
+    {
+        version:    z.string().describe("MC version, e.g. '26.1.2'"),
+        query:      z.string().optional().describe("Optional name filter, e.g. 'Living', 'Player', 'Block'"),
+        modloader:  z.enum(["minecraft", "neoforge"]).optional().describe("Source to search (default 'minecraft')"),
+    },
+    async ({ version, query, modloader }) => {
+        const result = await searchEvents(version, query, modloader as "minecraft" | "neoforge" | undefined);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
 );

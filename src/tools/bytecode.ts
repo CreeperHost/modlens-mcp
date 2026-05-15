@@ -132,3 +132,63 @@ export async function diffModVersions(dbIdA: number, dbIdB: number) {
         removed,
     };
 }
+
+/**
+ * Find all mod classes in the DB that extend or implement a given class or interface.
+ * Uses the modClass table (superClass + interfaces columns) — requires reindex_classes to have run.
+ *
+ * target: internal slash-separated name, e.g. "net/minecraft/world/entity/Entity"
+ *         or dot-separated, e.g. "net.minecraft.world.entity.Entity"
+ * modId: optional filter to a specific mod
+ */
+export async function findImplementors(
+    target: string,
+    modId?: string | number,
+    limit = 100,
+): Promise<object> {
+    const internal = target.replace(/\./g, "/");
+
+    let modDbId: number | undefined;
+    if (modId !== undefined) {
+        if (typeof modId === "number") {
+            modDbId = modId;
+        } else {
+            const mod = await db().mod.findFirst({ where: { modId: { contains: modId } }, select: { id: true } });
+            if (!mod) return { error: `Mod not found: ${modId}` };
+            modDbId = mod.id;
+        }
+    }
+
+    // Find classes that directly extend the target
+    const bySuper = await db().modClass.findMany({
+        where: {
+            superClass: internal,
+            ...(modDbId ? { modId: modDbId } : {}),
+        },
+        include: { mod: { select: { modId: true, displayName: true, version: true } } },
+        take: limit,
+    });
+
+    // Find classes that implement the target as an interface
+    const byInterface = await db().modClass.findMany({
+        where: {
+            interfaces: { has: internal },
+            ...(modDbId ? { modId: modDbId } : {}),
+        },
+        include: { mod: { select: { modId: true, displayName: true, version: true } } },
+        take: limit,
+    });
+
+    const format = (cls: typeof bySuper[0]) => ({
+        className: cls.className,
+        mod: cls.mod.modId,
+        modDisplay: cls.mod.displayName,
+        version: cls.mod.version,
+    });
+
+    return {
+        target: internal,
+        directSubclasses: { count: bySuper.length, classes: bySuper.map(format) },
+        implementors:     { count: byInterface.length, classes: byInterface.map(format) },
+    };
+}

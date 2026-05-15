@@ -570,3 +570,228 @@ export async function getAdvancement(version?: string, id?: string): Promise<obj
         return { version: v, id, error: String(err) };
     }
 }
+
+// ── Reverse recipe lookup ─────────────────────────────────────────────────────
+
+/**
+ * Find all recipes whose result/output contains the given item.
+ * item: e.g. "iron_ingot", "minecraft:iron_ingot"
+ */
+export async function findRecipesForItem(item: string, version?: string): Promise<object> {
+    const v = version ?? "26.1.2";
+    return listRecipes(v, undefined, item);
+}
+
+// ── Block/item model tree ─────────────────────────────────────────────────────
+
+type ModelJson = { parent?: string; textures?: Record<string, string>; elements?: unknown[]; display?: unknown; overrides?: unknown[] };
+
+/**
+ * Resolve the full model JSON inheritance chain for a block or item model.
+ * Follows parent references until a model with no parent (or a builtin) is reached.
+ * modelPath: e.g. "block/stone", "item/diamond_sword"
+ */
+export async function getModelTree(modelPath: string, version?: string): Promise<object> {
+    const v = version ?? "26.1.2";
+    const chain: Array<{ path: string; data: ModelJson }> = [];
+    const visited = new Set<string>();
+
+    let current = modelPath.replace(/^minecraft:/, "");
+    // Normalise — add block/ prefix if bare id with no slash
+    if (!current.includes("/")) current = `block/${current}`;
+
+    while (current && !visited.has(current)) {
+        visited.add(current);
+        const filePath = `assets/minecraft/models/${current}.json`;
+        try {
+            const data = await fetchMcmetaJson<ModelJson>(versionRef(v, "assets-json"), filePath);
+            chain.push({ path: current, data });
+            const parent = data.parent?.replace(/^minecraft:/, "");
+            if (!parent || parent.startsWith("builtin/")) break;
+            current = parent;
+        } catch {
+            chain.push({ path: current, data: { parent: undefined }, });
+            break;
+        }
+    }
+
+    // Merge textures up the chain (child wins)
+    const mergedTextures: Record<string, string> = {};
+    for (const node of [...chain].reverse()) {
+        Object.assign(mergedTextures, node.data.textures ?? {});
+    }
+
+    return { version: v, modelPath, chainLength: chain.length, mergedTextures, chain };
+}
+
+// ── Worldgen: structures ──────────────────────────────────────────────────────
+
+/**
+ * List all vanilla worldgen structures.
+ * category: optionally scope to a sub-folder (most structures are flat, so usually omit)
+ */
+export async function listStructures(version?: string): Promise<object> {
+    const v = version ?? "26.1.2";
+    const basePath = "data/minecraft/worldgen/structure";
+    try {
+        const entries = await listMcmetaDir(v, "data", basePath);
+        const structures = entries
+            .filter(e => e.type === "file" && e.name.endsWith(".json"))
+            .map(e => `minecraft:${e.name.replace(".json", "")}`);
+        return { version: v, count: structures.length, structures };
+    } catch (err) {
+        return { version: v, error: String(err) };
+    }
+}
+
+/**
+ * Get the full JSON for a vanilla worldgen structure.
+ * id: e.g. "minecraft:village_plains", "bastion_remnant"
+ */
+export async function getStructureData(id: string, version?: string): Promise<object> {
+    const v = version ?? "26.1.2";
+    const normalId = id.replace("minecraft:", "");
+    try {
+        const data = await fetchMcmetaJson<unknown>(
+            versionRef(v, "data"),
+            `data/minecraft/worldgen/structure/${normalId}.json`,
+        );
+        return { version: v, structure: `minecraft:${normalId}`, data };
+    } catch (err) {
+        return { version: v, structure: id, error: String(err) };
+    }
+}
+
+// ── Particles ─────────────────────────────────────────────────────────────────
+
+/**
+ * List all vanilla particle types registered in the particle registry.
+ * Returns both the registry entry names and the particle description JSONs
+ * where available (assets/minecraft/particles/<id>.json).
+ */
+export async function getMcParticles(version?: string): Promise<object> {
+    const v = version ?? "26.1.2";
+    // Particle descriptions live in assets branch
+    const basePath = "assets/minecraft/particles";
+    try {
+        const entries = await listMcmetaDir(v, "assets-json", basePath);
+        const particles = entries
+            .filter(e => e.type === "file" && e.name.endsWith(".json"))
+            .map(e => `minecraft:${e.name.replace(".json", "")}`);
+        return { version: v, count: particles.length, particles };
+    } catch {
+        // Fall back to registry summary from mc-registries-style data
+        return { version: v, note: "Particle description files not available for this version. Use get_mc_registry_entries with registry=particle_type.", particles: [] };
+    }
+}
+
+/**
+ * Get the description JSON for a specific particle type.
+ * id: e.g. "minecraft:dust", "explosion"
+ */
+export async function getParticleData(id: string, version?: string): Promise<object> {
+    const v = version ?? "26.1.2";
+    const normalId = id.replace("minecraft:", "");
+    try {
+        const data = await fetchMcmetaJson<unknown>(
+            versionRef(v, "assets-json"),
+            `assets/minecraft/particles/${normalId}.json`,
+        );
+        return { version: v, particle: `minecraft:${normalId}`, data };
+    } catch (err) {
+        return { version: v, particle: id, error: String(err) };
+    }
+}
+
+// ── Entity attributes ─────────────────────────────────────────────────────────
+
+/**
+ * List the default attributes registered for vanilla entity types.
+ * Reads from the entity_type registry data and cross-references attribute
+ * data files where available. Falls back to known MC default table.
+ *
+ * entity: e.g. "minecraft:zombie", "player" — omit to list all
+ */
+export async function getEntityAttributes(entity?: string, version?: string): Promise<object> {
+    const v = version ?? "26.1.2";
+
+    // MC stores default attributes in data/minecraft/attribute/
+    // and entity-type-specific spawn attributes in data/minecraft/chat_type nearby.
+    // The canonical source is the attributes/ data pack folder (added in 1.21).
+    const basePath = "data/minecraft/attribute";
+
+    if (entity) {
+        const normalId = entity.replace("minecraft:", "");
+        // Try direct attribute file for entity
+        try {
+            const data = await fetchMcmetaJson<unknown>(
+                versionRef(v, "data"),
+                `data/minecraft/attribute/${normalId}.json`,
+            );
+            return { version: v, entity: `minecraft:${normalId}`, data };
+        } catch { /* fall through to known defaults table */ }
+
+        // Known defaults table (most useful for modding)
+        const KNOWN_DEFAULTS: Record<string, Array<{ id: string; base: number; min?: number; max?: number }>> = {
+            player: [
+                { id: "minecraft:max_health", base: 20 },
+                { id: "minecraft:movement_speed", base: 0.1 },
+                { id: "minecraft:attack_damage", base: 1 },
+                { id: "minecraft:attack_speed", base: 4 },
+                { id: "minecraft:armor", base: 0 },
+                { id: "minecraft:armor_toughness", base: 0 },
+                { id: "minecraft:knockback_resistance", base: 0 },
+                { id: "minecraft:luck", base: 0 },
+                { id: "minecraft:max_absorption", base: 0 },
+                { id: "minecraft:follow_range", base: 32 },
+                { id: "minecraft:safe_fall_distance", base: 3 },
+                { id: "minecraft:fall_damage_multiplier", base: 1 },
+                { id: "minecraft:jump_strength", base: 0.42 },
+                { id: "minecraft:scale", base: 1 },
+            ],
+            zombie: [
+                { id: "minecraft:max_health", base: 20 },
+                { id: "minecraft:movement_speed", base: 0.23 },
+                { id: "minecraft:attack_damage", base: 3 },
+                { id: "minecraft:follow_range", base: 35 },
+                { id: "minecraft:armor", base: 0 },
+                { id: "minecraft:knockback_resistance", base: 0 },
+                { id: "minecraft:spawn_reinforcements_chance", base: 0.1 },
+            ],
+            skeleton: [
+                { id: "minecraft:max_health", base: 20 },
+                { id: "minecraft:movement_speed", base: 0.25 },
+                { id: "minecraft:attack_damage", base: 2 },
+                { id: "minecraft:follow_range", base: 35 },
+                { id: "minecraft:armor", base: 0 },
+            ],
+            creeper: [
+                { id: "minecraft:max_health", base: 20 },
+                { id: "minecraft:movement_speed", base: 0.25 },
+                { id: "minecraft:follow_range", base: 16 },
+            ],
+        };
+
+        const key = normalId.split("/").pop()!;
+        if (KNOWN_DEFAULTS[key]) {
+            return { version: v, entity: `minecraft:${normalId}`, source: "built-in defaults", attributes: KNOWN_DEFAULTS[key] };
+        }
+
+        return { version: v, entity: `minecraft:${normalId}`, note: "No attribute data file found. For mod entities use get_mod_class_members on the entity class to see registerAttributes() / createAttributes() declarations.", attributes: [] };
+    }
+
+    // List all attribute files
+    try {
+        const entries = await listMcmetaDir(v, "data", basePath);
+        const attrs = entries
+            .filter(e => e.type === "file" && e.name.endsWith(".json"))
+            .map(e => `minecraft:${e.name.replace(".json", "")}`);
+        return { version: v, count: attrs.length, attributes: attrs };
+    } catch {
+        return {
+            version: v,
+            note: "Attribute data folder not present in this version. Use get_mc_class_members on net/minecraft/world/entity/ai/attributes/Attributes to see all registered attributes.",
+            knownEntities: ["player", "zombie", "skeleton", "creeper"],
+        };
+    }
+}
