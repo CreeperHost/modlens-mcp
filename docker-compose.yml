@@ -19,5 +19,27 @@ services:
       timeout: 5s
       retries: 10
 
+  # Optional Ollama container for semantic search.
+  # Start with:  docker compose --profile semantic up -d
+  # Or use the setup wizard:  npm run setup
+  ollama:
+    image: ollama/ollama
+    container_name: modlens-ollama
+    profiles: ["semantic"]
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - modlens-ollama:/root/.ollama
+    # GPU passthrough (uncomment if you have an NVIDIA GPU + nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
 volumes:
   modlens-pgdata:
+  modlens-ollama:

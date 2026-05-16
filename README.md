@@ -52,7 +52,17 @@ docker compose down -v
 git clone https://github.com/Mattabase/modlens-mcp
 cd modlens-mcp
 npm install
+npm run build
 
+# Interactive setup wizard — handles Docker, Ollama, schema, MCP config:
+npm run setup
+```
+
+The wizard will ask about semantic search (Ollama), start the containers, apply the schema, optionally seed docs/primers, and write your MCP client config. Run it again any time to reconfigure.
+
+**Manual setup (if you prefer):**
+
+```bash
 # 1. Start PostgreSQL
 docker compose up -d
 

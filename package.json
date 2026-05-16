@@ -8,6 +8,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/server.js",
+    "setup": "npm run build && node dist/setup.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "prisma generate",
@@ -18,6 +19,7 @@
     "db:studio": "prisma studio"
   },
   "dependencies": {
+    "@clack/prompts": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.10.0",
     "@prisma/client": "^6.0.0",
     "adm-zip": "^0.5.16",
