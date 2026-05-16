@@ -21,10 +21,12 @@ vi.mock("../processor.js", () => ({
 vi.mock("../modrinth.js", () => ({
     lookupBySha512: vi.fn(),
     getProject:     vi.fn(),
+    modrinthPlatformAdapter: { name: "modrinth",   lookup: vi.fn().mockResolvedValue(null) },
 }));
 
 vi.mock("../curseforge.js", () => ({
     lookupByFingerprint: vi.fn(),
+    curseforgePlatformAdapter: { name: "curseforge", lookup: vi.fn().mockResolvedValue(null) },
 }));
 
 vi.mock("../java-tools.js", () => ({
@@ -92,6 +94,8 @@ beforeEach(() => {
     vi.mocked(mr.lookupBySha512).mockResolvedValue(null);
     vi.mocked(mr.getProject).mockResolvedValue(null);
     vi.mocked(cf.lookupByFingerprint).mockResolvedValue(null);
+    vi.mocked(mr.modrinthPlatformAdapter.lookup).mockResolvedValue(null);
+    vi.mocked(cf.curseforgePlatformAdapter.lookup).mockResolvedValue(null);
     vi.mocked(jt.indexJar).mockResolvedValue({ classes: {} } as any);
 });
 
@@ -168,14 +172,12 @@ describe("ingestMod — ingested (happy path)", () => {
 
 describe("ingestMod — platform lookups", () => {
     it("calls updateMod with modrinthId when Modrinth returns a match", async () => {
-        vi.mocked(mr.lookupBySha512).mockResolvedValue({
-            project_id: "mr-abc-123",
-        } as any);
-        vi.mocked(mr.getProject).mockResolvedValue({
-            id: "mr-abc-123",
+        vi.mocked(mr.modrinthPlatformAdapter.lookup).mockResolvedValue({
+            platform: "modrinth",
+            projectId: "mr-abc-123",
             slug: "test-mod",
-            source_url: "https://github.com/example/testmod",
-        } as any);
+            sourceUrl: "https://github.com/example/testmod",
+        });
 
         await ingestMod("/mods/testmod.jar");
 
@@ -186,11 +188,12 @@ describe("ingestMod — platform lookups", () => {
     });
 
     it("calls updateMod with curseforgeId when CurseForge returns a match", async () => {
-        vi.mocked(cf.lookupByFingerprint).mockResolvedValue({
-            id: 99999,
+        vi.mocked(cf.curseforgePlatformAdapter.lookup).mockResolvedValue({
+            platform: "curseforge",
+            projectId: 99999,
             slug: "testmod",
-            links: { sourceUrl: "https://github.com/example/testmod" },
-        } as any);
+            sourceUrl: "https://github.com/example/testmod",
+        });
 
         await ingestMod("/mods/testmod.jar");
 
@@ -203,13 +206,13 @@ describe("ingestMod — platform lookups", () => {
     it("skipSource=true skips all platform lookups", async () => {
         await ingestMod("/mods/testmod.jar", /* skipSource= */ true);
 
-        expect(mr.lookupBySha512).not.toHaveBeenCalled();
-        expect(cf.lookupByFingerprint).not.toHaveBeenCalled();
+        expect(mr.modrinthPlatformAdapter.lookup).not.toHaveBeenCalled();
+        expect(cf.curseforgePlatformAdapter.lookup).not.toHaveBeenCalled();
     });
 
     it("continues ingesting even if both platform lookups fail", async () => {
-        vi.mocked(mr.lookupBySha512).mockRejectedValue(new Error("Modrinth down"));
-        vi.mocked(cf.lookupByFingerprint).mockRejectedValue(new Error("CurseForge down"));
+        vi.mocked(mr.modrinthPlatformAdapter.lookup).mockRejectedValue(new Error("Modrinth down"));
+        vi.mocked(cf.curseforgePlatformAdapter.lookup).mockRejectedValue(new Error("CurseForge down"));
 
         const result = await ingestMod("/mods/testmod.jar");
 
