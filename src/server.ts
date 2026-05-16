@@ -77,8 +77,10 @@ import {
     getModGradleFiles, searchGradleFiles, compareGradleDeps,
 } from "./tools/gradle.js";
 import { generateReport } from "./tools/reports.js";
-import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog } from "./tools/packtools.js";
+import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog, findDataConflicts } from "./tools/packtools.js";
 import { indexKubeJsScripts, searchKubeJsScripts } from "./tools/kubejs.js";
+import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
+import { checkModCompat } from "./tools/compat-check.js";
 import { disconnect } from "./db.js";
 
 // Load .env
@@ -951,20 +953,22 @@ server.tool(
     "action=sidedness: determine whether a single mod is client_only / client_optional / common / server_only (modId). " +
     "action=pack_sidedness: classify ALL mods in the DB by sidedness in one pass (mcVersion, loader). " +
     "action=complexity: compute class/mixin/AT/AW complexity score per mod \u2014 ranked list for perf/crash triage (mcVersion, loader). " +
-    "action=pack_changelog: diff two pack snapshots by DB id lists \u2014 added/removed/updated mods (oldIds, newIds).",
+    "action=pack_changelog: diff two pack snapshots by DB id lists \u2014 added/removed/updated mods (oldIds, newIds). " +
+    "action=data_conflicts: find data/ paths (recipes, loot_tables, advancements, etc.) shipped by 2+ mods \u2014 last-loaded mod silently wins (dataType, mcVersion, loader, limit).",
     {
-        action:      z.enum(["asset_conflicts","vanilla_overrides","sidedness","pack_sidedness","complexity","pack_changelog"]).describe("Operation to perform"),
+        action:      z.enum(["asset_conflicts","vanilla_overrides","sidedness","pack_sidedness","complexity","pack_changelog","data_conflicts"]).describe("Operation to perform"),
         modId:       z.union([z.string(), z.number()]).optional().describe("Mod to analyse (sidedness)"),
         assetType:   z.enum(["textures","models","sounds","blockstates","shaders","all"]).optional().describe("Asset sub-folder filter (asset_conflicts)"),
+        dataType:    z.enum(["recipe","loot_tables","advancements","tags","structures","all"]).optional().describe("Data sub-folder filter (data_conflicts)"),
         overrideType:z.enum(["data","assets","all"]).optional().describe("Override type filter (vanilla_overrides)"),
         dataSubtype: z.string().optional().describe("Data subfolder, e.g. 'recipes', 'loot_tables', 'advancements' (vanilla_overrides)"),
         mcVersion:   z.string().optional().describe("MC version filter"),
         loader:      z.string().optional().describe("Loader filter (neoforge|forge|fabric|quilt)"),
         oldIds:      z.array(z.number()).optional().describe("Old pack snapshot DB ids (pack_changelog)"),
         newIds:      z.array(z.number()).optional().describe("New pack snapshot DB ids (pack_changelog)"),
-        limit:       z.number().optional().describe("Max conflicts returned (asset_conflicts, default 300)"),
+        limit:       z.number().optional().describe("Max conflicts returned (asset_conflicts, data_conflicts, default 300)"),
     },
-    async ({ action, modId, assetType, overrideType, dataSubtype, mcVersion, loader, oldIds, newIds, limit }) => {
+    async ({ action, modId, assetType, dataType, overrideType, dataSubtype, mcVersion, loader, oldIds, newIds, limit }) => {
         let result: unknown;
         switch (action) {
             case "asset_conflicts":   result = await findAssetConflicts(assetType, mcVersion, loader, limit); break;
@@ -973,6 +977,7 @@ server.tool(
             case "pack_sidedness":    result = await analyzePackSidedness(mcVersion, loader); break;
             case "complexity":        result = await computeModComplexity(mcVersion, loader); break;
             case "pack_changelog":    result = await computePackChangelog(oldIds!, newIds!); break;
+            case "data_conflicts":    result = await findDataConflicts(dataType, mcVersion, loader, limit); break;
         }
         return out(result);
     }
@@ -997,6 +1002,65 @@ server.tool(
             case "index":  result = await indexKubeJsScripts(scriptsDir); break;
             case "search": result = await searchKubeJsScripts(scriptsDir, query!, limit); break;
         }
+        return out(result);
+    }
+);
+
+// ── 22. analyze_crash_log ────────────────────────────────────────────────────
+
+server.tool(
+    "analyze_crash_log",
+    "Paste a NeoForge/Forge/Fabric crash log and get a ranked list of suspect mods. " +
+    "Cross-references stack frames against the ModClass index (populated by reindex_classes). " +
+    "Also extracts the '-- Mod List --' section when present. " +
+    "Returns suspects ranked by frame count, recognized/unrecognized frame counts, and a coverage warning if the class index is sparse.",
+    {
+        logText: z.string().describe("Full text of the crash report or log snippet"),
+    },
+    async ({ logText }) => {
+        const result = await analyzeCrashLog(logText);
+        return out(result);
+    }
+);
+
+// ── 23. find_missing_deps ────────────────────────────────────────────────────
+
+server.tool(
+    "find_missing_deps",
+    "Find declared mod dependencies that are not satisfied by any ingested mod in the DB. " +
+    "Reads the dependencies JSON column from all mods, collects the full ingested modId set, " +
+    "and flags any referenced modId that is absent. " +
+    "Skips loader-level pseudo-deps (minecraft, neoforge, forge, fabric-api, java, etc.).",
+    {
+        mcVersion: z.string().optional().describe("Filter checked mods to this MC version"),
+        loader:    z.string().optional().describe("Filter checked mods to this loader (neoforge|forge|fabric|quilt)"),
+    },
+    async ({ mcVersion, loader }) => {
+        const result = await findMissingDeps(mcVersion, loader);
+        return out(result);
+    }
+);
+
+// ── 24. check_mod_compat ──────────────────────────────────────────────────────
+
+server.tool(
+    "check_mod_compat",
+    "Pre-flight compatibility check for a candidate mod JAR before adding it to a pack. " +
+    "Does NOT require the JAR to be ingested first. " +
+    "Checks against all mods currently in the DB for: " +
+    "(1) mixin target conflicts (error), " +
+    "(2) Access Transformer/Widener overlaps (error), " +
+    "(3) asset path conflicts (warn), " +
+    "(4) missing declared dependencies (warn), " +
+    "(5) sidedness info (client_only/server_only). " +
+    "Returns issues[], summary.safe (true if no errors), and candidate metadata.",
+    {
+        jarPath:   z.string().describe("Absolute path to the candidate mod JAR"),
+        mcVersion: z.string().optional().describe("Filter comparison pool to this MC version"),
+        loader:    z.string().optional().describe("Filter comparison pool to this loader (neoforge|forge|fabric|quilt)"),
+    },
+    async ({ jarPath, mcVersion, loader }) => {
+        const result = await checkModCompat(jarPath, mcVersion, loader);
         return out(result);
     }
 );

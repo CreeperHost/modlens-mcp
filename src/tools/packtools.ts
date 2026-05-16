@@ -370,3 +370,81 @@ export async function computePackChangelog(
         updated,
     };
 }
+
+// ── Data conflict detection ────────────────────────────────────────────────────
+
+/**
+ * Scan all mod JARs in the DB for duplicate data resource paths.
+ * When two mods ship the same data/ path, the last-loaded mod silently wins.
+ *
+ * dataType: filter to specific data sub-folder
+ *   (recipe | loot_tables | advancements | tags | structures | all)
+ * mcVersion / loader: optional DB filters
+ * limit: max conflicts to return (default 300)
+ */
+export async function findDataConflicts(
+    dataType?: string,
+    mcVersion?: string,
+    loader?: string,
+    limit = 300,
+): Promise<object> {
+    const mods = await listModsSlim({ mcVersion, loader });
+
+    const typeFilter = dataType && dataType !== "all" ? dataType : null;
+    const pathMap = new Map<string, Array<{ mod: string; display: string }>>();
+
+    for (const mod of mods) {
+        try {
+            const entries = listEntries(mod.jarPath, "data/");
+            for (const entry of entries) {
+                if (entry.endsWith("/")) continue;
+                if (typeFilter && !entry.includes(`/${typeFilter}/`)) continue;
+                const list = pathMap.get(entry) ?? [];
+                list.push({ mod: mod.modId, display: mod.displayName });
+                pathMap.set(entry, list);
+            }
+        } catch { /* skip unreadable JARs */ }
+    }
+
+    const conflicts: Array<{
+        path: string;
+        isVanillaOverride: boolean;
+        modCount: number;
+        mods: Array<{ mod: string; display: string }>;
+    }> = [];
+
+    for (const [path, owners] of pathMap) {
+        if (owners.length < 2) continue;
+        conflicts.push({
+            path,
+            isVanillaOverride: path.startsWith("data/minecraft/"),
+            modCount: owners.length,
+            mods: owners,
+        });
+    }
+
+    conflicts.sort((a, b) => b.modCount - a.modCount);
+
+    const capped = conflicts.length > limit;
+    const limited = conflicts.slice(0, limit);
+
+    // byType breakdown: data/<namespace>/<type>/... → parts[2]
+    const byType: Record<string, number> = {};
+    for (const c of limited) {
+        const parts = c.path.split("/");
+        const t = parts[2] ?? "unknown";
+        byType[t] = (byType[t] ?? 0) + 1;
+    }
+
+    const vanillaOverrideConflicts = limited.filter((c) => c.isVanillaOverride).length;
+
+    return {
+        modsScanned: mods.length,
+        totalConflicts: limited.length,
+        capped,
+        byType,
+        vanillaOverrideConflicts,
+        note: capped ? `Results capped at ${limit}. Use dataType or loader/mcVersion to narrow.` : "",
+        conflicts: limited,
+    };
+}
