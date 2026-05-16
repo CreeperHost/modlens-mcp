@@ -25,9 +25,9 @@ import { getModSource, searchSource, decompileModClass } from "./tools/source.js
 import {
     searchModClass, getModClassMembers, getModClassBytecode,
     findModReferences, getModInheritance, diffModVersions, findImplementors,
-    scanModRegistrations,
+    scanModRegistrations, findAnnotatedClasses,
 } from "./tools/bytecode.js";
-import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets } from "./tools/mixins.js";
+import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets, getMixinsTargetingPackage } from "./tools/mixins.js";
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources } from "./tools/platform.js";
 import { listMcVersions, listNeoForgeVersions, listFabricApiVersions, downloadNeoForge, downloadFabricApi } from "./platform.js";
 import {
@@ -179,20 +179,23 @@ server.tool(
     "action=find_refs: find all classes referencing a class/method/field (dbId, target). " +
     "action=inheritance: superclass, interfaces, subclasses, implementors (dbId, className). " +
     "action=diff: added/removed classes between two mod versions (dbIdA, dbIdB). " +
-    "action=find_implementors: find mod classes across DB that extend/implement a target (target, modId, limit). " +
-    "action=scan_registrations: scan all classes for registration patterns — DeferredRegister, @SubscribeEvent, commands, keybindings, network payloads, config builders, capabilities, loot modifiers (dbId).",
+    "action=find_implementors: find mod classes across DB that extend/implement a target (target, modId, limit, transitive). Set transitive=true to walk the full inheritance chain. " +
+    "action=scan_registrations: scan all classes for registration patterns — DeferredRegister, @SubscribeEvent, commands, keybindings, network payloads, config builders, capabilities, loot modifiers (dbId). " +
+    "action=annotated_by: find all classes across the DB annotated with a given annotation, e.g. @SubscribeEvent, @EventBusSubscriber (annotation, modId, limit). Works without decompilation.",
     {
-        action:    z.enum(["search_class","class_members","bytecode","find_refs","inheritance","diff","find_implementors","scan_registrations"]).describe("Operation to perform"),
+        action:     z.enum(["search_class","class_members","bytecode","find_refs","inheritance","diff","find_implementors","scan_registrations","annotated_by"]).describe("Operation to perform"),
         dbId:      z.number().optional().describe("DB id of mod (most actions)"),
         dbIdA:     z.number().optional().describe("Older mod DB id (diff)"),
         dbIdB:     z.number().optional().describe("Newer mod DB id (diff)"),
         query:     z.string().optional().describe("Class name query (search_class)"),
         className: z.string().optional().describe("Internal class name slashes/dots (class_members, bytecode, inheritance)"),
         target:    z.string().optional().describe("Class/method/field reference (find_refs, find_implementors). Format: 'com/example/MyClass' or 'com/example/MyClass:myMethod:(I)V'"),
-        modId:     z.union([z.string(), z.number()]).optional().describe("Limit find_implementors to a specific mod"),
-        limit:     z.number().optional().describe("Max results (find_implementors)"),
+        annotation:z.string().optional().describe("Annotation class name, slash or dot form (annotated_by), e.g. 'net/neoforged/bus/api/SubscribeEvent'"),
+        modId:     z.union([z.string(), z.number()]).optional().describe("Limit find_implementors / annotated_by to a specific mod"),
+        transitive:z.boolean().optional().describe("Walk full inheritance chain (find_implementors, default false)"),
+        limit:     z.number().optional().describe("Max results (find_implementors, annotated_by)"),
     },
-    async ({ action, dbId, dbIdA, dbIdB, query, className, target, modId, limit }) => {
+    async ({ action, dbId, dbIdA, dbIdB, query, className, target, annotation, modId, transitive, limit }) => {
         let result: unknown;
         switch (action) {
             case "search_class":     result = await searchModClass(dbId!, query!); break;
@@ -201,8 +204,9 @@ server.tool(
             case "find_refs":        result = await findModReferences(dbId!, target!); break;
             case "inheritance":      result = await getModInheritance(dbId!, className!); break;
             case "diff":             result = await diffModVersions(dbIdA!, dbIdB!); break;
-            case "find_implementors":result = await findImplementors(target!, modId, limit); break;
+            case "find_implementors":result = await findImplementors(target!, modId, limit, transitive); break;
             case "scan_registrations": result = await scanModRegistrations(dbId!); break;
+            case "annotated_by":     result = await findAnnotatedClasses(annotation!, modId, limit); break;
         }
         return out(result);
     }
@@ -216,22 +220,26 @@ server.tool(
     "action=targets: list Minecraft classes a mod injects into via @Mixin (modId). " +
     "action=resolve: read @Mixin bytecode annotations to discover actual target classes and update DB (dbId). " +
     "action=conflicts: find all mods in DB injecting into the same MC class (targetClass). " +
+    "action=targets_in_package: find all mods whose mixin targets fall under a given package prefix (packagePrefix, mcVersion optional). " +
     "action=at_entries: NeoForge/Forge Access Transformer entries for a mod (dbId). " +
     "action=aw_entries: Fabric/Quilt Access Widener entries for a mod (dbId).",
     {
-        action:      z.enum(["targets","resolve","conflicts","at_entries","aw_entries"]).describe("Operation to perform"),
-        modId:       z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (targets)"),
-        dbId:        z.number().optional().describe("DB integer id (resolve, at_entries, aw_entries)"),
-        targetClass: z.string().optional().describe("Internal class name (conflicts), e.g. 'net/minecraft/world/entity/LivingEntity'"),
+        action:        z.enum(["targets","resolve","conflicts","targets_in_package","at_entries","aw_entries"]).describe("Operation to perform"),
+        modId:         z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (targets)"),
+        dbId:          z.number().optional().describe("DB integer id (resolve, at_entries, aw_entries)"),
+        targetClass:   z.string().optional().describe("Internal class name (conflicts), e.g. 'net/minecraft/world/entity/LivingEntity'"),
+        packagePrefix: z.string().optional().describe("Package prefix for targets_in_package, slash or dot form, e.g. 'net/minecraft/world/level' or 'net.minecraft.world.entity'"),
+        mcVersion:     z.string().optional().describe("Filter by MC version (targets_in_package)"),
     },
-    async ({ action, modId, dbId, targetClass }) => {
+    async ({ action, modId, dbId, targetClass, packagePrefix, mcVersion }) => {
         let result: unknown;
         switch (action) {
-            case "targets":   result = await getMixinTargets(modId!); break;
-            case "resolve":   result = await resolveMixinTargets(dbId!); break;
-            case "conflicts": result = await getMixinConflicts(targetClass!); break;
-            case "at_entries":result = await getAtEntries(dbId!); break;
-            case "aw_entries":result = await getAwEntries(dbId!); break;
+            case "targets":            result = await getMixinTargets(modId!); break;
+            case "resolve":            result = await resolveMixinTargets(dbId!); break;
+            case "conflicts":          result = await getMixinConflicts(targetClass!); break;
+            case "targets_in_package": result = await getMixinsTargetingPackage(packagePrefix!, mcVersion); break;
+            case "at_entries":         result = await getAtEntries(dbId!); break;
+            case "aw_entries":         result = await getAwEntries(dbId!); break;
         }
         return out(result);
     }

@@ -145,6 +145,7 @@ export async function findImplementors(
     target: string,
     modId?: string | number,
     limit = 100,
+    transitive = false,
 ): Promise<object> {
     const internal = target.replace(/\./g, "/");
 
@@ -159,37 +160,119 @@ export async function findImplementors(
         }
     }
 
-    // Find classes that directly extend the target
-    const bySuper = await db().modClass.findMany({
-        where: {
-            superClass: internal,
-            ...(modDbId ? { modId: modDbId } : {}),
-        },
-        include: { mod: { select: { modId: true, displayName: true, version: true } } },
-        take: limit,
+    const where = (superClass?: string, iface?: string) => ({
+        ...(superClass !== undefined ? { superClass } : {}),
+        ...(iface !== undefined ? { interfaces: { has: iface } } : {}),
+        ...(modDbId ? { modId: modDbId } : {}),
     });
 
-    // Find classes that implement the target as an interface
-    const byInterface = await db().modClass.findMany({
-        where: {
-            interfaces: { has: internal },
-            ...(modDbId ? { modId: modDbId } : {}),
-        },
-        include: { mod: { select: { modId: true, displayName: true, version: true } } },
-        take: limit,
-    });
+    const fetchDirect = async (t: string) => {
+        const [bySuper, byIface] = await Promise.all([
+            db().modClass.findMany({ where: where(t, undefined), include: { mod: { select: { modId: true, displayName: true, version: true } } }, take: limit }),
+            db().modClass.findMany({ where: where(undefined, t), include: { mod: { select: { modId: true, displayName: true, version: true } } }, take: limit }),
+        ]);
+        return [...bySuper, ...byIface];
+    };
 
-    const format = (cls: typeof bySuper[0]) => ({
+    const format = (cls: Awaited<ReturnType<typeof fetchDirect>>[0]) => ({
         className: cls.className,
         mod: cls.mod.modId,
         modDisplay: cls.mod.displayName,
         version: cls.mod.version,
     });
 
+    if (!transitive) {
+        const direct = await fetchDirect(internal);
+        const bySuper = direct.filter(c => c.superClass === internal);
+        const byIface = direct.filter(c => c.interfaces.includes(internal));
+        return {
+            target: internal,
+            transitive: false,
+            directSubclasses: { count: bySuper.length, classes: bySuper.map(format) },
+            implementors:     { count: byIface.length, classes: byIface.map(format) },
+        };
+    }
+
+    // BFS transitive walk
+    const visited = new Set<string>([internal]);
+    const queue = [internal];
+    const allFound: Awaited<ReturnType<typeof fetchDirect>> = [];
+
+    while (queue.length > 0 && allFound.length < limit) {
+        const current = queue.shift()!;
+        const found = await fetchDirect(current);
+        for (const cls of found) {
+            if (!visited.has(cls.className)) {
+                visited.add(cls.className);
+                allFound.push(cls);
+                queue.push(cls.className);
+            }
+        }
+    }
+
     return {
         target: internal,
-        directSubclasses: { count: bySuper.length, classes: bySuper.map(format) },
-        implementors:     { count: byInterface.length, classes: byInterface.map(format) },
+        transitive: true,
+        count: allFound.length,
+        note: allFound.length >= limit ? `Capped at ${limit}. Use filter or increase limit.` : undefined,
+        classes: allFound.map(format),
+    };
+}
+
+// ── Annotation search ──────────────────────────────────────────────────────────
+
+/**
+ * Find all classes across the DB annotated with a given annotation.
+ * Annotations appear in the JAR index references map the same way class references do —
+ * any class that uses @MyAnnotation will have the annotation class in its reference list.
+ * This works without decompilation.
+ *
+ * annotation: internal slash-separated name, e.g. "net/neoforged/bus/api/SubscribeEvent"
+ *             or dot-separated: "net.neoforged.bus.api.SubscribeEvent"
+ * modId: optional — limit to one mod
+ * limit: max results per mod (default 200 total)
+ */
+export async function findAnnotatedClasses(
+    annotation: string,
+    modId?: string | number,
+    limit = 200,
+): Promise<object> {
+    const internal = annotation.replace(/\./g, "/");
+
+    let mods;
+    if (modId !== undefined) {
+        const mod = typeof modId === "number"
+            ? await db().mod.findUnique({ where: { id: modId }, select: { id: true, modId: true, displayName: true, version: true, jarPath: true } })
+            : await db().mod.findFirst({ where: { modId: { contains: String(modId) } }, select: { id: true, modId: true, displayName: true, version: true, jarPath: true } });
+        if (!mod) return { error: `Mod not found: ${modId}` };
+        mods = [mod];
+    } else {
+        mods = await db().mod.findMany({ select: { id: true, modId: true, displayName: true, version: true, jarPath: true } });
+    }
+
+    const results: Array<{ mod: string; modDisplay: string; version: string; classes: string[] }> = [];
+    let total = 0;
+
+    for (const mod of mods) {
+        if (total >= limit) break;
+        try {
+            const index = await indexJar(mod.jarPath);
+            const refs = index.references[internal] ?? [];
+            if (refs.length > 0) {
+                results.push({ mod: mod.modId, modDisplay: mod.displayName, version: mod.version, classes: refs });
+                total += refs.length;
+            }
+        } catch {
+            // skip mods whose JARs can't be indexed
+        }
+    }
+
+    return {
+        annotation: internal,
+        totalMods: results.length,
+        totalClasses: total,
+        note: total >= limit ? `Capped at ${limit} total. Narrow with modId.` : undefined,
+        results,
     };
 }
 

@@ -159,3 +159,53 @@ export async function getAwEntries(dbId: number) {
         awEntries: mod.awEntries,
     };
 }
+
+/**
+ * Find all mods whose mixinTargets contain a class in the given package (or subpackage).
+ * packagePrefix: slash-separated, e.g. "net/minecraft/world/level" or "net/minecraft/world/entity"
+ * mcVersion: optional filter
+ */
+export async function getMixinsTargetingPackage(packagePrefix: string, mcVersion?: string) {
+    const prefix = packagePrefix.replace(/\./g, "/").replace(/\/$/, "");
+
+    const mods = await db().mod.findMany({
+        where: {
+            hasMixins: true,
+            ...(mcVersion ? { mcVersion } : {}),
+        },
+        select: {
+            id: true,
+            modId: true,
+            displayName: true,
+            version: true,
+            mcVersion: true,
+            loader: true,
+            mixinTargets: true,
+        },
+    });
+
+    const results: Array<{ modId: string; displayName: string; version: string; mcVersion: string; loader: string; matchingTargets: string[] }> = [];
+
+    for (const mod of mods) {
+        const targets = mod.mixinTargets as string[];
+        const matching = targets.filter(t => t === prefix || t.startsWith(prefix + "/"));
+        if (matching.length > 0) {
+            results.push({
+                modId: mod.modId,
+                displayName: mod.displayName,
+                version: mod.version,
+                mcVersion: mod.mcVersion,
+                loader: mod.loader,
+                matchingTargets: matching,
+            });
+        }
+    }
+
+    return {
+        packagePrefix: prefix,
+        mcVersion: mcVersion ?? "(all)",
+        totalMods: results.length,
+        totalTargets: results.reduce((n, r) => n + r.matchingTargets.length, 0),
+        mods: results,
+    };
+}
