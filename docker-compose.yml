@@ -28,7 +28,7 @@ services:
     profiles: ["semantic"]
     restart: unless-stopped
     ports:
-      - "11434:11434"
+      - "11435:11434"
     volumes:
       - modlens-ollama:/root/.ollama
     # GPU passthrough (uncomment if you have an NVIDIA GPU + nvidia-container-toolkit):

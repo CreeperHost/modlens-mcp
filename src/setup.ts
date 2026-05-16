@@ -490,6 +490,11 @@ let wantSemantic: boolean = !!existingEnv.OLLAMA_URL;
 let ollamaUrl: string = existingEnv.OLLAMA_URL ?? "http://localhost:11434";
 let embedModel: string = existingEnv.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
 let ollamaMode: string = "skip"; // "docker" | "local" | "remote" | "skip"
+const DOCKER_OLLAMA_URL = "http://localhost:11435";
+const MODEL_DIMS: Record<string, string> = {
+    "nomic-embed-text":  "768",
+    "mxbai-embed-large": "1024",
+};
 
 if (sections.has("semantic")) {
     const answer = await p.confirm({
@@ -510,6 +515,7 @@ if (sections.has("semantic")) {
         });
         checkCancel(mode);
         ollamaMode = mode as string;
+        if (ollamaMode === "docker") ollamaUrl = DOCKER_OLLAMA_URL;
 
         if (ollamaMode === "remote") {
             const existingRemote = existingEnv.OLLAMA_URL?.startsWith("http://localhost") ||
@@ -549,9 +555,11 @@ if (sections.has("semantic")) {
     }
 } else if (wantSemantic) {
     // Semantic not reconfigured — infer ollamaMode from existing URL for container startup
-    ollamaMode = existingEnv.OLLAMA_URL?.startsWith("http://localhost") || existingEnv.OLLAMA_URL?.startsWith("http://127")
-        ? "docker"   // assume Docker-managed; --profile semantic is idempotent
-        : "remote";  // remote Ollama — don't need to start local container
+    ollamaMode = existingEnv.OLLAMA_URL === DOCKER_OLLAMA_URL
+        ? "docker"   // Docker-managed modlens-ollama on port 11435
+        : existingEnv.OLLAMA_URL?.startsWith("http://localhost") || existingEnv.OLLAMA_URL?.startsWith("http://127")
+            ? "local"    // local Ollama install
+            : "remote";  // remote Ollama — don't need to start local container
 }
 
 // ── Start Docker containers ───────────────────────────────────────────────────
@@ -630,8 +638,9 @@ if (sections.has("semantic") || sections.has("containers") || !isReconfigure) {
     const env: Record<string, string> = {
         DATABASE_URL: existingEnv.DATABASE_URL ?? "postgresql://modlens:modlens@localhost:5433/modlens",
         ...(wantSemantic ? {
-            OLLAMA_URL:        ollamaUrl,
+            OLLAMA_URL:         ollamaUrl,
             OLLAMA_EMBED_MODEL: embedModel,
+            OLLAMA_EMBED_DIM:   MODEL_DIMS[embedModel] ?? existingEnv.OLLAMA_EMBED_DIM ?? "768",
         } : {}),
     };
     if (existingEnv.CURSEFORGE_API_KEY) env.CURSEFORGE_API_KEY = existingEnv.CURSEFORGE_API_KEY;
@@ -759,7 +768,11 @@ if (sections.has("mcp")) {
     const serverPath = join(ROOT, "dist", "server.js").replace(/\\/g, "/");
     const envVars: Record<string, string> = {
         DATABASE_URL: existingEnv.DATABASE_URL ?? "postgresql://modlens:modlens@localhost:5433/modlens",
-        ...(wantSemantic ? { OLLAMA_URL: ollamaUrl, OLLAMA_EMBED_MODEL: embedModel } : {}),
+        ...(wantSemantic ? {
+            OLLAMA_URL:         ollamaUrl,
+            OLLAMA_EMBED_MODEL: embedModel,
+            OLLAMA_EMBED_DIM:   MODEL_DIMS[embedModel] ?? existingEnv.OLLAMA_EMBED_DIM ?? "768",
+        } : {}),
     };
 
     const vscodeEntry = { type: "stdio", command: "node", args: [serverPath], env: envVars };

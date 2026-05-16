@@ -28,13 +28,34 @@ async function main() {
     await prisma.$executeRawUnsafe(`CREATE EXTENSION IF NOT EXISTS vector`);
     console.log("✓ pgvector extension enabled");
 
-    // 2. Add embedding columns
-    const dim = process.env.OLLAMA_EMBED_DIM ?? "768";
+    // 2. Add or resize embedding columns
+    const dim = parseInt(process.env.OLLAMA_EMBED_DIM ?? "768", 10);
     for (const table of ["doc_entries", "primers", "mc_source_files"]) {
-        await prisma.$executeRawUnsafe(
-            `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS embedding vector(${dim})`
+        // Check existing column dimension (atttypmod = dimension for pgvector)
+        const rows = await prisma.$queryRawUnsafe(
+            `SELECT atttypmod AS dim FROM pg_attribute
+             JOIN pg_class ON pg_attribute.attrelid = pg_class.oid
+             WHERE pg_class.relname = $1 AND pg_attribute.attname = 'embedding' AND pg_attribute.attnum > 0`,
+            table
         );
-        console.log(`✓ ${table}.embedding column ready (dim=${dim})`);
+        const currentDim = Array.isArray(rows) && rows.length > 0 ? Number(rows[0].dim) : null;
+
+        if (currentDim === null) {
+            await prisma.$executeRawUnsafe(
+                `ALTER TABLE ${table} ADD COLUMN embedding vector(${dim})`
+            );
+            console.log(`✓ ${table}.embedding added (dim=${dim})`);
+        } else if (currentDim !== dim) {
+            // Drop the HNSW index first — ALTER TYPE fails if index exists
+            const idxName = `${table}_embedding_idx`;
+            await prisma.$executeRawUnsafe(`DROP INDEX IF EXISTS ${idxName}`);
+            await prisma.$executeRawUnsafe(
+                `ALTER TABLE ${table} ALTER COLUMN embedding TYPE vector(${dim})`
+            );
+            console.log(`✓ ${table}.embedding resized ${currentDim} → ${dim}`);
+        } else {
+            console.log(`  ${table}.embedding already vector(${dim}) — skipping`);
+        }
     }
 
     // 3. HNSW indexes for fast approximate nearest-neighbour
