@@ -518,3 +518,278 @@ export async function findEventListeners(
         results,
     };
 }
+
+// ── Optional mod integration detection ────────────────────────────────────────
+
+// Patterns that indicate conditional/optional mod integrations in bytecode
+const OPTIONAL_INTEGRATION_PATTERNS: Record<string, string[]> = {
+    "modloaded_check": [
+        "net/neoforged/fml/ModList",
+        "net/minecraftforge/fml/ModList",
+        "net/fabricmc/loader/api/FabricLoader",
+    ],
+    "optional_interface": [
+        "net/minecraftforge/fml/common/Optional$Interface",
+        "net/minecraftforge/fml/common/Optional$Method",
+    ],
+    "services_integration": [
+        "java/util/ServiceLoader",
+    ],
+    "capability_integration": [
+        "net/neoforged/neoforge/capabilities/Capabilities",
+        "net/minecraftforge/common/capabilities/ForgeCapabilities",
+    ],
+    "curios_integration": [
+        "top/theillusivec4/curios/api/CuriosApi",
+        "top/theillusivec4/curios/api/SlotContext",
+    ],
+    "jei_integration": [
+        "mezz/jei/api/IModPlugin",
+        "mezz/jei/api/registration/IRecipeRegistration",
+    ],
+    "jade_integration": [
+        "snownee/jade/api/IWailaPlugin",
+        "snownee/jade/api/BlockAccessor",
+    ],
+    "rei_integration": [
+        "me/shedaniel/rei/api/common/plugins/REIPlugin",
+    ],
+    "jmapfrontiers_integration": [
+        "journeymap/client/api/IClientPlugin",
+    ],
+    "waila_integration": [
+        "mcp/mobius/waila/api/IWailaPlugin",
+    ],
+    "top_integration": [
+        "mcjty/theoneprobe/api/IProbeProvider",
+    ],
+    "patchouli_integration": [
+        "vazkii/patchouli/api/PatchouliAPI",
+    ],
+};
+
+/**
+ * Scan a mod JAR for optional/conditional mod integration patterns.
+ * Detects: ModList.isLoaded() calls, @OptionalInterface, capability hooks,
+ * and hard-coded integration checks for popular mods (JEI, Jade, REI, etc.)
+ * Works from JAR index — no decompilation needed.
+ */
+export async function findOptionalIntegrations(
+    dbId: number,
+): Promise<object> {
+    const jarPath = await getModJar(dbId);
+    const index   = await indexJar(jarPath);
+
+    const detected: Record<string, { pattern: string; classes: string[] }> = {};
+
+    for (const [category, targets] of Object.entries(OPTIONAL_INTEGRATION_PATTERNS)) {
+        const found = new Set<string>();
+        for (const target of targets) {
+            for (const cls of (index.references[target] ?? [])) found.add(cls);
+        }
+        if (found.size > 0) {
+            detected[category] = { pattern: targets[0], classes: [...found].sort() };
+        }
+    }
+
+    // Also look for string constants referencing known modIds (heuristic via field refs)
+    // by scanning for classes with many external-mod package references
+    const externalPackages = new Set<string>();
+    for (const refKey of Object.keys(index.references)) {
+        const pkg = refKey.split("/").slice(0, 3).join("/");
+        const modPkg = refKey.split("/")[0];
+        if (!["net", "com", "org", "java", "javax"].includes(modPkg)) {
+            externalPackages.add(pkg);
+        }
+    }
+
+    return {
+        mod: dbId,
+        totalIntegrationCategories: Object.keys(detected).length,
+        note: "Detected via bytecode reference analysis. A category being absent does not mean no integration — some mods use reflection.",
+        integrations: detected,
+        externalTopPackages: [...externalPackages].sort().slice(0, 30),
+    };
+}
+
+// ── Network payload inventory ──────────────────────────────────────────────────
+
+// Classes that indicate network packet/payload registration across loaders
+const NETWORK_PAYLOAD_TARGETS: Record<string, string[]> = {
+    "neoforge_payload": [
+        "net/neoforged/neoforge/network/handling/IPayloadContext",
+        "net/neoforged/neoforge/network/codec/NetworkCodecBuf",
+        "net/neoforged/neoforge/network/registration/NetworkRegistry",
+    ],
+    "custom_packet_payload": [
+        "net/minecraft/network/protocol/common/custom/CustomPacketPayload",
+    ],
+    "stream_codec": [
+        "net/minecraft/network/codec/StreamCodec",
+        "net/minecraft/network/codec/ByteBufCodecs",
+    ],
+    "forge_channel": [
+        "net/minecraftforge/network/Channel",
+        "net/minecraftforge/network/NetworkRegistry",
+        "net/minecraftforge/network/simple/SimpleChannel",
+    ],
+    "fabric_packet": [
+        "net/fabricmc/fabric/api/networking/v1/ServerPlayNetworking",
+        "net/fabricmc/fabric/api/networking/v1/PayloadTypeRegistry",
+    ],
+};
+
+/**
+ * Inventory all network packet/payload classes a mod ships.
+ * Identifies classes implementing CustomPacketPayload, StreamCodec types,
+ * and loader-specific network channel patterns.
+ * No decompilation needed — works from JAR index + class inspection.
+ */
+export async function findNetworkPayloads(
+    dbId: number,
+): Promise<object> {
+    const jarPath = await getModJar(dbId);
+    const index   = await indexJar(jarPath);
+
+    // Gather all candidate classes by pattern category
+    const byCategory: Record<string, Set<string>> = {};
+    for (const [cat, targets] of Object.entries(NETWORK_PAYLOAD_TARGETS)) {
+        const found = new Set<string>();
+        for (const target of targets) {
+            for (const cls of (index.references[target] ?? [])) found.add(cls);
+        }
+        if (found.size > 0) byCategory[cat] = found;
+    }
+
+    // Also find CustomPacketPayload implementors via inheritance index
+    const payloadImpls: string[] = [];
+    const payloadInterface = "net/minecraft/network/protocol/common/custom/CustomPacketPayload";
+    for (const [cls, info] of Object.entries(index.classes ?? {})) {
+        if ((info.interfaces ?? []).includes(payloadInterface)) payloadImpls.push(cls);
+    }
+
+    // Collect unique payload classes and inspect them for TYPE field (packet id)
+    const allCandidates = new Set<string>([
+        ...payloadImpls,
+        ...Object.values(byCategory).flatMap(s => [...s]),
+    ]);
+
+    const payloads: Array<{ className: string; fields: string[]; methods: string[]; category: string }> = [];
+    for (const cls of allCandidates) {
+        // Determine which category it falls in
+        let cat = "unknown";
+        if (payloadImpls.includes(cls)) cat = "custom_packet_payload";
+        else {
+            for (const [c, s] of Object.entries(byCategory)) {
+                if (s.has(cls)) { cat = c; break; }
+            }
+        }
+        try {
+            const info = await inspectClass(jarPath, cls);
+            const typeFields = info.fields.filter(f =>
+                f.name === "TYPE" || f.name === "ID" || f.name === "PACKET_ID" ||
+                f.descriptor.includes("ResourceLocation") || f.descriptor.includes("CustomPacketPayload$Type")
+            ).map(f => `${f.name}: ${f.descriptor}`);
+            const handleMethods = info.methods.filter(m =>
+                m.name === "handle" || m.name === "write" || m.name === "codec" || m.name === "type"
+            ).map(m => `${m.name}${m.descriptor}`);
+            payloads.push({ className: cls, fields: typeFields, methods: handleMethods, category: cat });
+        } catch {
+            payloads.push({ className: cls, fields: [], methods: [], category: cat });
+        }
+    }
+
+    return {
+        mod: dbId,
+        totalPayloadClasses: payloads.length,
+        note: "Payload classes identified via bytecode reference analysis. Use mod_bytecode class_members for full detail on any class.",
+        byCategory: Object.fromEntries(
+            Object.entries(byCategory).map(([k, v]) => [k, [...v]])
+        ),
+        payloads: payloads.sort((a, b) => a.className.localeCompare(b.className)),
+    };
+}
+
+// ── Config schema extraction ───────────────────────────────────────────────────
+
+const CONFIG_BUILDER_TARGETS: Record<string, string[]> = {
+    "neoforge_config": [
+        "net/neoforged/neoforge/common/ModConfigSpec$Builder",
+        "net/neoforged/neoforge/common/ModConfigSpec",
+    ],
+    "forge_config": [
+        "net/minecraftforge/common/ForgeConfigSpec$Builder",
+        "net/minecraftforge/common/ForgeConfigSpec",
+    ],
+    "cloth_config": [
+        "me/shedaniel/clothconfig2/api/ConfigBuilder",
+        "me/shedaniel/clothconfig2/api/ConfigCategory",
+    ],
+    "auto_config": [
+        "me/shedaniel/autoconfig/AutoConfig",
+        "me/shedaniel/autoconfig/annotation/Config",
+    ],
+    "night_config": [
+        "com/electronwill/nightconfig/core/Config",
+        "com/electronwill/nightconfig/toml/TomlFormat",
+    ],
+};
+
+/**
+ * Extract the config schema from a mod's JAR by analysing which classes use
+ * config builder APIs. Works without decompilation — identifies the classes
+ * that define config keys, then uses class inspection to surface field names.
+ *
+ * For NeoForge/Forge ModConfigSpec the builder class typically has string
+ * define/defineInRange/defineEnum calls; field names are the best proxy.
+ */
+export async function extractConfigSchema(
+    dbId: number,
+): Promise<object> {
+    const jarPath = await getModJar(dbId);
+    const index   = await indexJar(jarPath);
+
+    const detected: Record<string, string[]> = {};
+    for (const [system, targets] of Object.entries(CONFIG_BUILDER_TARGETS)) {
+        const found = new Set<string>();
+        for (const t of targets) {
+            for (const cls of (index.references[t] ?? [])) found.add(cls);
+        }
+        if (found.size > 0) detected[system] = [...found].sort();
+    }
+
+    if (Object.keys(detected).length === 0) {
+        return { mod: dbId, note: "No known config builder patterns found in this JAR.", configSystems: [] };
+    }
+
+    // Inspect each config class to surface field names as proxies for config keys
+    const schemas: Array<{ system: string; className: string; candidateKeys: string[] }> = [];
+    for (const [system, classes] of Object.entries(detected)) {
+        for (const cls of classes.slice(0, 10)) { // cap per system
+            try {
+                const info = await inspectClass(jarPath, cls);
+                // Heuristic: static final fields of type ConfigValue / BooleanValue / IntValue / String / etc.
+                const keyFields = info.fields.filter(f =>
+                    f.descriptor.includes("ConfigValue") ||
+                    f.descriptor.includes("BooleanValue") ||
+                    f.descriptor.includes("IntValue") ||
+                    f.descriptor.includes("DoubleValue") ||
+                    f.descriptor.includes("LongValue") ||
+                    f.descriptor.includes("EnumValue") ||
+                    // static String fields often hold key names
+                    (f.descriptor === "Ljava/lang/String;" && f.name === f.name.toUpperCase())
+                ).map(f => `${f.name}: ${f.descriptor}`);
+                schemas.push({ system, className: cls, candidateKeys: keyFields });
+            } catch {
+                schemas.push({ system, className: cls, candidateKeys: [] });
+            }
+        }
+    }
+
+    return {
+        mod: dbId,
+        note: "Config keys inferred from builder class fields. Not all field names map 1:1 to config keys — use mod_bytecode class_members for full detail.",
+        configSystems: Object.keys(detected),
+        schemas,
+    };
+}

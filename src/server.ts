@@ -23,12 +23,14 @@ import {
     getModManifest, listModConfigs, getModConfig,
     diffModData,
 } from "./tools/mod-data.js";
+import { traceRecipeChain } from "./tools/mod-data.js";
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
 import {
     searchModClass, getModClassMembers, getModClassBytecode,
     findModReferences, getModInheritance, diffModVersions, findImplementors,
     scanModRegistrations, findAnnotatedClasses,
     crossModRefs, findEventListeners,
+    findOptionalIntegrations, findNetworkPayloads, extractConfigSchema,
 } from "./tools/bytecode.js";
 import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets, getMixinsTargetingPackage, findAtAwConflicts } from "./tools/mixins.js";
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources } from "./tools/platform.js";
@@ -66,7 +68,7 @@ import {
 } from "./tools/vanilla-data.js";
 import {
     indexModTags, indexAllModTags, listTagNamespaces, getTagContributors,
-    getModTagList, findTagConflicts, searchModTags,
+    getModTagList, findTagConflicts, searchModTags, expandTag,
 } from "./tools/mod-tags.js";
 import {
     listModsWithMixins, getMixinConflictMatrix, getMixinClassDetail, getMixinHotspots, batchResolveMixins,
@@ -186,9 +188,12 @@ server.tool(
     "action=find_implementors: find mod classes across DB that extend/implement a target (target, modId, limit, transitive). Set transitive=true to walk the full inheritance chain. " +
     "action=scan_registrations: scan all classes for registration patterns — DeferredRegister, @SubscribeEvent, commands, keybindings, network payloads, config builders, capabilities, loot modifiers (dbId). " +
     "action=annotated_by: find all classes across the DB annotated with a given annotation (annotation, modId, limit). Works without decompilation. " +
-    "action=event_listeners: find @SubscribeEvent methods listening to a specific event class across the DB (event, modId, limit).",
+    "action=event_listeners: find @SubscribeEvent methods listening to a specific event class across the DB (event, modId, limit). " +
+    "action=optional_integrations: detect which optional/conditional mod integrations a mod includes (JEI, Jade, REI, Curios, etc.) via bytecode reference analysis (dbId). " +
+    "action=network_payloads: inventory all network packet/payload classes a mod ships — CustomPacketPayload implementors, StreamCodec types, channel registrations (dbId). " +
+    "action=config_schema: extract config key schema from ModConfigSpec/ForgeConfigSpec/ClothConfig builder classes (dbId).",
     {
-        action:     z.enum(["search_class","class_members","bytecode","find_refs","cross_refs","inheritance","diff","find_implementors","scan_registrations","annotated_by","event_listeners"]).describe("Operation to perform"),
+        action:     z.enum(["search_class","class_members","bytecode","find_refs","cross_refs","inheritance","diff","find_implementors","scan_registrations","annotated_by","event_listeners","optional_integrations","network_payloads","config_schema"]).describe("Operation to perform"),
         dbId:      z.number().optional().describe("DB id of mod (most actions)"),
         dbIdA:     z.number().optional().describe("Older mod DB id (diff)"),
         dbIdB:     z.number().optional().describe("Newer mod DB id (diff)"),
@@ -217,6 +222,9 @@ server.tool(
             case "scan_registrations": result = await scanModRegistrations(dbId!); break;
             case "annotated_by":     result = await findAnnotatedClasses(annotation!, modId, limit); break;
             case "event_listeners":  result = await findEventListeners(event!, modId, limit); break;
+            case "optional_integrations": result = await findOptionalIntegrations(dbId!); break;
+            case "network_payloads": result = await findNetworkPayloads(dbId!); break;
+            case "config_schema":    result = await extractConfigSchema(dbId!); break;
         }
         return out(result);
     }
@@ -736,6 +744,7 @@ server.tool(
     "Mod JAR structured data content — list or fetch JSON for any data type a mod ships. " +
     "action=list: enumerate all items of a type in the JAR. action=get: fetch full JSON for a specific item. " +
     "action=diff: compare data files between two mod versions — shows added/removed/changed files (dbIdA, dbIdB, dataType optional filter). " +
+    "action=trace_item: recursively build the full crafting dependency tree for an item — resolves all recipes that produce it across all mods, then recurses into ingredients (itemId, maxDepth). " +
     "type values: recipe | loot_table | advancement | blockstate | model | biome | structure | data_tag | particle | damage_type | enchantment | " +
     "configured_feature | placed_feature | structure_set | noise | density_function | processor_list | template_pool | " +
     "dimension_type | dimension | trim_material | trim_pattern | painting_variant | wolf_variant | cat_variant | chat_type. " +
@@ -743,11 +752,13 @@ server.tool(
     "id: resource id for get, e.g. 'mymod:iron_sword'. modelPath: use instead of id for type=model. " +
     "registry: required for data_tag type, e.g. 'item', 'block', 'entity_type'.",
     {
-        action:    z.enum(["list","get","diff"]).describe("list/get: JAR data operations; diff: compare two mod versions"),
+        action:    z.enum(["list","get","diff","trace_item"]).describe("list/get: JAR data operations; diff: compare two mod versions; trace_item: recipe chain"),
         type:      z.enum(["recipe","loot_table","advancement","blockstate","model","biome","structure","data_tag","particle","damage_type","enchantment","configured_feature","placed_feature","structure_set","noise","density_function","processor_list","template_pool","dimension_type","dimension","trim_material","trim_pattern","painting_variant","wolf_variant","cat_variant","chat_type"]).describe("Data type to query"),
         modId:     z.union([z.string(), z.number()]).optional().describe("Mod ID string or numeric DB id (list, get)"),
         dbIdA:     z.number().optional().describe("Older mod DB id (diff)"),
         dbIdB:     z.number().optional().describe("Newer mod DB id (diff)"),
+        itemId:    z.string().optional().describe("Item resource id for trace_item, e.g. 'mekanism:steel_ingot'"),
+        maxDepth:  z.number().optional().describe("Max recursion depth for trace_item (default 6)"),
         id:        z.string().optional().describe("Resource id for get, e.g. 'mymod:iron_sword' or 'iron_sword'"),
         modelPath: z.string().optional().describe("Model path for type=model get, e.g. 'block/my_block' or 'mymod:item/my_item'"),
         namespace: z.string().optional().describe("Namespace override / scope filter"),
@@ -755,10 +766,12 @@ server.tool(
         registry:  z.string().optional().describe("Tag registry folder for type=data_tag: item|block|entity_type|fluid|..."),
         dataType:  z.string().optional().describe("Data type substring filter for diff (e.g. 'recipe', 'loot_table')"),
     },
-    async ({ action, type, modId, dbIdA, dbIdB, id, modelPath, namespace, filter, registry, dataType }) => {
+    async ({ action, type, modId, dbIdA, dbIdB, itemId, maxDepth, id, modelPath, namespace, filter, registry, dataType }) => {
         let result: unknown;
         if (action === "diff") {
             result = await diffModData(dbIdA!, dbIdB!, dataType);
+        } else if (action === "trace_item") {
+            result = await traceRecipeChain(itemId!, maxDepth);
         } else if (action === "list") {
             switch (type) {
                 case "recipe":      result = await listModRecipes(modId!, namespace, filter); break;
@@ -803,24 +816,27 @@ server.tool(
     "action=index_all: index tags for ALL ingested mods. " +
     "action=namespaces: list all tag namespaces and registries present across indexed mods. " +
     "action=contributors: show every mod contributing to a specific tag path (tagPath, registry). " +
+    "action=expand: recursively unfurl a tag through all nested #tag refs into a flat member list — follows the full tag closure across the DB (tagPath, registry, maxDepth). " +
     "action=mod_list: list all tags registered by a specific mod (modId, registry). " +
     "action=find_conflicts: find replace:true conflicts across all mods (registry optional). " +
     "action=search: search tag paths by substring (query, registry, limit).",
     {
-        action:   z.enum(["index","index_all","namespaces","contributors","mod_list","find_conflicts","search"]).describe("Operation to perform"),
+        action:   z.enum(["index","index_all","namespaces","contributors","expand","mod_list","find_conflicts","search"]).describe("Operation to perform"),
         modId:    z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (index, mod_list)"),
-        tagPath:  z.string().optional().describe("Tag path to look up contributors for (contributors), e.g. 'c:ores/iron', '#forge:storage_blocks'"),
-        registry: z.string().optional().describe("Registry: block|item|entity_type|fluid|... (contributors, mod_list, find_conflicts, search)"),
+        tagPath:  z.string().optional().describe("Tag path to look up contributors or expand (contributors, expand), e.g. 'c:ores/iron', '#forge:storage_blocks'"),
+        registry: z.string().optional().describe("Registry: block|item|entity_type|fluid|... (contributors, expand, mod_list, find_conflicts, search)"),
         query:    z.string().optional().describe("Substring to match in tag paths (search), e.g. 'ores', 'storage', 'logs'"),
+        maxDepth: z.number().optional().describe("Max recursion depth for expand (default 12)"),
         limit:    z.number().optional().describe("Max results (search, default 50)"),
     },
-    async ({ action, modId, tagPath, registry, query, limit }) => {
+    async ({ action, modId, tagPath, registry, query, maxDepth, limit }) => {
         let result: unknown;
         switch (action) {
             case "index":          result = await indexModTags(modId!); break;
             case "index_all":      result = await indexAllModTags(); break;
             case "namespaces":     result = await listTagNamespaces(); break;
             case "contributors":   result = await getTagContributors(tagPath!, registry); break;
+            case "expand":         result = await expandTag(tagPath!, registry, maxDepth); break;
             case "mod_list":       result = await getModTagList(modId!, registry); break;
             case "find_conflicts": result = await findTagConflicts(registry); break;
             case "search":         result = await searchModTags(query!, registry, limit); break;
@@ -898,9 +914,10 @@ server.tool(
     "report=mod_overview: full overview for one mod (modId required). " +
     "report=gradle_deps: gradle dependency comparison report (groupFilter, modIdFilter). " +
     "report=pack_compat: one-shot pack compatibility audit combining mixin conflicts, AT/AW conflicts, tag conflicts, and dep issues (mcVersion, loader). " +
+    "report=dep_graph: full mod dependency graph with Mermaid diagram — shows requires/required-by relationships and orphaned mods (mcVersion, modId for single-mod focus). " +
     "savePath: optional absolute path to save the .md file.",
     {
-        report:       z.enum(["mixin_conflicts","tag_conflicts","version_conflicts","mod_overview","gradle_deps","pack_compat"]).describe("Which report to generate"),
+        report:       z.enum(["mixin_conflicts","tag_conflicts","version_conflicts","mod_overview","gradle_deps","pack_compat","dep_graph"]).describe("Which report to generate"),
         savePath:     z.string().optional().describe("Absolute path to save the .md file, e.g. 'C:/reports/mixin_conflicts.md'"),
         modId:        z.union([z.string(), z.number()]).optional().describe("Required for mod_overview report"),
         loader:       z.string().optional().describe("Loader filter for mixin_conflicts, pack_compat"),

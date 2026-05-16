@@ -1014,3 +1014,119 @@ export async function diffModData(
         changed,
     };
 }
+
+// ── Recipe chain tracer ────────────────────────────────────────────────────────
+
+interface RecipeJson {
+    type?: string;
+    result?: { id?: string; item?: string; count?: number } | string;
+    ingredients?: Array<{ item?: string; tag?: string } | string>;
+    ingredient?: { item?: string; tag?: string } | string;
+    base?: { item?: string; tag?: string } | string;
+    addition?: { item?: string; tag?: string } | string;
+    input?: { item?: string; tag?: string } | string;
+    key?: Record<string, { item?: string; tag?: string } | string>;
+}
+
+function extractIngredients(recipe: RecipeJson): string[] {
+    const items: string[] = [];
+    const push = (v: unknown) => {
+        if (!v) return;
+        if (typeof v === "string") { items.push(v); return; }
+        if (typeof v === "object" && v !== null) {
+            const o = v as { item?: string; tag?: string };
+            if (o.item) items.push(o.item);
+            else if (o.tag) items.push(`#${o.tag}`);
+        }
+    };
+
+    // shaped/shapeless via ingredients array or key map
+    if (Array.isArray(recipe.ingredients)) recipe.ingredients.forEach(push);
+    if (recipe.ingredient) push(recipe.ingredient);
+    if (recipe.base)       push(recipe.base);
+    if (recipe.addition)   push(recipe.addition);
+    if (recipe.input)      push(recipe.input);
+    if (recipe.key) Object.values(recipe.key).forEach(push);
+    return items;
+}
+
+function extractResult(recipe: RecipeJson): string | null {
+    if (!recipe.result) return null;
+    if (typeof recipe.result === "string") return recipe.result;
+    return recipe.result.id ?? recipe.result.item ?? null;
+}
+
+/**
+ * Trace the full crafting dependency tree for an item.
+ * Recursively resolves all recipes that produce it across all mods in the DB,
+ * and for each ingredient finds its recipes too.
+ *
+ * itemId: resource id of the target item, e.g. "mekanism:steel_ingot"
+ * maxDepth: recursion guard (default 6)
+ * Returns a tree structure with recipes and their ingredients' sub-trees.
+ */
+export async function traceRecipeChain(
+    itemId: string,
+    maxDepth = 6,
+): Promise<object> {
+    // Build a recipe index: resultId → [{modId, recipeId, type, ingredients, raw}]
+    const allMods = await db().mod.findMany({ select: { id: true, modId: true, version: true, jarPath: true } });
+
+    // Index all recipes from all mods (lazy — cache by modId)
+    const recipeIndex = new Map<string, Array<{ mod: string; recipeId: string; type: string; ingredients: string[]; resultCount: number }>>();
+
+    for (const mod of allMods) {
+        const entries = listEntries(mod.jarPath, "data/").filter(e => e.includes("/recipes/") && e.endsWith(".json"));
+        for (const entry of entries) {
+            const buf = extractEntry(mod.jarPath, entry);
+            if (!buf) continue;
+            try {
+                const recipe = JSON.parse(buf.toString("utf8")) as RecipeJson;
+                const result = extractResult(recipe);
+                if (!result) continue;
+                const normalId = result.includes(":") ? result : `minecraft:${result}`;
+                if (!recipeIndex.has(normalId)) recipeIndex.set(normalId, []);
+                recipeIndex.get(normalId)!.push({
+                    mod:         mod.modId,
+                    recipeId:    entry,
+                    type:        recipe.type ?? "unknown",
+                    ingredients: extractIngredients(recipe),
+                    resultCount: typeof recipe.result === "object" && recipe.result !== null
+                        ? (recipe.result as { count?: number }).count ?? 1
+                        : 1,
+                });
+            } catch { /* skip malformed */ }
+        }
+    }
+
+    const visited = new Set<string>();
+
+    const buildTree = (id: string, depth: number): unknown => {
+        if (depth > maxDepth || visited.has(id)) {
+            return { item: id, note: depth > maxDepth ? "maxDepth reached" : "circular ref skipped", recipes: [] };
+        }
+        visited.add(id);
+        const normal = id.includes(":") ? id : `minecraft:${id}`;
+        const recipes = recipeIndex.get(normal) ?? [];
+
+        const recipeNodes = recipes.map(r => ({
+            mod:         r.mod,
+            recipeId:    r.recipeId,
+            type:        r.type,
+            resultCount: r.resultCount,
+            ingredients: r.ingredients.map(ing => buildTree(ing, depth + 1)),
+        }));
+
+        visited.delete(id); // allow same item via different paths at different depths
+        return { item: normal, recipeCount: recipes.length, recipes: recipeNodes };
+    };
+
+    const tree = buildTree(itemId, 0);
+    return {
+        target:        itemId,
+        maxDepth,
+        modsScanned:   allMods.length,
+        totalRecipesIndexed: [...recipeIndex.values()].reduce((s, v) => s + v.length, 0),
+        tree,
+    };
+}

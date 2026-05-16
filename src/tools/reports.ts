@@ -263,7 +263,8 @@ export type ReportType =
     | "version_conflicts"
     | "mod_overview"
     | "gradle_deps"
-    | "pack_compat";
+    | "pack_compat"
+    | "dep_graph";
 
 async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbIds?: number[] }): Promise<string> {
     // Run all relevant checks concurrently
@@ -368,6 +369,80 @@ async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbI
     return md;
 }
 
+async function reportDepGraph(opts: { mcVersion?: string; modId?: string | number }): Promise<string> {
+    const graphData = await getDependencyGraph(opts.mcVersion) as {
+        mcVersion: string;
+        modCount: number;
+        graph: Record<string, { requires: Array<{ id: string; version: string; required: boolean }>; requiredBy: string[] }>;
+    };
+
+    let md = h1("Dependency Graph Report");
+    md += `${timestamp()}\n`;
+    if (opts.mcVersion) md += `MC version filter: ${code(opts.mcVersion)}\n`;
+    md += `\nMods in graph: ${bold(String(graphData.modCount))}\n`;
+
+    // Mermaid diagram (cap at 40 mods to keep it readable)
+    const entries = Object.entries(graphData.graph);
+    md += h2("Mermaid Dependency Diagram");
+    const subset = opts.modId
+        ? entries.filter(([id]) => String(id).includes(String(opts.modId)))
+        : entries.slice(0, 40);
+
+    if (subset.length > 0) {
+        md += "```mermaid\nflowchart LR\n";
+        const nodeIds = new Set<string>();
+        const addNode = (id: string) => {
+            if (nodeIds.has(id)) return;
+            nodeIds.add(id);
+            // sanitize id for mermaid
+            const safe = id.replace(/[^a-zA-Z0-9_]/g, "_");
+            md += `    ${safe}["${id}"]\n`;
+        };
+        const edges: string[] = [];
+        for (const [id, info] of subset) {
+            addNode(id);
+            for (const dep of info.requires) {
+                if (dep.id === "minecraft" || dep.id === "neoforge" || dep.id === "forge" || dep.id === "fabricloader") continue;
+                addNode(dep.id);
+                const safeFrom = id.replace(/[^a-zA-Z0-9_]/g, "_");
+                const safeTo   = dep.id.replace(/[^a-zA-Z0-9_]/g, "_");
+                const style    = dep.required ? "-->" : "-.->";
+                edges.push(`    ${safeFrom} ${style} ${safeTo}`);
+            }
+        }
+        md += edges.join("\n") + "\n```\n";
+        if (entries.length > 40 && !opts.modId) {
+            md += `_Diagram shows first 40 of ${entries.length} mods. Use modId to filter._\n`;
+        }
+    } else {
+        md += "_No matching mods in graph._\n";
+    }
+
+    // Textual detail
+    md += h2("Dependency Details");
+    md += tableHeader(["Mod", "Requires (required)", "Requires (optional)", "Required By"]);
+    const fullList = opts.modId ? subset : entries;
+    for (const [id, info] of fullList) {
+        const req  = info.requires.filter(d => d.required).map(d => code(d.id)).join(", ") || "—";
+        const opt  = info.requires.filter(d => !d.required).map(d => code(d.id)).join(", ") || "—";
+        const reqBy = info.requiredBy.map(code).join(", ") || "—";
+        md += "\n" + tableRow([code(id), req, opt, reqBy]);
+    }
+    md += "\n";
+
+    // Orphans (no deps, not depended on)
+    const orphans = entries.filter(([, info]) =>
+        info.requires.filter(d => d.id !== "minecraft" && d.id !== "neoforge" && d.id !== "forge" && d.id !== "fabricloader").length === 0
+        && info.requiredBy.length === 0
+    ).map(([id]) => id);
+    if (orphans.length > 0) {
+        md += h2(`Standalone Mods (no declared inter-mod deps) — ${orphans.length}`);
+        md += orphans.map(code).join(", ") + "\n";
+    }
+
+    return md;
+}
+
 export async function generateReport(opts: {
     report: ReportType;
     savePath?: string;
@@ -402,6 +477,9 @@ export async function generateReport(opts: {
             break;
         case "pack_compat":
             markdown = await reportPackCompat({ mcVersion: opts.mcVersion, loader: opts.loader, dbIds: opts.dbIds });
+            break;
+        case "dep_graph":
+            markdown = await reportDepGraph({ mcVersion: opts.mcVersion, modId: opts.modId });
             break;
         default:
             throw new Error(`Unknown report type: ${(opts as { report: string }).report}`);

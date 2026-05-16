@@ -257,6 +257,73 @@ export async function findTagConflicts(registry?: string): Promise<object> {
 }
 
 /**
+ * Recursively expand a tag into its full flat member list by following nested
+ * tag references (entries that start with "#") through the indexed DB.
+ * Returns every concrete (non-tag) entry reachable from the root tag, plus
+ * a list of all intermediate tags visited.
+ *
+ * tagPath: e.g. "c:ores/iron", "#forge:storage_blocks"
+ * registry: optional filter (item | block | entity_type | …)
+ * maxDepth: guard against circular refs (default 12)
+ */
+export async function expandTag(
+    tagPath: string,
+    registry?: string,
+    maxDepth = 12,
+): Promise<object> {
+    const root = tagPath.startsWith("#") ? tagPath.slice(1) : tagPath;
+
+    const visited   = new Set<string>();
+    const concrete  = new Set<string>();
+    const tagChain: Array<{ tag: string; contributors: string[] }> = [];
+    let dbLookups   = 0;
+
+    const expand = async (path: string, depth: number): Promise<void> => {
+        if (depth > maxDepth || visited.has(path)) return;
+        visited.add(path);
+
+        const rows = await db().modTag.findMany({
+            where: { tagPath: path, ...(registry ? { registry } : {}) },
+            include: { mod: { select: { modId: true } } },
+        });
+        dbLookups++;
+
+        if (rows.length === 0) {
+            // Tag itself is not in DB — record it as unresolved concrete reference
+            concrete.add(`#${path} (unresolved)`);
+            return;
+        }
+
+        const contributors = [...new Set(rows.map(r => r.mod.modId))];
+        tagChain.push({ tag: `#${path}`, contributors });
+
+        // Merge all entries from all contributing mods (union)
+        const allEntries = new Set<string>(rows.flatMap(r => r.entries as string[]));
+        const nested: string[] = [];
+        for (const entry of allEntries) {
+            if (entry.startsWith("#")) nested.push(entry.slice(1));
+            else concrete.add(entry);
+        }
+        await Promise.all(nested.map(n => expand(n, depth + 1)));
+    };
+
+    await expand(root, 0);
+
+    return {
+        rootTag:       `#${root}`,
+        registry:      registry ?? "any",
+        totalConcrete: concrete.size,
+        totalTagsVisited: visited.size,
+        dbLookups,
+        note: maxDepth > 0 && visited.size >= maxDepth
+            ? `Hit maxDepth=${maxDepth}; some nested tags may not be fully expanded.`
+            : undefined,
+        tagChain,
+        members: [...concrete].sort(),
+    };
+}
+
+/**
  * Search tags by path substring across all indexed mods.
  */
 export async function searchModTags(query: string, registry?: string, limit = 50): Promise<object> {
