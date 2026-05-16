@@ -568,11 +568,14 @@ export async function downloadOverridesAction(opts: {
     const overrideFile = manifest.files.find((f) => f.type === "cf-extract");
     if (!overrideFile) throw new Error("No cf-extract (overrides) entry found in manifest");
 
-    // Build CDN URL directly from version ID (the file ID for cf-extract entries)
-    const url = cfCdnUrl(overrideFile.id, overrideFile.name);
+    // Use the URL from the manifest (the full CF pack ZIP like "All the Mods 10-7.0.zip")
+    const url = resolveFileUrl(overrideFile);
+    if (!url) throw new Error(`No download URL for cf-extract entry in pack ${packId} v${versionId}`);
 
     const packCacheDir  = join(CACHE_ROOT, "packs", namespace, String(packId), String(versionId));
-    const zipPath       = join(packCacheDir, "overrides.zip");
+    // Store under the real filename, not "overrides.zip"
+    const urlFilename   = decodeURIComponent(url.split("/").pop() ?? "pack.zip");
+    const zipPath       = join(packCacheDir, urlFilename);
     const extractDir    = join(packCacheDir, "overrides");
 
     await mkdir(packCacheDir, { recursive: true });
@@ -587,12 +590,12 @@ export async function downloadOverridesAction(opts: {
         await rename(tmpPath, zipPath);
     }
 
-    // Extract
+    // Extract the full CF pack ZIP — it contains only manifest.json, modlist.html,
+    // and overrides/ (no mod JARs), so extracting everything is safe and simple.
     await mkdir(extractDir, { recursive: true });
     const zip = new AdmZip(zipPath);
     zip.extractAllTo(extractDir, /* overwrite */ true);
 
-    // Build a summary of extracted paths
     const entries = zip.getEntries().map((e) => e.entryName);
     const topDirs = [...new Set(entries.map((e) => e.split("/")[0]))].sort();
 
