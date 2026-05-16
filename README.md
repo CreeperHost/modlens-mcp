@@ -74,19 +74,53 @@ npm run build
 
 ## MCP Configuration
 
-Add to your MCP config (`mcp.json`):
+The server uses stdio transport — it works with any MCP client (VS Code Copilot, Claude Desktop, Claude CLI, Cursor, etc.) as long as Docker is running and `DATABASE_URL` is set.
+
+### VS Code Copilot (`mcp.json`)
 
 ```json
 {
-  "modlens": {
-    "command": "node",
-    "args": ["D:/Downloads/modlens-mcp/dist/server.js"],
-    "env": {
-      "DATABASE_URL": "postgresql://modlens:modlens@localhost:5433/modlens"
+  "servers": {
+    "modlens": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/modlens-mcp/dist/server.js"],
+      "env": {
+        "DATABASE_URL": "postgresql://modlens:modlens@localhost:5433/modlens"
+      }
     }
   }
 }
 ```
+
+### Claude Desktop (`claude_desktop_config.json`)
+
+Location: `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
+
+```json
+{
+  "mcpServers": {
+    "modlens": {
+      "command": "node",
+      "args": ["/path/to/modlens-mcp/dist/server.js"],
+      "env": {
+        "DATABASE_URL": "postgresql://modlens:modlens@localhost:5433/modlens"
+      }
+    }
+  }
+}
+```
+
+### Claude CLI
+
+```bash
+claude mcp add modlens node /path/to/modlens-mcp/dist/server.js \
+  --env DATABASE_URL=postgresql://modlens:modlens@localhost:5433/modlens
+```
+
+Or manually edit `~/.claude/mcp.json` (same format as VS Code above).
+
+> **Important:** Replace `/path/to/modlens-mcp` with the actual absolute path where you cloned the repo. On Windows use forward slashes or escaped backslashes, e.g. `C:/Users/you/modlens-mcp/dist/server.js`.
 
 ---
 
