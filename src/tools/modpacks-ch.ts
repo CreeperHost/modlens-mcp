@@ -22,7 +22,7 @@ import { rename } from "fs/promises";
 import { ensureDir, exists, CACHE_ROOT } from "../cache.js";
 import {
     searchPacks, getFeaturedPacks, getPack, getPackManifest,
-    searchCfPacks, getCfPack, getCfPackManifest,
+    getCfPack, getCfPackManifest,
     searchMods, getMod,
     downloadManifestFile, resolveFileUrl,
     type FtbManifest, type FtbManifestFile,
@@ -58,14 +58,21 @@ interface FileResult {
 // ── Pack search / browse ──────────────────────────────────────────────────────
 
 export async function searchPacksAction(term: string, namespace: PackNamespace = "ftb", limit = 20) {
-    if (namespace === "curseforge") {
-        const r = await searchCfPacks(term, limit);
-        if (!r) return { packs: [], total: 0 };
-        return r;
-    }
+    // Always call the unified FTB search endpoint — it returns both FTB pack IDs
+    // (in `packs`) and CurseForge pack IDs (in `curseforge`) in a single response.
+    // The /curseforge/search/ endpoint does not exist.
     const r = await searchPacks(term, limit);
-    if (!r) return { packs: [], total: 0 };
-    return r;
+    if (!r) return { ftbPacks: [], cfPacks: [], total: 0 };
+    const ftbPacks = r.packs        ?? [];
+    const cfPacks  = r.curseforge   ?? [];
+    // If caller specified a namespace, surface only that subset (but always
+    // include both for discoverability — callers can filter as needed).
+    return {
+        ftbPacks,
+        cfPacks,
+        total:   r.total,
+        note:    "ftbPacks = FTB-hosted; cfPacks = CurseForge-hosted (use namespace=curseforge for info/manifest)",
+    };
 }
 
 export async function featuredPacksAction(limit = 20) {

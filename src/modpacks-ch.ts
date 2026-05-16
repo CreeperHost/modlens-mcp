@@ -119,10 +119,12 @@ export interface FtbPack {
 
 /** Response from GET /modpack/search/{limit}?term={q} */
 export interface FtbPackSearchResult {
-    packs: number[];
-    total: number;
-    limit: number;
-    term:  string;
+    packs:       number[];
+    curseforge?: number[];   // CF pack IDs returned alongside FTB pack IDs
+    total:       number;
+    limit:       number;
+    term?:       string;
+    refreshed?:  number;
 }
 
 // ── Manifest types ────────────────────────────────────────────────────────────
@@ -210,8 +212,13 @@ export async function getPackManifest(packId: number, versionId: number): Promis
 // Mirrors the /modpack/ namespace but for CurseForge-hosted packs.
 // provider field will be "curseforge" in all responses.
 
+/**
+ * Search CurseForge packs via the unified FTB search endpoint.
+ * The /curseforge/search/ endpoint does NOT exist — CF packs are returned
+ * in the `curseforge` array of the main /modpack/search/ response.
+ */
 export async function searchCfPacks(term: string, limit = 20): Promise<FtbPackSearchResult | null> {
-    return get<FtbPackSearchResult>(`curseforge/search/${limit}?term=${encodeURIComponent(term)}`);
+    return searchPacks(term, limit);
 }
 
 export async function getCfPack(packId: number): Promise<FtbPack | null> {
