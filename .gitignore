@@ -5,3 +5,7 @@ dist/
 *.sqlite
 output/
 tools/*.jar
+
+# Agent skill configuration (local only)
+docs/agents/
+.scratch/

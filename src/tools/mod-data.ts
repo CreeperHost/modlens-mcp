@@ -868,3 +868,149 @@ export async function getModGenericDataType(
 
     return { mod: mod.modId, type: typeKey, id, found: false };
 }
+
+// ── Mod manifest reader ───────────────────────────────────────────────────────
+
+/**
+ * Read and parse the mod's loader manifest file:
+ *   NeoForge/Forge → META-INF/neoforge.mods.toml or META-INF/mods.toml
+ *   Fabric          → fabric.mod.json
+ *   Quilt           → quilt.mod.json
+ *
+ * Returns raw text (TOML) or parsed JSON depending on format.
+ */
+export async function getModManifest(modId: string | number): Promise<object> {
+    const mod = await resolveMod(modId);
+    if (!mod) return { error: `Mod not found: ${modId}` };
+
+    const candidates: Array<{ path: string; format: "toml" | "json" }> = [
+        { path: "META-INF/neoforge.mods.toml", format: "toml" },
+        { path: "META-INF/mods.toml",          format: "toml" },
+        { path: "fabric.mod.json",              format: "json" },
+        { path: "quilt.mod.json",               format: "json" },
+    ];
+
+    for (const { path, format } of candidates) {
+        const buf = extractEntry(mod.jarPath, path);
+        if (!buf) continue;
+        const raw = buf.toString("utf8");
+        if (format === "json") {
+            try {
+                return { mod: mod.modId, manifestPath: path, format, data: JSON.parse(raw) };
+            } catch {
+                return { mod: mod.modId, manifestPath: path, format, raw };
+            }
+        }
+        // TOML — return raw text (TOML parsing requires a dep we don't have)
+        return { mod: mod.modId, manifestPath: path, format, raw };
+    }
+
+    return { mod: mod.modId, error: "No manifest file found (neoforge.mods.toml, mods.toml, fabric.mod.json, quilt.mod.json)" };
+}
+
+// ── Config file browser ───────────────────────────────────────────────────────
+
+/**
+ * List default config files shipped inside the JAR under defaultconfigs/ or config/.
+ * These are the starter configs a mod ships; they get copied to the instance config dir on first run.
+ */
+export async function listModConfigs(modId: string | number): Promise<object> {
+    const mod = await resolveMod(modId);
+    if (!mod) return { error: `Mod not found: ${modId}` };
+
+    const prefixes = ["defaultconfigs/", "config/"];
+    const files: string[] = [];
+    for (const prefix of prefixes) {
+        files.push(...listEntries(mod.jarPath, prefix).filter(e => !e.endsWith("/")));
+    }
+
+    return { mod: mod.modId, count: files.length, configs: files };
+}
+
+export async function getModConfig(modId: string | number, path: string): Promise<object> {
+    const mod = await resolveMod(modId);
+    if (!mod) return { error: `Mod not found: ${modId}` };
+
+    const buf = extractEntry(mod.jarPath, path);
+    if (!buf) return { mod: mod.modId, path, found: false };
+
+    const raw = buf.toString("utf8");
+    if (path.endsWith(".json")) {
+        try { return { mod: mod.modId, path, data: JSON.parse(raw) }; } catch { /* fall through */ }
+    }
+    return { mod: mod.modId, path, raw: raw.slice(0, 8192) };
+}
+
+// ── Data diff between mod versions ────────────────────────────────────────────
+
+/**
+ * Compare data files between two mod versions (by DB id).
+ * Returns: files only in A (removed), only in B (added), and files in both whose
+ * JSON content changed. Use type filter to scope to a specific category.
+ */
+export async function diffModData(
+    dbIdA: number,
+    dbIdB: number,
+    dataType?: string, // e.g. "recipe", "loot_table" — filters by path substring
+): Promise<object> {
+    const [modA, modB] = await Promise.all([
+        db().mod.findUnique({ where: { id: dbIdA } }),
+        db().mod.findUnique({ where: { id: dbIdB } }),
+    ]);
+    if (!modA) return { error: `Mod #${dbIdA} not found` };
+    if (!modB) return { error: `Mod #${dbIdB} not found` };
+
+    const getDataEntries = (jarPath: string): Map<string, string> => {
+        let entries = listJsonEntries(jarPath, "data/");
+        if (dataType) {
+            const f = dataType.toLowerCase();
+            entries = entries.filter(e => e.toLowerCase().includes(f));
+        }
+        const map = new Map<string, string>();
+        for (const e of entries) {
+            const buf = extractEntry(jarPath, e);
+            map.set(e, buf ? buf.toString("utf8") : "");
+        }
+        return map;
+    };
+
+    const [filesA, filesB] = await Promise.all([
+        Promise.resolve(getDataEntries(modA.jarPath)),
+        Promise.resolve(getDataEntries(modB.jarPath)),
+    ]);
+
+    const keysA = new Set(filesA.keys());
+    const keysB = new Set(filesB.keys());
+
+    const added   = [...keysB].filter(k => !keysA.has(k));
+    const removed = [...keysA].filter(k => !keysB.has(k));
+    const changed: Array<{ path: string; note: string }> = [];
+
+    for (const k of keysA) {
+        if (!keysB.has(k)) continue;
+        const contentA = filesA.get(k)!.trim();
+        const contentB = filesB.get(k)!.trim();
+        if (contentA !== contentB) {
+            // Try to summarise the change at JSON key level
+            let note = "content changed";
+            try {
+                const a = JSON.parse(contentA);
+                const b = JSON.parse(contentB);
+                const changedKeys = [...new Set([...Object.keys(a), ...Object.keys(b)])]
+                    .filter(key => JSON.stringify(a[key]) !== JSON.stringify(b[key]));
+                if (changedKeys.length > 0) note = `changed keys: ${changedKeys.join(", ")}`;
+            } catch { /* not JSON or nested — keep note as-is */ }
+            changed.push({ path: k, note });
+        }
+    }
+
+    return {
+        modA: { id: dbIdA, modId: modA.modId, version: modA.version },
+        modB: { id: dbIdB, modId: modB.modId, version: modB.version },
+        dataType: dataType ?? "(all)",
+        summary: { added: added.length, removed: removed.length, changed: changed.length },
+        added,
+        removed,
+        changed,
+    };
+}

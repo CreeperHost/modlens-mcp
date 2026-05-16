@@ -366,3 +366,155 @@ export async function scanModRegistrations(dbId: number): Promise<object> {
         registrations: results,
     };
 }
+
+// ── Cross-mod reference search ─────────────────────────────────────────────────
+
+/**
+ * Find which mods in the DB reference a given class, method, or field.
+ * Unlike find_refs (single JAR), this scans every ingested mod's index.
+ *
+ * target: slash-separated class/method/field, e.g. "net/minecraft/world/entity/LivingEntity"
+ *         or "mymod/SomeClass:myMethod:(I)V"
+ * mcVersion: optional filter
+ * loader: optional filter
+ */
+export async function crossModRefs(
+    target: string,
+    mcVersion?: string,
+    loader?: string,
+    limit = 500,
+): Promise<object> {
+    const internal = target.replace(/\./g, "/");
+
+    const mods = await db().mod.findMany({
+        where: {
+            ...(mcVersion ? { mcVersion } : {}),
+            ...(loader ? { loader } : {}),
+        },
+        select: { id: true, modId: true, displayName: true, version: true, mcVersion: true, loader: true, jarPath: true },
+    });
+
+    const results: Array<{ mod: string; modDisplay: string; version: string; loader: string; referencingClasses: string[] }> = [];
+    let total = 0;
+
+    for (const mod of mods) {
+        if (total >= limit) break;
+        try {
+            const index = await indexJar(mod.jarPath);
+            const refs = index.references[internal] ?? [];
+            if (refs.length > 0) {
+                results.push({ mod: mod.modId, modDisplay: mod.displayName, version: mod.version, loader: mod.loader, referencingClasses: refs });
+                total += refs.length;
+            }
+        } catch { /* skip unindexable JARs */ }
+    }
+
+    return {
+        target: internal,
+        mcVersion: mcVersion ?? "(all)",
+        loader: loader ?? "(all)",
+        totalMods: results.length,
+        totalReferences: total,
+        note: total >= limit ? `Capped at ${limit} total references. Use mcVersion/loader to narrow.` : undefined,
+        results,
+    };
+}
+
+// ── Event listener search ──────────────────────────────────────────────────────
+
+// Known @SubscribeEvent annotation paths across loaders
+const SUBSCRIBE_EVENT_ANNOTATIONS = [
+    "net/neoforged/bus/api/SubscribeEvent",
+    "net/minecraftforge/eventbus/api/SubscribeEvent",
+];
+
+/**
+ * Find all @SubscribeEvent (or equivalent) methods across the DB that listen
+ * to a specific event class. Scans JAR indexes — no decompilation needed.
+ *
+ * event: internal class name of the event, e.g. "net/neoforged/neoforge/event/entity/living/LivingDeathEvent"
+ *        or partial name match, e.g. "LivingDeathEvent"
+ * modId: optional — limit to one mod
+ */
+export async function findEventListeners(
+    event: string,
+    modId?: string | number,
+    limit = 300,
+): Promise<object> {
+    const eventInternal = event.replace(/\./g, "/");
+
+    let mods;
+    if (modId !== undefined) {
+        const mod = typeof modId === "number"
+            ? await db().mod.findUnique({ where: { id: modId }, select: { id: true, modId: true, displayName: true, version: true, jarPath: true } })
+            : await db().mod.findFirst({ where: { modId: { contains: String(modId) } }, select: { id: true, modId: true, displayName: true, version: true, jarPath: true } });
+        if (!mod) return { error: `Mod not found: ${modId}` };
+        mods = [mod];
+    } else {
+        mods = await db().mod.findMany({ select: { id: true, modId: true, displayName: true, version: true, jarPath: true } });
+    }
+
+    const results: Array<{
+        mod: string; modDisplay: string; version: string;
+        listeners: Array<{ className: string; methods: string[] }>;
+    }> = [];
+    let total = 0;
+
+    for (const mod of mods) {
+        if (total >= limit) break;
+        try {
+            const index = await indexJar(mod.jarPath);
+
+            // Find classes that reference the event AND any @SubscribeEvent annotation
+            const eventRefs = new Set(index.references[eventInternal] ?? []);
+            // Also check partial name match across the reference keys
+            if (eventRefs.size === 0) {
+                for (const [key, classes] of Object.entries(index.references)) {
+                    if (key.includes(eventInternal) || key.endsWith("/" + eventInternal)) {
+                        for (const c of classes) eventRefs.add(c);
+                    }
+                }
+            }
+            if (eventRefs.size === 0) continue;
+
+            const subscriberClasses = new Set<string>();
+            for (const ann of SUBSCRIBE_EVENT_ANNOTATIONS) {
+                for (const c of (index.references[ann] ?? [])) subscriberClasses.add(c);
+            }
+
+            // Intersection: classes that reference the event AND have @SubscribeEvent methods
+            const candidates = [...eventRefs].filter(c => subscriberClasses.has(c));
+            if (candidates.length === 0) continue;
+
+            // For each candidate, find which methods take this event via inspectClass
+            const listeners: Array<{ className: string; methods: string[] }> = [];
+            for (const cls of candidates) {
+                try {
+                    const info = await inspectClass(mod.jarPath, cls);
+                    // Methods whose descriptor contains the event class
+                    const matching = info.methods
+                        .filter(m => m.descriptor.includes(eventInternal.replace(/\//g, "/")) ||
+                                     m.descriptor.includes(eventInternal.split("/").pop()!))
+                        .map(m => `${m.name}${m.descriptor}`);
+                    if (matching.length > 0) {
+                        listeners.push({ className: cls, methods: matching });
+                    } else {
+                        // Can't narrow to method — include class anyway
+                        listeners.push({ className: cls, methods: [] });
+                    }
+                } catch { listeners.push({ className: cls, methods: [] }); }
+            }
+
+            results.push({ mod: mod.modId, modDisplay: mod.displayName, version: mod.version, listeners });
+            total += candidates.length;
+        } catch { /* skip */ }
+    }
+
+    return {
+        event: eventInternal,
+        totalMods: results.length,
+        totalListeners: total,
+        note: total >= limit ? `Capped at ${limit}. Use modId to narrow.` : undefined,
+        results,
+    };
+}

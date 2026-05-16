@@ -209,3 +209,82 @@ export async function getMixinsTargetingPackage(packagePrefix: string, mcVersion
         mods: results,
     };
 }
+
+// ── AT/AW conflict detection ───────────────────────────────────────────────────
+
+/**
+ * Find Access Transformer / Access Widener entries where two or more mods
+ * target the same class member. Returns entries grouped by target signature so
+ * you can see at a glance who's AT-ing what.
+ *
+ * mcVersion: optional filter
+ * loader: optional filter ("neoforge" | "forge" | "fabric" | "quilt")
+ */
+export async function findAtAwConflicts(mcVersion?: string, loader?: string): Promise<object> {
+    const mods = await db().mod.findMany({
+        where: {
+            ...(mcVersion ? { mcVersion } : {}),
+            ...(loader ? { loader } : {}),
+            OR: [{ hasAt: true }, { hasAw: true }],
+        },
+        select: { id: true, modId: true, displayName: true, version: true, loader: true, hasAt: true, hasAw: true, atEntries: true, awEntries: true },
+    });
+
+    // Map: canonical target signature → [{mod, access}]
+    const atMap = new Map<string, Array<{ mod: string; display: string; version: string; loader: string; access: string }>>();
+
+    for (const mod of mods) {
+        const addEntry = (sig: string, access: string) => {
+            if (!atMap.has(sig)) atMap.set(sig, []);
+            atMap.get(sig)!.push({ mod: mod.modId, display: mod.displayName, version: mod.version, loader: mod.loader, access });
+        };
+
+        // AT entries: "accessible method net/minecraft/Foo bar (I)V"
+        for (const entry of (mod.atEntries as string[]) ?? []) {
+            const clean = (typeof entry === "string" ? entry : JSON.stringify(entry)).trim();
+            // Canonical signature = everything after the access modifier word
+            const parts = clean.split(/\s+/);
+            if (parts.length >= 2) {
+                const sig = parts.slice(1).join(" ");
+                addEntry(`AT:${sig}`, parts[0]);
+            }
+        }
+
+        // AW entries: "accessible class net/minecraft/Foo" or "accessible method net/minecraft/Foo bar (I)V"
+        for (const entry of (mod.awEntries as string[]) ?? []) {
+            const clean = (typeof entry === "string" ? entry : JSON.stringify(entry)).trim();
+            const parts = clean.split(/\s+/);
+            if (parts.length >= 2) {
+                const sig = parts.slice(1).join(" ");
+                addEntry(`AW:${sig}`, parts[0]);
+            }
+        }
+    }
+
+    const conflicts = [...atMap.entries()]
+        .filter(([, users]) => users.length >= 2)
+        .map(([sig, users]) => {
+            const accessValues = new Set(users.map(u => u.access));
+            return { target: sig, modCount: users.length, accessConflict: accessValues.size > 1, users };
+        })
+        .sort((a, b) => b.modCount - a.modCount);
+
+    const accessConflicts = conflicts.filter(c => c.accessConflict);
+    const sharedTargets   = conflicts.filter(c => !c.accessConflict);
+
+    return {
+        mcVersion: mcVersion ?? "(all)",
+        loader: loader ?? "(all)",
+        totalModsWithAt: mods.filter(m => m.hasAt).length,
+        totalModsWithAw: mods.filter(m => m.hasAw).length,
+        summary: {
+            sharedTargets: sharedTargets.length,
+            accessConflicts: accessConflicts.length,
+        },
+        note: accessConflicts.length > 0
+            ? "accessConflict=true means mods target the same member but request different access levels — last-loaded wins."
+            : "No access-level conflicts found; all shared targets request the same access.",
+        accessConflicts,
+        sharedTargets,
+    };
+}

@@ -20,14 +20,17 @@ import {
     getModAtlas,
     listModEnchantments, getModEnchantment,
     listModGenericDataType, getModGenericDataType,
+    getModManifest, listModConfigs, getModConfig,
+    diffModData,
 } from "./tools/mod-data.js";
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
 import {
     searchModClass, getModClassMembers, getModClassBytecode,
     findModReferences, getModInheritance, diffModVersions, findImplementors,
     scanModRegistrations, findAnnotatedClasses,
+    crossModRefs, findEventListeners,
 } from "./tools/bytecode.js";
-import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets, getMixinsTargetingPackage } from "./tools/mixins.js";
+import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets, getMixinsTargetingPackage, findAtAwConflicts } from "./tools/mixins.js";
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources } from "./tools/platform.js";
 import { listMcVersions, listNeoForgeVersions, listFabricApiVersions, downloadNeoForge, downloadFabricApi } from "./platform.js";
 import {
@@ -176,37 +179,44 @@ server.tool(
     "action=search_class: find class by name with CamelCase/prefix/substring matching (dbId, query). " +
     "action=class_members: list methods/fields with @Inject mixin targets, @Shadow, AT/AW strings (dbId, className). " +
     "action=bytecode: raw javap output (dbId, className). " +
-    "action=find_refs: find all classes referencing a class/method/field (dbId, target). " +
+    "action=find_refs: find all classes referencing a class/method/field within one mod JAR (dbId, target). " +
+    "action=cross_refs: find which mods in the DB reference a given class/method/field — cross-mod coupling analysis (target, mcVersion, loader, limit). " +
     "action=inheritance: superclass, interfaces, subclasses, implementors (dbId, className). " +
     "action=diff: added/removed classes between two mod versions (dbIdA, dbIdB). " +
     "action=find_implementors: find mod classes across DB that extend/implement a target (target, modId, limit, transitive). Set transitive=true to walk the full inheritance chain. " +
     "action=scan_registrations: scan all classes for registration patterns — DeferredRegister, @SubscribeEvent, commands, keybindings, network payloads, config builders, capabilities, loot modifiers (dbId). " +
-    "action=annotated_by: find all classes across the DB annotated with a given annotation, e.g. @SubscribeEvent, @EventBusSubscriber (annotation, modId, limit). Works without decompilation.",
+    "action=annotated_by: find all classes across the DB annotated with a given annotation (annotation, modId, limit). Works without decompilation. " +
+    "action=event_listeners: find @SubscribeEvent methods listening to a specific event class across the DB (event, modId, limit).",
     {
-        action:     z.enum(["search_class","class_members","bytecode","find_refs","inheritance","diff","find_implementors","scan_registrations","annotated_by"]).describe("Operation to perform"),
+        action:     z.enum(["search_class","class_members","bytecode","find_refs","cross_refs","inheritance","diff","find_implementors","scan_registrations","annotated_by","event_listeners"]).describe("Operation to perform"),
         dbId:      z.number().optional().describe("DB id of mod (most actions)"),
         dbIdA:     z.number().optional().describe("Older mod DB id (diff)"),
         dbIdB:     z.number().optional().describe("Newer mod DB id (diff)"),
         query:     z.string().optional().describe("Class name query (search_class)"),
         className: z.string().optional().describe("Internal class name slashes/dots (class_members, bytecode, inheritance)"),
-        target:    z.string().optional().describe("Class/method/field reference (find_refs, find_implementors). Format: 'com/example/MyClass' or 'com/example/MyClass:myMethod:(I)V'"),
+        target:    z.string().optional().describe("Class/method/field reference (find_refs, cross_refs, find_implementors). Format: 'com/example/MyClass' or 'com/example/MyClass:myMethod:(I)V'"),
         annotation:z.string().optional().describe("Annotation class name, slash or dot form (annotated_by), e.g. 'net/neoforged/bus/api/SubscribeEvent'"),
-        modId:     z.union([z.string(), z.number()]).optional().describe("Limit find_implementors / annotated_by to a specific mod"),
+        event:     z.string().optional().describe("Event class name, slash or dot form (event_listeners), e.g. 'net/neoforged/neoforge/event/entity/living/LivingDeathEvent'"),
+        modId:     z.union([z.string(), z.number()]).optional().describe("Limit find_implementors / annotated_by / event_listeners to a specific mod"),
         transitive:z.boolean().optional().describe("Walk full inheritance chain (find_implementors, default false)"),
-        limit:     z.number().optional().describe("Max results (find_implementors, annotated_by)"),
+        mcVersion: z.string().optional().describe("Filter by MC version (cross_refs)"),
+        loader:    z.string().optional().describe("Filter by loader (cross_refs)"),
+        limit:     z.number().optional().describe("Max results (find_implementors, annotated_by, cross_refs, event_listeners)"),
     },
-    async ({ action, dbId, dbIdA, dbIdB, query, className, target, annotation, modId, transitive, limit }) => {
+    async ({ action, dbId, dbIdA, dbIdB, query, className, target, annotation, event, modId, transitive, mcVersion, loader, limit }) => {
         let result: unknown;
         switch (action) {
             case "search_class":     result = await searchModClass(dbId!, query!); break;
             case "class_members":    result = await getModClassMembers(dbId!, className!); break;
             case "bytecode":         result = await getModClassBytecode(dbId!, className!); break;
             case "find_refs":        result = await findModReferences(dbId!, target!); break;
+            case "cross_refs":       result = await crossModRefs(target!, mcVersion, loader, limit); break;
             case "inheritance":      result = await getModInheritance(dbId!, className!); break;
             case "diff":             result = await diffModVersions(dbIdA!, dbIdB!); break;
             case "find_implementors":result = await findImplementors(target!, modId, limit, transitive); break;
             case "scan_registrations": result = await scanModRegistrations(dbId!); break;
             case "annotated_by":     result = await findAnnotatedClasses(annotation!, modId, limit); break;
+            case "event_listeners":  result = await findEventListeners(event!, modId, limit); break;
         }
         return out(result);
     }
@@ -221,23 +231,26 @@ server.tool(
     "action=resolve: read @Mixin bytecode annotations to discover actual target classes and update DB (dbId). " +
     "action=conflicts: find all mods in DB injecting into the same MC class (targetClass). " +
     "action=targets_in_package: find all mods whose mixin targets fall under a given package prefix (packagePrefix, mcVersion optional). " +
+    "action=at_conflicts: find AT/AW entries shared by multiple mods, highlighting access-level disagreements (mcVersion, loader optional). " +
     "action=at_entries: NeoForge/Forge Access Transformer entries for a mod (dbId). " +
     "action=aw_entries: Fabric/Quilt Access Widener entries for a mod (dbId).",
     {
-        action:        z.enum(["targets","resolve","conflicts","targets_in_package","at_entries","aw_entries"]).describe("Operation to perform"),
+        action:        z.enum(["targets","resolve","conflicts","targets_in_package","at_conflicts","at_entries","aw_entries"]).describe("Operation to perform"),
         modId:         z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (targets)"),
         dbId:          z.number().optional().describe("DB integer id (resolve, at_entries, aw_entries)"),
         targetClass:   z.string().optional().describe("Internal class name (conflicts), e.g. 'net/minecraft/world/entity/LivingEntity'"),
         packagePrefix: z.string().optional().describe("Package prefix for targets_in_package, slash or dot form, e.g. 'net/minecraft/world/level' or 'net.minecraft.world.entity'"),
-        mcVersion:     z.string().optional().describe("Filter by MC version (targets_in_package)"),
+        mcVersion:     z.string().optional().describe("Filter by MC version (targets_in_package, at_conflicts)"),
+        loader:        z.string().optional().describe("Filter by loader (at_conflicts)"),
     },
-    async ({ action, modId, dbId, targetClass, packagePrefix, mcVersion }) => {
+    async ({ action, modId, dbId, targetClass, packagePrefix, mcVersion, loader }) => {
         let result: unknown;
         switch (action) {
             case "targets":            result = await getMixinTargets(modId!); break;
             case "resolve":            result = await resolveMixinTargets(dbId!); break;
             case "conflicts":          result = await getMixinConflicts(targetClass!); break;
             case "targets_in_package": result = await getMixinsTargetingPackage(packagePrefix!, mcVersion); break;
+            case "at_conflicts":       result = await findAtAwConflicts(mcVersion, loader); break;
             case "at_entries":         result = await getAtEntries(dbId!); break;
             case "aw_entries":         result = await getAwEntries(dbId!); break;
         }
@@ -684,12 +697,15 @@ server.tool(
     "action=lang: get translation strings from en_us.json with optional filter (modId, filter, limit). " +
     "action=sounds: get sounds.json — all registered sound events and file mappings (modId, namespace). " +
     "action=atlas: get texture atlas JSON (modId, atlas, namespace). " +
-    "action=registry_entries: list items/blocks/entities/sounds/containers/potions/paintings/attributes/trims/creative tabs/fluids registered by a mod via lang key inspection — works without decompilation (modId, type, filter, limit).",
+    "action=registry_entries: list items/blocks/entities/sounds/containers/potions/paintings/attributes/trims/creative tabs/fluids registered by a mod via lang key inspection — works without decompilation (modId, type, filter, limit). " +
+    "action=manifest: read the mod loader manifest (neoforge.mods.toml, mods.toml, fabric.mod.json, quilt.mod.json) — returns raw TOML or parsed JSON (modId). " +
+    "action=list_configs: list default config files shipped inside the JAR under defaultconfigs/ or config/ (modId). " +
+    "action=get_config: read a specific config file from the JAR by path (modId, path).",
     {
-        action:    z.enum(["list_files","get_file","lang","sounds","atlas","registry_entries"]).describe("Operation to perform"),
+        action:    z.enum(["list_files","get_file","lang","sounds","atlas","registry_entries","manifest","list_configs","get_config"]).describe("Operation to perform"),
         modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
         prefix:    z.string().optional().describe("Path prefix to scope listing (list_files), e.g. 'data/mymod/', 'assets/mymod/blockstates/'"),
-        path:      z.string().optional().describe("Internal JAR path (get_file), e.g. 'data/mymod/recipe/iron_sword.json'"),
+        path:      z.string().optional().describe("Internal JAR path (get_file, get_config), e.g. 'defaultconfigs/mymod-common.toml'"),
         filter:    z.string().optional().describe("Substring filter on key or value (lang, registry_entries)"),
         namespace: z.string().optional().describe("Namespace override (sounds, atlas)"),
         atlas:     z.string().optional().describe("Atlas name e.g. 'blocks' (atlas)"),
@@ -705,64 +721,73 @@ server.tool(
             case "sounds":           result = await getModSounds(modId, namespace); break;
             case "atlas":            result = await getModAtlas(modId, atlas, namespace); break;
             case "registry_entries": result = await listModRegistryEntries(modId, type as any, filter, limit); break;
+            case "manifest":         result = await getModManifest(modId); break;
+            case "list_configs":     result = await listModConfigs(modId); break;
+            case "get_config":       result = await getModConfig(modId, path!); break;
         }
         return out(result);
     }
 );
 
-// ── 14. mod_data ──────────────────────────────────────────────────────────────
+// ── 14. mod_data ─────────────────────────────────────────────────────────────
 
 server.tool(
     "mod_data",
     "Mod JAR structured data content — list or fetch JSON for any data type a mod ships. " +
     "action=list: enumerate all items of a type in the JAR. action=get: fetch full JSON for a specific item. " +
+    "action=diff: compare data files between two mod versions — shows added/removed/changed files (dbIdA, dbIdB, dataType optional filter). " +
     "type values: recipe | loot_table | advancement | blockstate | model | biome | structure | data_tag | particle | damage_type | enchantment | " +
     "configured_feature | placed_feature | structure_set | noise | density_function | processor_list | template_pool | " +
     "dimension_type | dimension | trim_material | trim_pattern | painting_variant | wolf_variant | cat_variant | chat_type. " +
-    "Common params: modId (required), namespace (optional scope), filter (list only, substring). " +
+    "Common params: modId (required for list/get), namespace (optional scope), filter (list only, substring). " +
     "id: resource id for get, e.g. 'mymod:iron_sword'. modelPath: use instead of id for type=model. " +
     "registry: required for data_tag type, e.g. 'item', 'block', 'entity_type'.",
     {
-        action:    z.enum(["list","get"]).describe("list: enumerate items in JAR; get: fetch full JSON"),
+        action:    z.enum(["list","get","diff"]).describe("list/get: JAR data operations; diff: compare two mod versions"),
         type:      z.enum(["recipe","loot_table","advancement","blockstate","model","biome","structure","data_tag","particle","damage_type","enchantment","configured_feature","placed_feature","structure_set","noise","density_function","processor_list","template_pool","dimension_type","dimension","trim_material","trim_pattern","painting_variant","wolf_variant","cat_variant","chat_type"]).describe("Data type to query"),
-        modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
+        modId:     z.union([z.string(), z.number()]).optional().describe("Mod ID string or numeric DB id (list, get)"),
+        dbIdA:     z.number().optional().describe("Older mod DB id (diff)"),
+        dbIdB:     z.number().optional().describe("Newer mod DB id (diff)"),
         id:        z.string().optional().describe("Resource id for get, e.g. 'mymod:iron_sword' or 'iron_sword'"),
         modelPath: z.string().optional().describe("Model path for type=model get, e.g. 'block/my_block' or 'mymod:item/my_item'"),
         namespace: z.string().optional().describe("Namespace override / scope filter"),
-        filter:    z.string().optional().describe("Substring filter on path (list only)"),
+        filter:    z.string().optional().describe("Substring filter on path (list, diff)"),
         registry:  z.string().optional().describe("Tag registry folder for type=data_tag: item|block|entity_type|fluid|..."),
+        dataType:  z.string().optional().describe("Data type substring filter for diff (e.g. 'recipe', 'loot_table')"),
     },
-    async ({ action, type, modId, id, modelPath, namespace, filter, registry }) => {
+    async ({ action, type, modId, dbIdA, dbIdB, id, modelPath, namespace, filter, registry, dataType }) => {
         let result: unknown;
-        if (action === "list") {
+        if (action === "diff") {
+            result = await diffModData(dbIdA!, dbIdB!, dataType);
+        } else if (action === "list") {
             switch (type) {
-                case "recipe":      result = await listModRecipes(modId, namespace, filter); break;
-                case "loot_table":  result = await listModLootTables(modId, namespace, filter); break;
-                case "advancement": result = await listModAdvancements(modId, namespace, filter); break;
-                case "blockstate":  result = await listModBlockstates(modId, namespace, filter); break;
-                case "model":       result = await listModModels(modId, namespace, filter); break;
-                case "biome":       result = await listModBiomes(modId, namespace, filter); break;
-                case "structure":   result = await listModStructures(modId, namespace, filter); break;
-                case "data_tag":    result = await listModDataTags(modId, registry, namespace, filter); break;
-                case "particle":    result = await listModParticles(modId, namespace, filter); break;
-                case "damage_type": result = await listModDamageTypes(modId, namespace, filter); break;
-                case "enchantment": result = await listModEnchantments(modId, namespace, filter); break;
-                default:            result = await listModGenericDataType(modId, type, namespace, filter); break;
+                case "recipe":      result = await listModRecipes(modId!, namespace, filter); break;
+                case "loot_table":  result = await listModLootTables(modId!, namespace, filter); break;
+                case "advancement": result = await listModAdvancements(modId!, namespace, filter); break;
+                case "blockstate":  result = await listModBlockstates(modId!, namespace, filter); break;
+                case "model":       result = await listModModels(modId!, namespace, filter); break;
+                case "biome":       result = await listModBiomes(modId!, namespace, filter); break;
+                case "structure":   result = await listModStructures(modId!, namespace, filter); break;
+                case "data_tag":    result = await listModDataTags(modId!, registry, namespace, filter); break;
+                case "particle":    result = await listModParticles(modId!, namespace, filter); break;
+                case "damage_type": result = await listModDamageTypes(modId!, namespace, filter); break;
+                case "enchantment": result = await listModEnchantments(modId!, namespace, filter); break;
+                default:            result = await listModGenericDataType(modId!, type, namespace, filter); break;
             }
         } else {
             switch (type) {
-                case "recipe":      result = await getModRecipe(modId, id!, namespace); break;
-                case "loot_table":  result = await getModLootTable(modId, id!, namespace); break;
-                case "advancement": result = await getModAdvancement(modId, id!, namespace); break;
-                case "blockstate":  result = await getModBlockstate(modId, id!, namespace); break;
-                case "model":       result = await getModModel(modId, modelPath ?? id!, namespace); break;
-                case "biome":       result = await getModBiome(modId, id!, namespace); break;
-                case "structure":   result = await getModStructureData(modId, id!, namespace); break;
-                case "data_tag":    result = await getModDataTag(modId, registry!, id!, namespace); break;
-                case "particle":    result = await getModParticle(modId, id!, namespace); break;
-                case "damage_type": result = await getModDamageType(modId, id!, namespace); break;
-                case "enchantment": result = await getModEnchantment(modId, id!, namespace); break;
-                default:            result = await getModGenericDataType(modId, type, id!, namespace); break;
+                case "recipe":      result = await getModRecipe(modId!, id!, namespace); break;
+                case "loot_table":  result = await getModLootTable(modId!, id!, namespace); break;
+                case "advancement": result = await getModAdvancement(modId!, id!, namespace); break;
+                case "blockstate":  result = await getModBlockstate(modId!, id!, namespace); break;
+                case "model":       result = await getModModel(modId!, modelPath ?? id!, namespace); break;
+                case "biome":       result = await getModBiome(modId!, id!, namespace); break;
+                case "structure":   result = await getModStructureData(modId!, id!, namespace); break;
+                case "data_tag":    result = await getModDataTag(modId!, registry!, id!, namespace); break;
+                case "particle":    result = await getModParticle(modId!, id!, namespace); break;
+                case "damage_type": result = await getModDamageType(modId!, id!, namespace); break;
+                case "enchantment": result = await getModEnchantment(modId!, id!, namespace); break;
+                default:            result = await getModGenericDataType(modId!, type, id!, namespace); break;
             }
         }
         return out(result);
@@ -872,20 +897,22 @@ server.tool(
     "report=version_conflicts: duplicate modId and unresolved dep report. " +
     "report=mod_overview: full overview for one mod (modId required). " +
     "report=gradle_deps: gradle dependency comparison report (groupFilter, modIdFilter). " +
+    "report=pack_compat: one-shot pack compatibility audit combining mixin conflicts, AT/AW conflicts, tag conflicts, and dep issues (mcVersion, loader). " +
     "savePath: optional absolute path to save the .md file.",
     {
-        report:       z.enum(["mixin_conflicts","tag_conflicts","version_conflicts","mod_overview","gradle_deps"]).describe("Which report to generate"),
+        report:       z.enum(["mixin_conflicts","tag_conflicts","version_conflicts","mod_overview","gradle_deps","pack_compat"]).describe("Which report to generate"),
         savePath:     z.string().optional().describe("Absolute path to save the .md file, e.g. 'C:/reports/mixin_conflicts.md'"),
         modId:        z.union([z.string(), z.number()]).optional().describe("Required for mod_overview report"),
-        loader:       z.string().optional().describe("Loader filter for mixin_conflicts"),
-        mcVersion:    z.string().optional().describe("MC version filter for mixin_conflicts"),
+        loader:       z.string().optional().describe("Loader filter for mixin_conflicts, pack_compat"),
+        mcVersion:    z.string().optional().describe("MC version filter for mixin_conflicts, pack_compat"),
         registry:     z.string().optional().describe("Registry filter for tag_conflicts"),
         minConflicts: z.number().optional().describe("Min mods to count as conflict (default 2)"),
         groupFilter:  z.string().optional().describe("Dep group filter for gradle_deps"),
         modIdFilter:  z.string().optional().describe("Mod filter for gradle_deps"),
+        dbIds:        z.array(z.number()).optional().describe("DB ids of specific mods to include in pack_compat scope"),
     },
-    async ({ report, savePath, modId, loader, mcVersion, registry, minConflicts, groupFilter, modIdFilter }) => {
-        const result = await generateReport({ report, savePath, modId, loader, mcVersion, registry, minConflicts, groupFilter, modIdFilter });
+    async ({ report, savePath, modId, loader, mcVersion, registry, minConflicts, groupFilter, modIdFilter, dbIds }) => {
+        const result = await generateReport({ report, savePath, modId, loader, mcVersion, registry, minConflicts, groupFilter, modIdFilter, dbIds });
         return out(result.savedTo ? `Saved to: ${result.savedTo}\n\n${result.markdown}` : result.markdown);
     }
 );

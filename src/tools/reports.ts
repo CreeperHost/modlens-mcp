@@ -20,6 +20,9 @@ import { getMixinConflictMatrix, getMixinHotspots, listModsWithMixins } from "./
 import { findTagConflicts, getTagContributors, getModTagList, searchModTags } from "./mod-tags.js";
 import { findVersionConflicts, getDependencyGraph, listModSourceUrls } from "./catalog.js";
 import { compareGradleDeps } from "./gradle.js";
+import { getMixinConflicts } from "./mixins.js";
+import { findAtAwConflicts } from "./mixins.js";
+import { findTagConflicts as _ftc } from "./mod-tags.js";
 
 // ── Markdown helpers ──────────────────────────────────────────────────────────
 
@@ -259,7 +262,111 @@ export type ReportType =
     | "tag_conflicts"
     | "version_conflicts"
     | "mod_overview"
-    | "gradle_deps";
+    | "gradle_deps"
+    | "pack_compat";
+
+async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbIds?: number[] }): Promise<string> {
+    // Run all relevant checks concurrently
+    const [versionData, atawData, mixinData, tagData] = await Promise.all([
+        findVersionConflicts() as Promise<{
+            duplicateModIds: { count: number; mods: Array<{ modId: string; display: string; ingestedVersions: Array<{ version: string; mcVersion: string; loader: string; dbId: number }> }> };
+            unsatisfiedDeps: { count: number; deps: Array<{ declaredBy: string; depId: string; requiredRange: string; foundVersions: string[]; required: boolean }> };
+        }>,
+        findAtAwConflicts(opts.mcVersion, opts.loader) as Promise<{
+            accessConflicts: Array<{ target: string; modCount: number; users: Array<{ mod: string; access: string }> }>;
+            sharedTargets: Array<{ target: string; modCount: number }>;
+            totalModsWithAt: number; totalModsWithAw: number;
+        }>,
+        getMixinConflictMatrix(opts.loader, opts.mcVersion, 2) as Promise<{
+            conflictingClasses: number;
+            conflicts: Array<{ class: string; mixedByCount: number; mods: Array<{ modId: string; version: string }> }>;
+        }>,
+        _ftc(undefined) as Promise<{
+            hardConflicts: { count: number; conflicts: Array<{ tagPath: string; registry: string; conflictingMods: Array<{ mod: string }> }> };
+            softConflicts: { count: number };
+        }>,
+    ]);
+
+    let md = h1("Pack Compatibility Report");
+    md += `${timestamp()}\n`;
+    if (opts.mcVersion) md += `MC version: ${code(opts.mcVersion)}\n`;
+    if (opts.loader) md += `Loader: ${code(opts.loader)}\n`;
+
+    // ── Summary scorecard
+    const issues = [
+        versionData.duplicateModIds.count > 0 ? `${versionData.duplicateModIds.count} duplicate mod ID(s)` : null,
+        versionData.unsatisfiedDeps.count > 0 ? `${versionData.unsatisfiedDeps.count} unsatisfied dep(s)` : null,
+        atawData.accessConflicts.length > 0 ? `${atawData.accessConflicts.length} AT/AW access conflict(s)` : null,
+        mixinData.conflictingClasses > 0 ? `${mixinData.conflictingClasses} mixin-conflicted class(es)` : null,
+        tagData.hardConflicts.count > 0 ? `${tagData.hardConflicts.count} hard tag conflict(s)` : null,
+    ].filter(Boolean);
+
+    md += h2("Scorecard");
+    if (issues.length === 0) {
+        md += `✅ No issues detected.\n`;
+    } else {
+        md += `⚠️ ${issues.length} issue category(ies) found:\n\n`;
+        for (const i of issues) md += `- ${i}\n`;
+    }
+
+    // ── Duplicate mod IDs
+    if (versionData.duplicateModIds.count > 0) {
+        md += h2("Duplicate Mod IDs");
+        for (const m of versionData.duplicateModIds.mods) {
+            md += `- ${code(m.modId)}: ${m.ingestedVersions.map(v => v.version).join(", ")}\n`;
+        }
+    }
+
+    // ── Unsatisfied deps (required only)
+    const requiredUnsatisfied = versionData.unsatisfiedDeps.deps.filter(d => d.required);
+    if (requiredUnsatisfied.length > 0) {
+        md += h2("Unsatisfied Required Dependencies");
+        md += tableHeader(["Declared By", "Needs", "Range", "Found"]);
+        for (const d of requiredUnsatisfied) {
+            md += "\n" + tableRow([code(d.declaredBy), code(d.depId), code(d.requiredRange), d.foundVersions.join(", ") || "—"]);
+        }
+        md += "\n";
+    }
+
+    // ── AT/AW access conflicts
+    if (atawData.accessConflicts.length > 0) {
+        md += h2("AT/AW Access Conflicts");
+        md += `> These members are targeted by multiple mods with **different** access levels. Last-loaded mod wins.\n`;
+        md += tableHeader(["Target", "Mods (access)"]);
+        for (const c of atawData.accessConflicts.slice(0, 20)) {
+            const mods = c.users.map(u => `${code(u.mod)} (${u.access})`).join(", ");
+            md += "\n" + tableRow([code(c.target), mods]);
+        }
+        md += "\n";
+        if (atawData.accessConflicts.length > 20) md += `_…and ${atawData.accessConflicts.length - 20} more. Run \`mod_mixins action=at_conflicts\` for full list._\n`;
+    }
+
+    // ── Mixin conflicts (top 10)
+    if (mixinData.conflictingClasses > 0) {
+        md += h2(`Mixin Conflicts (${mixinData.conflictingClasses} classes)`);
+        md += `> Only showing top 10 most-targeted classes. Run \`reports report=mixin_conflicts\` for full list.\n`;
+        const top10 = mixinData.conflicts.slice(0, 10);
+        md += tableHeader(["MC Class", "# Mods", "Mods"]);
+        for (const c of top10) {
+            md += "\n" + tableRow([code(c.class), String(c.mixedByCount), c.mods.map(m => code(m.modId)).join(", ")]);
+        }
+        md += "\n";
+    }
+
+    // ── Tag hard conflicts (top 10)
+    if (tagData.hardConflicts.count > 0) {
+        md += h2(`Tag Hard Conflicts (${tagData.hardConflicts.count})`);
+        const top10 = tagData.hardConflicts.conflicts.slice(0, 10);
+        md += tableHeader(["Tag", "Registry", "Competing Mods"]);
+        for (const c of top10) {
+            md += "\n" + tableRow([code(c.tagPath), c.registry, c.conflictingMods.map(m => code(m.mod)).join(", ")]);
+        }
+        md += "\n";
+        if (tagData.hardConflicts.count > 10) md += `_…and ${tagData.hardConflicts.count - 10} more. Run \`reports report=tag_conflicts\` for full list._\n`;
+    }
+
+    return md;
+}
 
 export async function generateReport(opts: {
     report: ReportType;
@@ -272,6 +379,7 @@ export async function generateReport(opts: {
     minConflicts?: number;
     groupFilter?: string;
     modIdFilter?: string;
+    dbIds?: number[];
 }): Promise<{ markdown: string; savedTo?: string }> {
     let markdown: string;
 
@@ -291,6 +399,9 @@ export async function generateReport(opts: {
             break;
         case "gradle_deps":
             markdown = await reportGradleDeps({ groupFilter: opts.groupFilter, modIdFilter: opts.modIdFilter });
+            break;
+        case "pack_compat":
+            markdown = await reportPackCompat({ mcVersion: opts.mcVersion, loader: opts.loader, dbIds: opts.dbIds });
             break;
         default:
             throw new Error(`Unknown report type: ${(opts as { report: string }).report}`);
