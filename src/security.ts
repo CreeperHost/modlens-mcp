@@ -1,4 +1,4 @@
-import { resolve, relative, isAbsolute } from "path";
+import { resolve, relative, isAbsolute, sep } from "path";
 import { createHash } from "crypto";
 import { readFile } from "fs/promises";
 
@@ -14,7 +14,8 @@ export function validatePath(untrusted: string, base: string): string {
     const resolvedTarget = resolve(base, untrusted);
 
     // Absolute paths that don't start with resolvedBase are traversals
-    if (isAbsolute(untrusted) && !resolvedTarget.startsWith(resolvedBase + "/") && resolvedTarget !== resolvedBase) {
+    const baseWithSep = resolvedBase.endsWith(sep) ? resolvedBase : resolvedBase + sep;
+    if (isAbsolute(untrusted) && !resolvedTarget.startsWith(baseWithSep) && resolvedTarget !== resolvedBase) {
         throw new Error(`Path traversal attempt rejected: '${untrusted}'`);
     }
 

@@ -120,7 +120,7 @@ export async function getMixinConflictRaw(
             t.class_name,
             COUNT(DISTINCT m.id)::int AS mod_count,
             ARRAY_AGG(DISTINCT m.id) AS mod_ids
-        FROM "Mod" m
+        FROM "mods" m
         CROSS JOIN LATERAL jsonb_array_elements_text(m.mixin_targets::jsonb) AS t(class_name)
         WHERE ${whereSQL}
         GROUP BY t.class_name

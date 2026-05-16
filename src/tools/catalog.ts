@@ -120,8 +120,9 @@ export async function findVersionConflicts(): Promise<object> {
             const versions = found.map((m) => m.version);
             // Simple heuristic: if range contains "[" or "]" it's a maven range
             // Flag if no exact match and range looks specific
-            const rangeIsSpecific = dep.version !== "*" && dep.version !== "" && dep.version !== "any";
-            if (rangeIsSpecific && !versions.includes(dep.version.replace(/[\[\]()]/g, "").split(",")[0].trim())) {
+            const versionStr = typeof dep.version === "string" ? dep.version : String(dep.version ?? "");
+            const rangeIsSpecific = versionStr !== "*" && versionStr !== "" && versionStr !== "any";
+            if (rangeIsSpecific && !versions.includes(versionStr.replace(/[\[\]()]/g, "").split(",")[0].trim())) {
                 unsatisfied.push({
                     declaredBy:    mod.modId,
                     depId:         dep.id,
