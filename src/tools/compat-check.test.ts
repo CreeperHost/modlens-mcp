@@ -9,15 +9,15 @@ vi.mock("../repositories/mod.js", () => ({
 }));
 vi.mock("../security.js", () => ({ validatePath: vi.fn() }));
 vi.mock("../db.js", () => ({
-    db: vi.fn(() => ({
+    getDb: vi.fn().mockResolvedValue({
         $queryRawUnsafe: vi.fn().mockResolvedValue([]),
-    })),
+    }),
 }));
 
 import { parseJar } from "../processor.js";
 import { listEntries, extractEntry } from "../jar.js";
 import { listModsSlim, findModsWithMixinTargetsMatching } from "../repositories/mod.js";
-import { db } from "../db.js";
+import { getDb } from "../db.js";
 
 const BASE_MANIFEST = {
     modId: "newmod", displayName: "New Mod", version: "1.0",
@@ -39,7 +39,7 @@ beforeEach(() => {
     vi.mocked(findModsWithMixinTargetsMatching).mockResolvedValue([]);
     vi.mocked(listEntries).mockReturnValue([]);
     vi.mocked(extractEntry).mockReturnValue(null);
-    vi.mocked(db).mockReturnValue({ $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as any);
+    vi.mocked(getDb).mockResolvedValue({ $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as any);
 });
 
 describe("checkModCompat", () => {

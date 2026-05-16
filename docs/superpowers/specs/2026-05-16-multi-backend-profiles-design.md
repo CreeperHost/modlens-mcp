@@ -335,7 +335,7 @@ These are also written to `~/.modlens-backups/README.md` (append-only log of all
 | `sqlite-vec` | Vector ANN search extension for SQLite | SQLite |
 | `@types/better-sqlite3` | Types | SQLite |
 
-All new deps are optional — installed by the wizard only when the selected profile requires them (`npm install --save @electric-sql/pglite` etc. run programmatically from `setup.ts`).
+All new deps go into `optionalDependencies` in `package.json`. They are downloaded on `npm install` but a native binding failure (e.g. `better-sqlite3` on an unusual platform) will not block install. The wizard verifies each dep is loadable via a try/import check and surfaces a clear error if one is missing, rather than running `npm install` at runtime.
 
 ---
 

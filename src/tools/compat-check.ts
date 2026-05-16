@@ -14,7 +14,7 @@
 import { parseJar } from "../processor.js";
 import { listEntries, extractEntry } from "../jar.js";
 import { validatePath } from "../security.js";
-import { db } from "../db.js";
+import { getDb } from "../db.js";
 import { listModsSlim, findModsWithMixinTargetsMatching } from "../repositories/mod.js";
 
 export type IssueSeverity = "error" | "warn" | "info";
@@ -77,7 +77,7 @@ export async function checkModCompat(
     const candidateAw = new Set(manifest.awEntries);
 
     if (candidateAt.size > 0 || candidateAw.size > 0) {
-        const atRows = await db().$queryRawUnsafe<
+        const atRows = await (await getDb()).$queryRawUnsafe<
             Array<{ mod_id: string; display_name: string; at_entries: unknown; aw_entries: unknown }>
         >(`SELECT mod_id, display_name, at_entries, aw_entries FROM mods WHERE has_at = true OR has_aw = true`);
 

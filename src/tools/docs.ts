@@ -13,10 +13,11 @@
  *   delete_documentation     - Remove an entry by ID
  *   seed_default_documentation - Populate the default Fabric/NeoForge/MC entries
  */
-import { db } from "../db.js";
+import { getDb } from "../db.js";
 import type { Prisma } from "@prisma/client";
 import { embed, isOllamaAvailable } from "../embeddings.js";
 import { upsertDocEmbedding, searchDocsByVector, countUnembedded } from "../repositories/embeddings.js";
+import { ftsSearchDocs } from "../search-adapter.js";
 
 export interface DocEntryInput {
     className?: string;
@@ -33,12 +34,13 @@ export interface DocEntryInput {
 export async function ingestDocumentation(entries: DocEntryInput[]): Promise<object> {
     const results = [];
     for (const e of entries) {
+        const db = await getDb();
         const existing = e.className
-            ? await db().docEntry.findFirst({ where: { className: e.className, url: e.url } })
-            : await db().docEntry.findFirst({ where: { title: e.title, url: e.url } });
+            ? await db.docEntry.findFirst({ where: { className: e.className, url: e.url } })
+            : await db.docEntry.findFirst({ where: { title: e.title, url: e.url } });
 
         if (existing) {
-            const updated = await db().docEntry.update({
+            const updated = await db.docEntry.update({
                 where: { id: existing.id },
                 data: {
                     title: e.title,
@@ -52,7 +54,7 @@ export async function ingestDocumentation(entries: DocEntryInput[]): Promise<obj
             results.push({ action: "updated", id: updated.id, title: updated.title });
             await tryEmbedDoc(updated.id, updated.title, updated.summary);
         } else {
-            const created = await db().docEntry.create({
+            const created = await db.docEntry.create({
                 data: {
                     className: e.className ?? null,
                     title: e.title,
@@ -75,7 +77,8 @@ export async function ingestDocumentation(entries: DocEntryInput[]): Promise<obj
 export async function getDocumentation(query: string): Promise<object> {
     // Try exact class name match first
     const normalized = query.replace(/\./g, "/");
-    const byClass = await db().docEntry.findMany({
+    const db = await getDb();
+    const byClass = await db.docEntry.findMany({
         where: {
             OR: [
                 { className: query },
@@ -87,20 +90,8 @@ export async function getDocumentation(query: string): Promise<object> {
     });
     if (byClass.length > 0) return { found: true, query, results: byClass };
 
-    // Fall back to title/summary keyword search (case-insensitive)
-    const keyword = query.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
-    const rows = await db().$queryRaw<Array<{
-        id: number; class_name: string | null; title: string; summary: string | null;
-        url: string; category: string; namespace: string; tags: string[];
-    }>>`
-        SELECT id, class_name, title, summary, url, category, namespace, tags
-        FROM doc_entries
-        WHERE lower(title) LIKE ${"%" + keyword + "%"}
-           OR lower(summary) LIKE ${"%" + keyword + "%"}
-           OR lower(class_name) LIKE ${"%" + keyword + "%"}
-        ORDER BY id
-        LIMIT 20
-    `;
+    // Fall back to title/summary keyword search via adapter
+    const rows = await ftsSearchDocs(query, 20);
     return { found: rows.length > 0, query, results: rows };
 }
 
@@ -118,7 +109,8 @@ export async function searchDocumentation(query: string, category?: string, name
     if (category)  where.category  = category;
     if (namespace) where.namespace = namespace;
 
-    const results = await db().docEntry.findMany({
+    const db = await getDb();
+    const results = await db.docEntry.findMany({
         where,
         orderBy: { title: "asc" },
         take: 50,
@@ -138,8 +130,9 @@ export async function listDocumentation(
     if (namespace) where.namespace = namespace;
     if (tag)       where.tags      = { has: tag };
 
-    const total = await db().docEntry.count({ where });
-    const results = await db().docEntry.findMany({
+    const db = await getDb();
+    const total = await db.docEntry.count({ where });
+    const results = await db.docEntry.findMany({
         where,
         orderBy: [{ category: "asc" }, { title: "asc" }],
         take: limit,
@@ -149,9 +142,10 @@ export async function listDocumentation(
 
 // ── delete_documentation ──────────────────────────────────────────────────────
 export async function deleteDocumentation(id: number): Promise<object> {
-    const existing = await db().docEntry.findUnique({ where: { id } });
+    const db = await getDb();
+    const existing = await db.docEntry.findUnique({ where: { id } });
     if (!existing) return { deleted: false, message: `No doc entry with id ${id}` };
-    await db().docEntry.delete({ where: { id } });
+    await db.docEntry.delete({ where: { id } });
     return { deleted: true, id, title: existing.title };
 }
 
@@ -229,7 +223,8 @@ export async function semanticSearchDocumentation(query: string, limit = 10): Pr
     const rows = await searchDocsByVector(vec, limit);
     if (!rows.length) return { query, semantic: true, count: 0, results: [] };
     const ids = rows.map(r => r.id);
-    const entries = await db().docEntry.findMany({ where: { id: { in: ids } } });
+    const db = await getDb();
+    const entries = await db.docEntry.findMany({ where: { id: { in: ids } } });
     const byId = Object.fromEntries(entries.map(e => [e.id, e]));
     const results = rows.map(r => ({ similarity: Math.round(r.similarity * 1000) / 1000, ...byId[r.id] }));
     return { query, semantic: true, count: results.length, results };
@@ -241,7 +236,8 @@ export async function backfillDocEmbeddings(): Promise<object> {
     if (!await isOllamaAvailable()) {
         return { error: "Ollama is not available. Set OLLAMA_URL and ensure Ollama is running." };
     }
-    const rows = await db().docEntry.findMany({ select: { id: true, title: true, summary: true } });
+    const db = await getDb();
+    const rows = await db.docEntry.findMany({ select: { id: true, title: true, summary: true } });
     const unembedded = await countUnembedded("doc_entries");
     let done = 0; let failed = 0;
     for (const row of rows) {

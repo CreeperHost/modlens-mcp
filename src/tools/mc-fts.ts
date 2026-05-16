@@ -148,7 +148,9 @@ export async function indexMcSourceSemantic(
     let embedded = 0; let skipped = 0;
     let offset = 0;
     while (true) {
-        const batch = await (await import("../db.js")).db().$queryRawUnsafe<Array<{ id: number; class_name: string; content: string }>>(
+        const { getDb } = await import("../db.js");
+        const _db = await getDb();
+        const batch = await _db.$queryRawUnsafe<Array<{ id: number; class_name: string; content: string }>>(
             `SELECT id, class_name, content FROM mc_source_files
              WHERE mc_version_id = $1 AND embedding IS NULL
              ORDER BY id LIMIT $2 OFFSET $3`,

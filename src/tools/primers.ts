@@ -10,11 +10,12 @@
  */
 import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
-import { db } from "../db.js";
+import { getDb } from "../db.js";
 import { Prisma } from "@prisma/client";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
 import { embed, isOllamaAvailable, chunkText } from "../embeddings.js";
 import { upsertPrimerEmbedding, searchPrimersByVector, countUnembedded } from "../repositories/embeddings.js";
+import { ftsSearchPrimers } from "../search-adapter.js";
 
 // ── Version resolution ────────────────────────────────────────────────────────
 const VERSIONS_CACHE = join(CACHE_ROOT, "mcmeta", "_latest", "summary", "versions", "data.json");
@@ -97,7 +98,8 @@ export async function ingestPrimer(entries: {
         ]);
 
         // Upsert by url
-        const primer = await db().primer.upsert({
+        const db = await getDb();
+        const primer = await db.primer.upsert({
             where: { url: e.url } as Prisma.PrimerWhereUniqueInput,
             create: {
                 fromVersion: e.fromVersion,
@@ -134,7 +136,8 @@ export async function ingestPrimer(entries: {
 
 /** Get a single primer by ID. */
 export async function getPrimer(id: number): Promise<object> {
-    const primer = await db().primer.findUnique({ where: { id } });
+    const db = await getDb();
+    const primer = await db.primer.findUnique({ where: { id } });
     if (!primer) return { found: false, id };
     return primer;
 }
@@ -179,7 +182,8 @@ export async function getPrimersByVersionRange(
         };
     }
 
-    const primers = await db().primer.findMany({
+    const db = await getDb();
+    const primers = await db.primer.findMany({
         where,
         orderBy: [{ fromDataVersion: "asc" }, { fromVersion: "asc" }],
         select: {
@@ -225,7 +229,7 @@ export async function searchPrimers(
         versionFilter.push({ fromVersion });
     }
 
-    const primers = await db().primer.findMany({
+    const primers = await (await getDb()).primer.findMany({
         where: {
             AND: [
                 {
@@ -262,7 +266,7 @@ export async function listPrimers(
     modloader?: string,
     limit = 50,
 ): Promise<object> {
-    const primers = await db().primer.findMany({
+    const primers = await (await getDb()).primer.findMany({
         where: modloader ? { modloader } : {},
         orderBy: [{ fromDataVersion: "asc" }, { fromVersion: "asc" }],
         take: limit,
@@ -282,7 +286,7 @@ export async function listPrimers(
 
 /** Delete a primer by ID. */
 export async function deletePrimer(id: number): Promise<object> {
-    const deleted = await db().primer.delete({ where: { id } }).catch(() => null);
+    const deleted = await (await getDb()).primer.delete({ where: { id } }).catch(() => null);
     return { deleted: !!deleted, id };
 }
 
@@ -412,7 +416,7 @@ export async function semanticSearchPrimers(query: string, limit = 10): Promise<
     const rows = await searchPrimersByVector(vec, limit);
     if (!rows.length) return { query, semantic: true, count: 0, results: [] };
     const ids = rows.map(r => r.id);
-    const primers = await db().primer.findMany({
+    const primers = await (await getDb()).primer.findMany({
         where: { id: { in: ids } },
         select: { id: true, fromVersion: true, toVersion: true, modloader: true, title: true, summary: true, url: true, tags: true },
     });
@@ -427,7 +431,8 @@ export async function backfillPrimerEmbeddings(): Promise<object> {
     if (!await isOllamaAvailable()) {
         return { error: "Ollama is not available. Set OLLAMA_URL and ensure Ollama is running." };
     }
-    const rows = await db().primer.findMany({ select: { id: true, title: true, summary: true, content: true } });
+    const db = await getDb();
+    const rows = await db.primer.findMany({ select: { id: true, title: true, summary: true, content: true } });
     const unembedded = await countUnembedded("primers");
     let done = 0; let failed = 0;
     for (const row of rows) {

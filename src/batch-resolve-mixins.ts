@@ -3,10 +3,10 @@
  * Reads @Mixin annotations from bytecode and updates the mixinTargets column.
  * Usage: node dist/batch-resolve-mixins.js
  */
-import { db, disconnect } from "./db.js";
+import { getDb, disconnect } from "./db.js";
 import { resolveMixinTargets } from "./tools/mixins.js";
 
-const mods = await db().mod.findMany({
+const mods = await (await getDb()).mod.findMany({
     where: { hasMixins: true },
     select: { id: true, modId: true, mixinConfigs: true },
     orderBy: { id: "asc" },

@@ -16,7 +16,7 @@ import {
     listMcVersions, listNeoForgeVersions, listFabricApiVersions,
     downloadNeoForge, downloadFabricApi,
 } from "./platform.js";
-import { db, disconnect } from "./db.js";
+import { getDb, disconnect } from "./db.js";
 import { readdir } from "fs/promises";
 import { join, resolve } from "path";
 import { backfillDocEmbeddings } from "./tools/docs.js";
@@ -425,7 +425,7 @@ try {
 
         // ── Batch resolve mixins ───────────────────────────────────────────────
         case "batch-resolve-mixins": {
-            const mods = await db().mod.findMany({
+            const mods = await (await getDb()).mod.findMany({
                 where: { hasMixins: true },
                 select: { id: true, modId: true },
                 orderBy: { id: "asc" },

@@ -3,7 +3,7 @@
  * All Prisma queries against these tables live here.
  * Tool files import from this module instead of calling db() directly.
  */
-import { db } from "../db.js";
+import { getDb } from "../db.js";
 import type { Mod, Prisma } from "@prisma/client";
 
 // ── Projections ───────────────────────────────────────────────────────────────
@@ -37,19 +37,23 @@ export type SyncModRow = {
 // ── Mod queries ───────────────────────────────────────────────────────────────
 
 export async function findModById(id: number): Promise<Mod | null> {
-    return db().mod.findUnique({ where: { id } });
+    const db = await getDb();
+    return db.mod.findUnique({ where: { id } });
 }
 
 export async function findModByJarPath(jarPath: string): Promise<Mod | null> {
-    return db().mod.findUnique({ where: { jarPath } });
+    const db = await getDb();
+    return db.mod.findUnique({ where: { jarPath } });
 }
 
 export async function findModByModId(modId: string): Promise<Mod | null> {
-    return db().mod.findFirst({ where: { modId } });
+    const db = await getDb();
+    return db.mod.findFirst({ where: { modId } });
 }
 
 export async function findModByModIdLike(modId: string): Promise<Mod | null> {
-    return db().mod.findFirst({ where: { modId: { contains: modId } } });
+    const db = await getDb();
+    return db.mod.findFirst({ where: { modId: { contains: modId } } });
 }
 
 /** Resolve mod by string or number. Numeric strings try findById first. */
@@ -66,33 +70,38 @@ export async function resolveModRef(ref: string | number): Promise<Mod | null> {
 /** Slim resolveModRef — returns only id, modId, displayName, version, jarPath. */
 export async function resolveModRefSlim(ref: string | number): Promise<ModRef | null> {
     const sel = { id: true, modId: true, displayName: true, version: true, jarPath: true, loader: true, mcVersion: true } as const;
+    const db = await getDb();
     if (typeof ref === "number") {
-        return db().mod.findUnique({ where: { id: ref }, select: sel });
+        return db.mod.findUnique({ where: { id: ref }, select: sel });
     }
     const n = parseInt(String(ref), 10);
     if (!isNaN(n)) {
-        const byId = await db().mod.findUnique({ where: { id: n }, select: sel });
+        const byId = await db.mod.findUnique({ where: { id: n }, select: sel });
         if (byId) return byId;
     }
-    return db().mod.findFirst({ where: { modId: { contains: String(ref) } }, select: sel });
+    return db.mod.findFirst({ where: { modId: { contains: String(ref) } }, select: sel });
 }
 
 export async function findModByDupKey(
     modId: string, version: string, mcVersion: string, loader: string,
 ): Promise<Mod | null> {
-    return db().mod.findFirst({ where: { modId, version, mcVersion, loader } });
+    const db = await getDb();
+    return db.mod.findFirst({ where: { modId, version, mcVersion, loader } });
 }
 
 export async function findModBySha512(sha512: string): Promise<Mod | null> {
-    return db().mod.findFirst({ where: { sha512 } });
+    const db = await getDb();
+    return db.mod.findFirst({ where: { sha512 } });
 }
 
 export async function listAllMods(): Promise<Mod[]> {
-    return db().mod.findMany({ orderBy: { id: "asc" } });
+    const db = await getDb();
+    return db.mod.findMany({ orderBy: { id: "asc" } });
 }
 
 export async function findModsByIds(ids: number[]): Promise<Mod[]> {
-    return db().mod.findMany({ where: { id: { in: ids } } });
+    const db = await getDb();
+    return db.mod.findMany({ where: { id: { in: ids } } });
 }
 
 /**
@@ -113,7 +122,8 @@ export async function getMixinConflictRaw(
 
     const whereSQL = whereClauses.join(" AND ");
 
-    const rows = await db().$queryRawUnsafe<
+    const db = await getDb();
+    const rows = await db.$queryRawUnsafe<
         Array<{ class_name: string; mod_count: string; mod_ids: number[] }>
     >(`
         WITH deduped AS (
@@ -157,7 +167,8 @@ export async function findModsWithMixinTargetsMatching(
     if (mcVersion) { params.push(mcVersion); extra.push(`m.mc_version = $${params.length}`); }
     const whereExtra = extra.length ? " AND " + extra.join(" AND ") : "";
 
-    const rows = await db().$queryRawUnsafe<
+    const db = await getDb();
+    const rows = await db.$queryRawUnsafe<
         Array<{ mod_id: string; display_name: string; matched: string[] }>
     >(`
         SELECT
@@ -182,7 +193,8 @@ export async function listMods(opts: {
     loader?: string; mcVersion?: string; hasMixins?: boolean;
     decompiled?: boolean; limit?: number; modIdFilter?: string;
 }): Promise<Mod[]> {
-    return db().mod.findMany({
+    const db = await getDb();
+    return db.mod.findMany({
         where: {
             ...(opts.loader ? { loader: opts.loader } : {}),
             ...(opts.mcVersion ? { mcVersion: { contains: opts.mcVersion } } : {}),
@@ -199,7 +211,8 @@ export async function listModsSlim(opts?: {
     loader?: string; mcVersion?: string; hasMixins?: boolean;
     decompiled?: boolean; modIdFilter?: string;
 }): Promise<ModRef[]> {
-    return db().mod.findMany({
+    const db = await getDb();
+    return db.mod.findMany({
         where: {
             ...(opts?.loader ? { loader: opts.loader } : {}),
             ...(opts?.mcVersion ? { mcVersion: { contains: opts.mcVersion } } : {}),
@@ -214,7 +227,8 @@ export async function listModsSlim(opts?: {
 export async function listModsForMixinScan(opts?: {
     hasMixins?: boolean; loader?: string; mcVersion?: string;
 }): Promise<MixinModRow[]> {
-    return db().mod.findMany({
+    const db = await getDb();
+    return db.mod.findMany({
         where: {
             ...(opts?.hasMixins !== undefined ? { hasMixins: opts.hasMixins } : {}),
             ...(opts?.loader ? { loader: opts.loader } : {}),
@@ -229,7 +243,8 @@ export async function listModsForMixinScan(opts?: {
 }
 
 export async function listModsForDepGraph(mcVersion?: string): Promise<DepModRow[]> {
-    return db().mod.findMany({
+    const db = await getDb();
+    return db.mod.findMany({
         where: mcVersion ? { mcVersion: { contains: mcVersion } } : undefined,
         select: {
             id: true, modId: true, displayName: true, version: true,
@@ -243,7 +258,8 @@ export async function listModsForConflictCheck(opts?: { mcVersion?: string; load
     const where: Record<string, unknown> = {};
     if (opts?.mcVersion) where["mcVersion"] = opts.mcVersion;
     if (opts?.loader)    where["loader"]    = opts.loader;
-    return db().mod.findMany({
+    const db = await getDb();
+    return db.mod.findMany({
         where,
         select: {
             id: true, modId: true, displayName: true, version: true,
@@ -256,7 +272,8 @@ export async function listModsForConflictCheck(opts?: { mcVersion?: string; load
 export async function listModsForSync(opts?: {
     modIdFilter?: string; limit?: number;
 }): Promise<SyncModRow[]> {
-    return db().mod.findMany({
+    const db = await getDb();
+    return db.mod.findMany({
         where: opts?.modIdFilter ? { modId: { contains: opts.modIdFilter } } : {},
         select: {
             id: true, modId: true, version: true,
@@ -270,18 +287,21 @@ export async function listModsForSync(opts?: {
 }
 
 export async function countMods(where?: Prisma.ModWhereInput): Promise<number> {
-    return db().mod.count({ where });
+    const db = await getDb();
+    return db.mod.count({ where });
 }
 
 export async function groupModsByLoader() {
-    return db().mod.groupBy({ by: ["loader"], _count: { id: true } });
+    const db = await getDb();
+    return db.mod.groupBy({ by: ["loader"], _count: { id: true } });
 }
 
 export async function searchModsFts(query: string, opts?: {
     loader?: string; mcVersion?: string; limit?: number;
 }): Promise<Mod[]> {
     const q = query.toLowerCase();
-    return db().mod.findMany({
+    const db = await getDb();
+    return db.mod.findMany({
         where: {
             AND: [
                 {
@@ -301,7 +321,8 @@ export async function searchModsFts(query: string, opts?: {
 }
 
 export async function listModsForSourceUrls(query?: string) {
-    return db().mod.findMany({
+    const db = await getDb();
+    return db.mod.findMany({
         where: query
             ? { OR: [{ modId: { contains: query, mode: "insensitive" } }, { displayName: { contains: query, mode: "insensitive" } }] }
             : undefined,
@@ -311,29 +332,35 @@ export async function listModsForSourceUrls(query?: string) {
 }
 
 export async function createMod(data: Prisma.ModCreateInput): Promise<Mod> {
-    return db().mod.create({ data });
+    const db = await getDb();
+    return db.mod.create({ data });
 }
 
 export async function updateMod(id: number, data: Prisma.ModUpdateInput): Promise<Mod> {
-    return db().mod.update({ where: { id }, data });
+    const db = await getDb();
+    return db.mod.update({ where: { id }, data });
 }
 
 export async function getModMetadata(id: number): Promise<{ metadata: unknown } | null> {
-    return db().mod.findUnique({ where: { id }, select: { metadata: true } });
+    const db = await getDb();
+    return db.mod.findUnique({ where: { id }, select: { metadata: true } });
 }
 
 // ── ModClass queries ──────────────────────────────────────────────────────────
 
 export async function countAllModClasses(): Promise<number> {
-    return db().modClass.count();
+    const db = await getDb();
+    return db.modClass.count();
 }
 
 export async function countModClasses(modId: number): Promise<number> {
-    return db().modClass.count({ where: { modId } });
+    const db = await getDb();
+    return db.modClass.count({ where: { modId } });
 }
 
 export async function createModClasses(data: Prisma.ModClassCreateManyInput[]): Promise<void> {
-    await db().modClass.createMany({ data, skipDuplicates: true });
+    const db = await getDb();
+    await db.modClass.createMany({ data, skipDuplicates: true });
 }
 
 export async function findModClassesForCrossModSearch(
@@ -341,10 +368,11 @@ export async function findModClassesForCrossModSearch(
     where2: Prisma.ModClassWhereInput,
     limit: number,
 ) {
+    const db = await getDb();
     const sel = { mod: { select: { modId: true, displayName: true, version: true } } } as const;
     return Promise.all([
-        db().modClass.findMany({ where: where1, include: sel, take: limit }),
-        db().modClass.findMany({ where: where2, include: sel, take: limit }),
+        db.modClass.findMany({ where: where1, include: sel, take: limit }),
+        db.modClass.findMany({ where: where2, include: sel, take: limit }),
     ]);
 }
 
@@ -356,7 +384,8 @@ export async function findModClassesByClassNames(
     classNames: string[],
 ): Promise<Array<{ className: string; modId: number; mod: { modId: string; displayName: string } }>> {
     if (classNames.length === 0) return [];
-    return db().modClass.findMany({
+    const db = await getDb();
+    return db.modClass.findMany({
         where: { className: { in: classNames } },
         select: {
             className: true,
@@ -370,21 +399,25 @@ export async function findModClassesByClassNames(
 
 export async function deleteModById(id: number): Promise<void> {
     // ModClass rows are cascade-deleted by the DB foreign key; ModTag rows are not, delete manually
-    await db().modTag.deleteMany({ where: { modId: id } });
-    await db().modClass.deleteMany({ where: { modId: id } });
-    await db().mod.delete({ where: { id } });
+    const db = await getDb();
+    await db.modTag.deleteMany({ where: { modId: id } });
+    await db.modClass.deleteMany({ where: { modId: id } });
+    await db.mod.delete({ where: { id } });
 }
 
 export async function deleteModTags(modId: number): Promise<void> {
-    await db().modTag.deleteMany({ where: { modId } });
+    const db = await getDb();
+    await db.modTag.deleteMany({ where: { modId } });
 }
 
 export async function createModTags(data: Prisma.ModTagCreateManyInput[]): Promise<void> {
-    await db().modTag.createMany({ data });
+    const db = await getDb();
+    await db.modTag.createMany({ data });
 }
 
 export async function findModTagsByPath(tagPath: string, registry?: string) {
-    return db().modTag.findMany({
+    const db = await getDb();
+    return db.modTag.findMany({
         where: {
             tagPath: tagPath.replace(/^#/, ""),
             ...(registry ? { registry } : {}),
@@ -394,14 +427,16 @@ export async function findModTagsByPath(tagPath: string, registry?: string) {
 }
 
 export async function findModTagsByMod(modId: number, registry?: string) {
-    return db().modTag.findMany({
+    const db = await getDb();
+    return db.modTag.findMany({
         where: { modId, ...(registry ? { registry } : {}) },
         orderBy: [{ registry: "asc" }, { tagPath: "asc" }],
     });
 }
 
 export async function findAllModTagsByPath(tagPath: string, registry?: string) {
-    return db().modTag.findMany({
+    const db = await getDb();
+    return db.modTag.findMany({
         where: {
             tagPath: tagPath.replace(/^#/, ""),
             ...(registry ? { registry } : {}),
@@ -411,7 +446,8 @@ export async function findAllModTagsByPath(tagPath: string, registry?: string) {
 }
 
 export async function findReplaceModTags(registry?: string) {
-    return db().modTag.findMany({
+    const db = await getDb();
+    return db.modTag.findMany({
         where: { replace: true, ...(registry ? { registry } : {}) },
         include: { mod: { select: { modId: true, displayName: true, version: true } } },
         orderBy: [{ tagPath: "asc" }, { registry: "asc" }],
@@ -419,7 +455,8 @@ export async function findReplaceModTags(registry?: string) {
 }
 
 export async function searchModTagsByPath(query: string, registry?: string, limit = 50) {
-    return db().modTag.findMany({
+    const db = await getDb();
+    return db.modTag.findMany({
         where: {
             tagPath: { contains: query, mode: "insensitive" },
             ...(registry ? { registry } : {}),
@@ -432,7 +469,8 @@ export async function searchModTagsByPath(query: string, registry?: string, limi
 }
 
 export async function listModTagNamespaces() {
-    const rows = await db().modTag.findMany({
+    const db = await getDb();
+    const rows = await db.modTag.findMany({
         select: { registry: true, namespace: true },
         distinct: ["registry", "namespace"],
         orderBy: [{ registry: "asc" }, { namespace: "asc" }],
