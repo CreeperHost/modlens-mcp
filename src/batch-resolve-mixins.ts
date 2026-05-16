@@ -4,7 +4,7 @@
  * Usage: node dist/batch-resolve-mixins.js
  */
 import { getDb, disconnect } from "./db.js";
-import { resolveMixinTargets } from "./tools/mixins.js";
+import { resolveMixinTargets } from "./tools/mixin-scan.js";
 
 const mods = await (await getDb()).mod.findMany({
     where: { hasMixins: true },

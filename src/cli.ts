@@ -10,7 +10,7 @@ import {
     searchModClass, getModClassMembers, getModClassBytecode,
     findModReferences, getModInheritance, diffModVersions,
 } from "./tools/bytecode.js";
-import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets } from "./tools/mixins.js";
+import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets } from "./tools/mixin-scan.js";
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource } from "./tools/platform.js";
 import {
     listMcVersions, listNeoForgeVersions, listFabricApiVersions,

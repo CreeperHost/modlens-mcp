@@ -20,8 +20,8 @@ import { getMixinConflictMatrix, getMixinHotspots, listModsWithMixins } from "./
 import { findTagConflicts, getTagContributors, getModTagList, searchModTags } from "./mod-tags.js";
 import { findVersionConflicts, getDependencyGraph, listModSourceUrls } from "./catalog.js";
 import { compareGradleDeps } from "./gradle.js";
-import { getMixinConflicts } from "./mixins.js";
-import { findAtAwConflicts } from "./mixins.js";
+import { getMixinConflicts } from "./mixin-scan.js";
+import { findAtAwConflicts } from "./mixin-scan.js";
 import { findTagConflicts as _ftc } from "./mod-tags.js";
 import { analyzePackSidedness, computeModComplexity, computePackChangelog } from "./packtools.js";
 
