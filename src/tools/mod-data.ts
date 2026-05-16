@@ -51,6 +51,103 @@ function listJsonEntries(jarPath: string, prefix: string): string[] {
     return listEntries(jarPath, prefix).filter(e => e.endsWith(".json") && !e.endsWith("/"));
 }
 
+// ── Data-type registry ────────────────────────────────────────────────────────
+
+type DataTypeDescriptor = {
+    type: string;
+    root: "data" | "assets";
+    subPath: string;
+    altSubPaths?: string[];
+    idPattern: RegExp;
+    resultKey: string;
+};
+
+const DATA_TYPES: DataTypeDescriptor[] = [
+    { type: "recipe",      root: "data",   subPath: "recipe/",            altSubPaths: ["recipes/"],        idPattern: /^data\/([^/]+)\/recipes?\/(.*?)\.json$/,          resultKey: "recipes"     },
+    { type: "loot_table",  root: "data",   subPath: "loot_tables/",       altSubPaths: ["loot_table/"],     idPattern: /^data\/([^/]+)\/loot_tables?\/(.*?)\.json$/,       resultKey: "lootTables"  },
+    { type: "advancement", root: "data",   subPath: "advancement/",       altSubPaths: ["advancements/"],   idPattern: /^data\/([^/]+)\/advancements?\/(.*?)\.json$/,      resultKey: "advancements"},
+    { type: "blockstate",  root: "assets", subPath: "blockstates/",                                         idPattern: /^assets\/([^/]+)\/blockstates\/(.*?)\.json$/,      resultKey: "blockstates" },
+    { type: "model",       root: "assets", subPath: "models/",                                              idPattern: /^assets\/([^/]+)\/models\/(.*?)\.json$/,           resultKey: "models"      },
+    { type: "biome",       root: "data",   subPath: "worldgen/biome/",                                      idPattern: /^data\/([^/]+)\/worldgen\/biome\/(.*?)\.json$/,    resultKey: "biomes"      },
+    { type: "structure",   root: "data",   subPath: "worldgen/structure/",                                  idPattern: /^data\/([^/]+)\/worldgen\/structure\/(.*?)\.json$/,resultKey: "structures"  },
+    { type: "particle",    root: "assets", subPath: "particles/",                                           idPattern: /^assets\/([^/]+)\/particles\/(.*?)\.json$/,        resultKey: "particles"   },
+    { type: "damage_type", root: "data",   subPath: "damage_type/",                                         idPattern: /^data\/([^/]+)\/damage_type\/(.*?)\.json$/,        resultKey: "damageTypes" },
+    { type: "enchantment", root: "data",   subPath: "enchantment/",                                         idPattern: /^data\/([^/]+)\/enchantment\/(.*?)\.json$/,        resultKey: "enchantments"},
+];
+
+function getDescriptor(type: string): DataTypeDescriptor | undefined {
+    return DATA_TYPES.find(d => d.type === type);
+}
+
+/**
+ * List all entries of a registered data type in a mod JAR.
+ * type: one of the keys in DATA_TYPES (recipe, loot_table, advancement, blockstate, model, biome, structure, particle, damage_type, enchantment)
+ */
+export async function listModData(
+    modId: string | number,
+    type: string,
+    opts?: { namespace?: string; filter?: string },
+): Promise<object> {
+    const descriptor = getDescriptor(type);
+    if (!descriptor) return { error: `Unknown data type: "${type}". Known types: ${DATA_TYPES.map(d => d.type).join(", ")}` };
+
+    const mod = await resolveMod(modId);
+    if (!mod) return { error: `Mod not found: ${modId}` };
+
+    const { root, subPath, altSubPaths = [], idPattern, resultKey } = descriptor;
+    const ns = opts?.namespace ?? mod.modId;
+
+    let entries = listJsonEntries(mod.jarPath, `${root}/${ns}/${subPath}`);
+    for (const alt of altSubPaths) {
+        if (entries.length === 0) entries = listJsonEntries(mod.jarPath, `${root}/${ns}/${alt}`);
+    }
+
+    if (entries.length === 0) {
+        const allNs = detectNamespaces(mod.jarPath, root);
+        for (const n of allNs) {
+            for (const sp of [subPath, ...altSubPaths]) {
+                entries.push(...listJsonEntries(mod.jarPath, `${root}/${n}/${sp}`));
+            }
+        }
+    }
+
+    if (opts?.filter) {
+        const f = opts.filter.toLowerCase();
+        entries = entries.filter(e => e.toLowerCase().includes(f));
+    }
+
+    const ids = entries.map(e => { const m = e.match(idPattern); return m ? `${m[1]}:${m[2]}` : e; });
+    return { mod: mod.modId, type, count: ids.length, [resultKey]: ids };
+}
+
+/**
+ * Get a single data entry by resource location from a mod JAR.
+ * type: one of the keys in DATA_TYPES
+ * id: resource location string, e.g. "mymod:iron_sword" or "iron_sword"
+ */
+export async function getModData(
+    modId: string | number,
+    type: string,
+    id: string,
+    opts?: { namespace?: string },
+): Promise<object> {
+    const descriptor = getDescriptor(type);
+    if (!descriptor) return getModGenericDataType(modId, type, id, opts?.namespace);
+
+    const mod = await resolveMod(modId);
+    if (!mod) return { error: `Mod not found: ${modId}` };
+
+    const { root, subPath, altSubPaths = [] } = descriptor;
+    const ns = opts?.namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
+    const path = id.includes(":") ? id.split(":")[1] : id;
+
+    for (const sp of [subPath, ...altSubPaths]) {
+        const data = readJson(mod.jarPath, `${root}/${ns}/${sp}${path}.json`);
+        if (data) return { mod: mod.modId, type, id: `${ns}:${path}`, data };
+    }
+    return { mod: mod.modId, type, id, found: false };
+}
+
 // ── Generic JAR file access ───────────────────────────────────────────────────
 
 /**
@@ -91,226 +188,6 @@ export async function getModJarFile(modId: string | number, path: string): Promi
     return { mod: mod.modId, path, raw: buf.toString("utf8").slice(0, 4096) };
 }
 
-// ── Recipes ───────────────────────────────────────────────────────────────────
-
-export async function listModRecipes(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    const prefix = `data/${ns}/recipe/`;
-    let entries = listJsonEntries(mod.jarPath, prefix);
-
-    // Also check "recipes" (plural) used by some mods/older versions
-    if (entries.length === 0) {
-        entries = listJsonEntries(mod.jarPath, `data/${ns}/recipes/`);
-    }
-
-    // Auto-discover if explicit ns yields nothing
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "data");
-        for (const n of allNs) {
-            const a = listJsonEntries(mod.jarPath, `data/${n}/recipe/`);
-            const b = listJsonEntries(mod.jarPath, `data/${n}/recipes/`);
-            entries.push(...a, ...b);
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        // data/ns/recipe/id.json → ns:id
-        const m = e.match(/^data\/([^/]+)\/recipes?\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, recipes: ids };
-}
-
-export async function getModRecipe(
-    modId: string | number,
-    id: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
-    const path = id.includes(":") ? id.split(":")[1] : id;
-
-    for (const folder of ["recipe", "recipes"]) {
-        const data = readJson(mod.jarPath, `data/${ns}/${folder}/${path}.json`);
-        if (data) return { mod: mod.modId, recipe: `${ns}:${path}`, data };
-    }
-    return { mod: mod.modId, recipe: id, found: false };
-}
-
-// ── Loot tables ───────────────────────────────────────────────────────────────
-
-export async function listModLootTables(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `data/${ns}/loot_tables/`);
-    if (entries.length === 0) entries = listJsonEntries(mod.jarPath, `data/${ns}/loot_table/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "data");
-        for (const n of allNs) {
-            entries.push(
-                ...listJsonEntries(mod.jarPath, `data/${n}/loot_tables/`),
-                ...listJsonEntries(mod.jarPath, `data/${n}/loot_table/`),
-            );
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^data\/([^/]+)\/loot_tables?\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, lootTables: ids };
-}
-
-export async function getModLootTable(
-    modId: string | number,
-    id: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
-    const path = id.includes(":") ? id.split(":")[1] : id;
-
-    for (const folder of ["loot_tables", "loot_table"]) {
-        const data = readJson(mod.jarPath, `data/${ns}/${folder}/${path}.json`);
-        if (data) return { mod: mod.modId, lootTable: `${ns}:${path}`, data };
-    }
-    return { mod: mod.modId, lootTable: id, found: false };
-}
-
-// ── Advancements ──────────────────────────────────────────────────────────────
-
-export async function listModAdvancements(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `data/${ns}/advancement/`);
-    if (entries.length === 0) entries = listJsonEntries(mod.jarPath, `data/${ns}/advancements/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "data");
-        for (const n of allNs) {
-            entries.push(
-                ...listJsonEntries(mod.jarPath, `data/${n}/advancement/`),
-                ...listJsonEntries(mod.jarPath, `data/${n}/advancements/`),
-            );
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^data\/([^/]+)\/advancements?\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, advancements: ids };
-}
-
-export async function getModAdvancement(
-    modId: string | number,
-    id: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
-    const path = id.includes(":") ? id.split(":")[1] : id;
-
-    for (const folder of ["advancement", "advancements"]) {
-        const data = readJson(mod.jarPath, `data/${ns}/${folder}/${path}.json`);
-        if (data) return { mod: mod.modId, advancement: `${ns}:${path}`, data };
-    }
-    return { mod: mod.modId, advancement: id, found: false };
-}
-
-// ── Blockstates ───────────────────────────────────────────────────────────────
-
-export async function getModBlockstate(
-    modId: string | number,
-    block: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (block.includes(":") ? block.split(":")[0] : mod.modId);
-    const name = block.includes(":") ? block.split(":")[1] : block.replace(".json", "");
-
-    const data = readJson(mod.jarPath, `assets/${ns}/blockstates/${name}.json`);
-    if (data) return { mod: mod.modId, block: `${ns}:${name}`, data };
-    return { mod: mod.modId, block, found: false };
-}
-
-export async function listModBlockstates(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `assets/${ns}/blockstates/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "assets");
-        for (const n of allNs.filter(n => n !== "minecraft")) {
-            entries.push(...listJsonEntries(mod.jarPath, `assets/${n}/blockstates/`));
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^assets\/([^/]+)\/blockstates\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, blockstates: ids };
-}
-
 // ── Models ────────────────────────────────────────────────────────────────────
 
 export async function getModModel(
@@ -328,135 +205,6 @@ export async function getModModel(
     const data = readJson(mod.jarPath, `assets/${ns}/models/${fullPath}.json`);
     if (data) return { mod: mod.modId, model: `${ns}:${fullPath}`, data };
     return { mod: mod.modId, model: modelPath, found: false };
-}
-
-export async function listModModels(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `assets/${ns}/models/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "assets");
-        for (const n of allNs.filter(n => n !== "minecraft")) {
-            entries.push(...listJsonEntries(mod.jarPath, `assets/${n}/models/`));
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^assets\/([^/]+)\/models\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, models: ids };
-}
-
-// ── Biomes ────────────────────────────────────────────────────────────────────
-
-export async function listModBiomes(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `data/${ns}/worldgen/biome/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "data");
-        for (const n of allNs) {
-            entries.push(...listJsonEntries(mod.jarPath, `data/${n}/worldgen/biome/`));
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^data\/([^/]+)\/worldgen\/biome\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, biomes: ids };
-}
-
-export async function getModBiome(
-    modId: string | number,
-    id: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
-    const path = id.includes(":") ? id.split(":")[1] : id;
-
-    const data = readJson(mod.jarPath, `data/${ns}/worldgen/biome/${path}.json`);
-    if (data) return { mod: mod.modId, biome: `${ns}:${path}`, data };
-    return { mod: mod.modId, biome: id, found: false };
-}
-
-// ── Worldgen structures ───────────────────────────────────────────────────────
-
-export async function listModStructures(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `data/${ns}/worldgen/structure/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "data");
-        for (const n of allNs) {
-            entries.push(...listJsonEntries(mod.jarPath, `data/${n}/worldgen/structure/`));
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^data\/([^/]+)\/worldgen\/structure\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, structures: ids };
-}
-
-export async function getModStructureData(
-    modId: string | number,
-    id: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
-    const path = id.includes(":") ? id.split(":")[1] : id;
-
-    const data = readJson(mod.jarPath, `data/${ns}/worldgen/structure/${path}.json`);
-    if (data) return { mod: mod.modId, structure: `${ns}:${path}`, data };
-    return { mod: mod.modId, structure: id, found: false };
 }
 
 // ── Lang ──────────────────────────────────────────────────────────────────────
@@ -583,104 +331,6 @@ export async function getModDataTag(
     return { mod: mod.modId, registry, tag: id, found: false };
 }
 
-// ── Particles ─────────────────────────────────────────────────────────────────
-
-export async function listModParticles(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `assets/${ns}/particles/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "assets");
-        for (const n of allNs.filter(n => n !== "minecraft")) {
-            entries.push(...listJsonEntries(mod.jarPath, `assets/${n}/particles/`));
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^assets\/([^/]+)\/particles\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, particles: ids };
-}
-
-export async function getModParticle(
-    modId: string | number,
-    id: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
-    const path = id.includes(":") ? id.split(":")[1] : id;
-
-    const data = readJson(mod.jarPath, `assets/${ns}/particles/${path}.json`);
-    if (data) return { mod: mod.modId, particle: `${ns}:${path}`, data };
-    return { mod: mod.modId, particle: id, found: false };
-}
-
-// ── Damage types ──────────────────────────────────────────────────────────────
-
-export async function listModDamageTypes(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `data/${ns}/damage_type/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "data");
-        for (const n of allNs) {
-            entries.push(...listJsonEntries(mod.jarPath, `data/${n}/damage_type/`));
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^data\/([^/]+)\/damage_type\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    return { mod: mod.modId, count: ids.length, damageTypes: ids };
-}
-
-export async function getModDamageType(
-    modId: string | number,
-    id: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
-    const path = id.includes(":") ? id.split(":")[1] : id;
-
-    const data = readJson(mod.jarPath, `data/${ns}/damage_type/${path}.json`);
-    if (data) return { mod: mod.modId, damageType: `${ns}:${path}`, data };
-    return { mod: mod.modId, damageType: id, found: false };
-}
-
 // ── Atlas ─────────────────────────────────────────────────────────────────────
 
 export async function getModAtlas(
@@ -705,69 +355,6 @@ export async function getModAtlas(
 
     if (data) return { mod: mod.modId, atlas: name, data };
     return { mod: mod.modId, atlas: name, found: false };
-}
-
-// ── Enchantments (data-pack files, 1.21+) ────────────────────────────────────
-
-export async function listModEnchantments(
-    modId: string | number,
-    namespace?: string,
-    filter?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? mod.modId;
-    let entries = listJsonEntries(mod.jarPath, `data/${ns}/enchantment/`);
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, "data");
-        for (const n of allNs) {
-            entries.push(...listJsonEntries(mod.jarPath, `data/${n}/enchantment/`));
-        }
-    }
-
-    if (filter) {
-        const f = filter.toLowerCase();
-        entries = entries.filter(e => e.toLowerCase().includes(f));
-    }
-
-    const ids = entries.map(e => {
-        const m = e.match(/^data\/([^/]+)\/enchantment\/(.*?)\.json$/);
-        return m ? `${m[1]}:${m[2]}` : e;
-    });
-
-    if (ids.length === 0) {
-        return {
-            mod: mod.modId,
-            count: 0,
-            note: "No enchantment data files found. Older mods register enchantments in code — use list_mod_registry_entries with type='enchantment' to list them from the lang file instead.",
-            enchantments: [],
-        };
-    }
-
-    return { mod: mod.modId, count: ids.length, enchantments: ids };
-}
-
-export async function getModEnchantment(
-    modId: string | number,
-    id: string,
-    namespace?: string,
-): Promise<object> {
-    const mod = await resolveMod(modId);
-    if (!mod) return { error: `Mod not found: ${modId}` };
-
-    const ns = namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
-    const path = id.includes(":") ? id.split(":")[1] : id;
-
-    const data = readJson(mod.jarPath, `data/${ns}/enchantment/${path}.json`);
-    if (data) return { mod: mod.modId, enchantment: `${ns}:${path}`, data };
-    return {
-        mod: mod.modId,
-        enchantment: id,
-        found: false,
-        note: "Not present as a data file. Use list_mod_registry_entries with type='enchantment' to list enchantments from the lang file.",
-    };
 }
 
 // ── Generic data-path helpers (worldgen, dimension, variants, etc.) ───────────

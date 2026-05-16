@@ -6,22 +6,14 @@ import { ingestMod, decompileMod, decompileModStatus, reindexClasses, batchInges
 import { listMods, getModDetails, searchMods, getDbStats, getDependencies, findVersionConflicts, getDependencyGraph, listModSourceUrls, listModRegistryEntries } from "./tools/catalog.js";
 import {
     listModJarFiles, getModJarFile,
-    listModRecipes, getModRecipe,
-    listModLootTables, getModLootTable,
-    listModAdvancements, getModAdvancement,
-    getModBlockstate, listModBlockstates,
-    getModModel, listModModels,
-    listModBiomes, getModBiome,
-    listModStructures, getModStructureData,
+    getModModel,
     getModLang, getModSounds,
     listModDataTags, getModDataTag,
-    listModParticles, getModParticle,
-    listModDamageTypes, getModDamageType,
     getModAtlas,
-    listModEnchantments, getModEnchantment,
     listModGenericDataType, getModGenericDataType,
     getModManifest, listModConfigs, getModConfig,
     diffModData,
+    listModData, getModData,
 } from "./tools/mod-data.js";
 import { traceRecipeChain } from "./tools/mod-data.js";
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
@@ -740,33 +732,14 @@ server.tool(
             result = await traceRecipeChain(itemId!, maxDepth);
         } else if (action === "list") {
             switch (type) {
-                case "recipe":      result = await listModRecipes(modId!, namespace, filter); break;
-                case "loot_table":  result = await listModLootTables(modId!, namespace, filter); break;
-                case "advancement": result = await listModAdvancements(modId!, namespace, filter); break;
-                case "blockstate":  result = await listModBlockstates(modId!, namespace, filter); break;
-                case "model":       result = await listModModels(modId!, namespace, filter); break;
-                case "biome":       result = await listModBiomes(modId!, namespace, filter); break;
-                case "structure":   result = await listModStructures(modId!, namespace, filter); break;
                 case "data_tag":    result = await listModDataTags(modId!, registry, namespace, filter); break;
-                case "particle":    result = await listModParticles(modId!, namespace, filter); break;
-                case "damage_type": result = await listModDamageTypes(modId!, namespace, filter); break;
-                case "enchantment": result = await listModEnchantments(modId!, namespace, filter); break;
-                default:            result = await listModGenericDataType(modId!, type, namespace, filter); break;
+                default:            result = await listModData(modId!, type, { namespace, filter }) ; break;
             }
         } else {
             switch (type) {
-                case "recipe":      result = await getModRecipe(modId!, id!, namespace); break;
-                case "loot_table":  result = await getModLootTable(modId!, id!, namespace); break;
-                case "advancement": result = await getModAdvancement(modId!, id!, namespace); break;
-                case "blockstate":  result = await getModBlockstate(modId!, id!, namespace); break;
                 case "model":       result = await getModModel(modId!, modelPath ?? id!, namespace); break;
-                case "biome":       result = await getModBiome(modId!, id!, namespace); break;
-                case "structure":   result = await getModStructureData(modId!, id!, namespace); break;
                 case "data_tag":    result = await getModDataTag(modId!, registry!, id!, namespace); break;
-                case "particle":    result = await getModParticle(modId!, id!, namespace); break;
-                case "damage_type": result = await getModDamageType(modId!, id!, namespace); break;
-                case "enchantment": result = await getModEnchantment(modId!, id!, namespace); break;
-                default:            result = await getModGenericDataType(modId!, type, id!, namespace); break;
+                default:            result = await getModData(modId!, type, id!, { namespace }); break;
             }
         }
         return out(result);
