@@ -13,6 +13,8 @@ import { join } from "path";
 import { db } from "../db.js";
 import { Prisma } from "@prisma/client";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
+import { embed, isOllamaAvailable, chunkText } from "../embeddings.js";
+import { upsertPrimerEmbedding, searchPrimersByVector, countUnembedded } from "../repositories/embeddings.js";
 
 // ── Version resolution ────────────────────────────────────────────────────────
 const VERSIONS_CACHE = join(CACHE_ROOT, "mcmeta", "_latest", "summary", "versions", "data.json");
@@ -124,6 +126,7 @@ export async function ingestPrimer(entries: {
             },
         });
         results.push({ id: primer.id, title: primer.title, fromVersion: primer.fromVersion, toVersion: primer.toVersion });
+        await tryEmbedPrimer(primer.id, primer.title, primer.summary, content);
     }
 
     return { ingested: results.length, primers: results };
@@ -386,4 +389,54 @@ const SEED_PRIMERS: Parameters<typeof ingestPrimer>[0] = [
 /** Populate the primers table with known NeoForge/Forge/Fabric migration guides. */
 export async function seedDefaultPrimers(): Promise<object> {
     return ingestPrimer(SEED_PRIMERS);
+}
+
+// ── embedding helpers ─────────────────────────────────────────────────────────
+
+async function tryEmbedPrimer(
+    id: number, title: string, summary: string | null | undefined, content: string | undefined,
+): Promise<void> {
+    if (!await isOllamaAvailable()) return;
+    try {
+        // Embed title + summary + first chunk of content
+        const parts = [title, summary, content ? chunkText(content, 1500)[0] : undefined].filter(Boolean);
+        const vec = await embed(parts.join("\n\n"));
+        await upsertPrimerEmbedding(id, vec);
+    } catch { /* non-fatal */ }
+}
+
+// ── semantic_search ───────────────────────────────────────────────────────────
+
+export async function semanticSearchPrimers(query: string, limit = 10): Promise<object> {
+    const vec = await embed(query);
+    const rows = await searchPrimersByVector(vec, limit);
+    if (!rows.length) return { query, semantic: true, count: 0, results: [] };
+    const ids = rows.map(r => r.id);
+    const primers = await db().primer.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, fromVersion: true, toVersion: true, modloader: true, title: true, summary: true, url: true, tags: true },
+    });
+    const byId = Object.fromEntries(primers.map(p => [p.id, p]));
+    const results = rows.map(r => ({ similarity: Math.round(r.similarity * 1000) / 1000, ...byId[r.id] }));
+    return { query, semantic: true, count: results.length, results };
+}
+
+// ── backfill_embeddings ───────────────────────────────────────────────────────
+
+export async function backfillPrimerEmbeddings(): Promise<object> {
+    if (!await isOllamaAvailable()) {
+        return { error: "Ollama is not available. Set OLLAMA_URL and ensure Ollama is running." };
+    }
+    const rows = await db().primer.findMany({ select: { id: true, title: true, summary: true, content: true } });
+    const unembedded = await countUnembedded("primers");
+    let done = 0; let failed = 0;
+    for (const row of rows) {
+        try {
+            const parts = [row.title, row.summary, row.content ? chunkText(row.content, 1500)[0] : undefined].filter(Boolean);
+            const vec = await embed(parts.join("\n\n"));
+            await upsertPrimerEmbedding(row.id, vec);
+            done++;
+        } catch { failed++; }
+    }
+    return { total: rows.length, wasUnembedded: unembedded, embedded: done, failed };
 }

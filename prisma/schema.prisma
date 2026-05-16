@@ -110,10 +110,12 @@ model ModTag {
 // Stores decompiled vanilla source per class — enables PostgreSQL FTS search.
 // GIN index is created automatically by `npm run db:setup` (scripts/create-fts-index.mjs).
 model McSourceFile {
-  id          Int       @id @default(autoincrement())
-  mcVersionId Int       @map("mc_version_id")
-  className   String    @map("class_name")
+  id          Int                      @id @default(autoincrement())
+  mcVersionId Int                      @map("mc_version_id")
+  className   String                   @map("class_name")
   content     String
+  /// pgvector embedding — populated by `npm run db:vector` + backfill-embeddings
+  embedding   Unsupported("vector")?   @map("embedding")
 
   mcVersion   McVersion @relation(fields: [mcVersionId], references: [id], onDelete: Cascade)
 
@@ -125,21 +127,23 @@ model McSourceFile {
 // ── Documentation entries ────────────────────────────────────────────────────
 
 model DocEntry {
-  id          Int      @id @default(autoincrement())
+  id          Int                      @id @default(autoincrement())
   /// Optional: fully-qualified class name this doc entry describes (slashes or dots).
-  className   String?  @map("class_name")
+  className   String?                  @map("class_name")
   title       String
   summary     String?
   url         String
   /// One of: minecraft | neoforge | fabric | forge | quilt | mod | other
-  category    String   @default("minecraft")
+  category    String                   @default("minecraft")
   tags        String[]
   /// Logical namespace: vanilla | neoforge | fabric | forge | quilt | parchment
-  namespace   String   @default("vanilla")
+  namespace   String                   @default("vanilla")
   /// How it was added: manual | seed | parchment | javadoc
-  source      String   @default("manual")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  source      String                   @default("manual")
+  createdAt   DateTime                 @default(now()) @map("created_at")
+  updatedAt   DateTime                 @updatedAt @map("updated_at")
+  /// pgvector embedding — populated by `npm run db:vector` + backfill-embeddings
+  embedding   Unsupported("vector")?   @map("embedding")
 
   @@index([className])
   @@index([category])
@@ -167,9 +171,11 @@ model Primer {
   /// Full text of the primer (optional — populated by ingest with fetch=true)
   content         String?
   tags            String[]
-  source          String   @default("manual")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  source          String                   @default("manual")
+  createdAt       DateTime                 @default(now()) @map("created_at")
+  updatedAt       DateTime                 @updatedAt @map("updated_at")
+  /// pgvector embedding — populated by `npm run db:vector` + backfill-embeddings
+  embedding       Unsupported("vector")?   @map("embedding")
 
   @@index([fromVersion, toVersion])
   @@index([fromDataVersion, toDataVersion])

@@ -13,6 +13,8 @@ import { mcPaths, fetchMcVersionList } from "../minecraft.js";
 import { isDecompileDone } from "../java-tools.js";
 import { exists } from "../cache.js";
 import { ensureMcVersion, findMcVersionById, findMcVersionByVersionId, updateMcVersion, upsertMcSourceFile, searchMcSourceFiles } from "../repositories/mcVersion.js";
+import { embed, isOllamaAvailable, chunkText } from "../embeddings.js";
+import { upsertSourceEmbedding, searchSourceByVector, countUnembedded } from "../repositories/embeddings.js";
 
 async function ensureMcVersionRecord(version: string): Promise<number> {
     return ensureMcVersion(version);
@@ -110,4 +112,82 @@ export async function searchMcIndexed(
 export async function isMcVersionIndexed(version: string): Promise<boolean> {
     const row = await findMcVersionByVersionId(version);
     return row?.indexed === true;
+}
+
+// ── Semantic indexing ─────────────────────────────────────────────────────────
+
+/**
+ * index_mc_source_semantic
+ * Embeds MC source files for a version using Ollama. Processes files that have
+ * no embedding yet (safe to re-run / resume after interruption).
+ *
+ * Only embeds the first chunk (class header ~1500 chars) — enough for semantic
+ * class-level search without spending hours on full-file embedding.
+ *
+ * @param version    MC version string e.g. "26.1.2"
+ * @param batchSize  Files per batch (pause between batches to avoid OOM)
+ */
+export async function indexMcSourceSemantic(
+    version: string,
+    batchSize = 50,
+): Promise<{ status: string; embedded: number; skipped: number; remaining: number }> {
+    if (!await isOllamaAvailable()) {
+        throw new Error("Ollama is not available. Set OLLAMA_URL and ensure Ollama is running with `ollama pull nomic-embed-text`.");
+    }
+    const row = await findMcVersionByVersionId(version);
+    if (!row) {
+        throw new Error(`Version "${version}" is not in the database. Run index_minecraft_version("${version}") first.`);
+    }
+    const mcVersionId = row.id;
+    const remaining0 = await countUnembedded("mc_source_files", mcVersionId);
+    if (remaining0 === 0) {
+        return { status: "already_embedded", embedded: 0, skipped: 0, remaining: 0 };
+    }
+
+    // Fetch rows without embeddings in batches
+    let embedded = 0; let skipped = 0;
+    let offset = 0;
+    while (true) {
+        const batch = await (await import("../db.js")).db().$queryRawUnsafe<Array<{ id: number; class_name: string; content: string }>>(
+            `SELECT id, class_name, content FROM mc_source_files
+             WHERE mc_version_id = $1 AND embedding IS NULL
+             ORDER BY id LIMIT $2 OFFSET $3`,
+            mcVersionId, batchSize, offset,
+        );
+        if (!batch.length) break;
+        for (const file of batch) {
+            try {
+                // Only embed the first chunk — enough for class-level semantic search
+                const chunk = chunkText(file.content, 1500)[0];
+                const vec = await embed(chunk);
+                await upsertSourceEmbedding(file.id, vec);
+                embedded++;
+            } catch { skipped++; }
+        }
+        offset += batch.length;
+        // Small pause to avoid overwhelming Ollama
+        await new Promise(r => setTimeout(r, 50));
+    }
+
+    const remaining = await countUnembedded("mc_source_files", mcVersionId);
+    return { status: "done", embedded, skipped, remaining };
+}
+
+/**
+ * search_mc_source_semantic
+ * Semantic (vector) search over embedded MC source files.
+ * Falls back to FTS if Ollama is unavailable.
+ */
+export async function searchMcSourceSemantic(
+    query: string,
+    version: string,
+    limit = 10,
+): Promise<Array<{ className: string; similarity: number }>> {
+    const row = await findMcVersionByVersionId(version);
+    if (!row) {
+        throw new Error(`Version "${version}" is not in the database. Run index_minecraft_version("${version}") first.`);
+    }
+    const vec = await embed(query);
+    const rows = await searchSourceByVector(vec, row.id, limit);
+    return rows.map(r => ({ className: r.class_name, similarity: Math.round(r.similarity * 1000) / 1000 }));
 }

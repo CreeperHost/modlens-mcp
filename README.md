@@ -72,6 +72,37 @@ npm run build
 
 > **Note:** Both Vineflower and mcsrc-indexer.jar are downloaded automatically to `~/.modlens-cache/tools/` on first use — no manual steps needed.
 
+---
+
+## Semantic Search (optional)
+
+Semantic (vector) search lets you find docs, primers, and MC source by meaning rather than keywords — e.g. *"how do I attach data to a block?"* instead of the exact class name.
+
+**Requirements:** [Ollama](https://ollama.com) installed and running locally.
+
+```bash
+# 1. Install Ollama and pull the embedding model
+ollama pull nomic-embed-text
+
+# 2. Enable pgvector in your Postgres container and add embedding columns
+npm run db:vector
+
+# 3. Add Ollama config to .env (optional — http://localhost:11434 is the default)
+echo OLLAMA_URL=http://localhost:11434 >> .env
+
+# 4. Embed all existing docs and primers
+node dist/cli.js backfill-embeddings
+
+# Embed a specific MC source version (large — takes a while)
+node dist/cli.js backfill-embeddings --type source --version 26.1.2
+```
+
+After this, the `docs` and `primers` MCP tools will have a `semantic_search` action, and the `mc_source` tool will have `search_semantic` and `index_semantic`. Semantic search is **opt-in** — if `OLLAMA_URL` is not reachable, tools fall back to keyword search automatically.
+
+> **Note:** The `npm run db:vector` script is safe to re-run. It creates the `pgvector` extension and `embedding` columns using `IF NOT EXISTS` guards.
+
+---
+
 ## MCP Configuration
 
 The server uses stdio transport — it works with any MCP client (VS Code Copilot, Claude Desktop, Claude CLI, Cursor, etc.) as long as Docker is running and `DATABASE_URL` is set.

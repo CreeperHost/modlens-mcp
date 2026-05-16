@@ -19,6 +19,9 @@ import {
 import { db, disconnect } from "./db.js";
 import { readdir } from "fs/promises";
 import { join, resolve } from "path";
+import { backfillDocEmbeddings } from "./tools/docs.js";
+import { backfillPrimerEmbeddings } from "./tools/primers.js";
+import { indexMcSourceSemantic } from "./tools/mc-fts.js";
 
 // ── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -131,8 +134,15 @@ VERSIONS
 BATCH
   batch-resolve-mixins               Resolve @Mixin targets for all mixin mods
 
+SEMANTIC SEARCH (optional — requires Ollama)
+  backfill-embeddings                Embed all docs/primers/mc-source for semantic search
+                                     [--type=docs|primers|source] [--version=<mc-version>]
+                                     (omit --type to run docs + primers; --type=source needs --version)
+
 Environment:
   DATABASE_URL        PostgreSQL connection string (required)
+  OLLAMA_URL          Ollama base URL for semantic search (optional, default http://localhost:11434)
+  OLLAMA_EMBED_MODEL  Ollama embedding model (optional, default nomic-embed-text)
   CURSEFORGE_API_KEY  CurseForge API key (optional, needed for sync-curseforge)
 `.trim();
 
@@ -439,6 +449,25 @@ try {
                 }
             }
             console.log(`\n✓ resolved: ${ok}  no targets found: ${none}  failed: ${fail}`);
+            break;
+        }
+
+        case "backfill-embeddings": {
+            const type = flags.type as string | undefined;
+            const version = flags.version as string | undefined;
+            if (!type || type === "docs") {
+                console.log("Embedding docs...");
+                out(await backfillDocEmbeddings());
+            }
+            if (!type || type === "primers") {
+                console.log("Embedding primers...");
+                out(await backfillPrimerEmbeddings());
+            }
+            if (type === "source") {
+                if (!version) die("--version=<mc-version> is required for --type=source");
+                console.log(`Embedding MC source for ${version}...`);
+                out(await indexMcSourceSemantic(version));
+            }
             break;
         }
 

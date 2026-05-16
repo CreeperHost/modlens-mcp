@@ -41,9 +41,9 @@ import {
     decompileMcVersion, decompileMcVersionStatus, searchMcCode,
     validateAccessWidener, analyzeMixin, searchEvents,
 } from "./tools/vanilla.js";
-import { indexMcVersion, searchMcIndexed } from "./tools/mc-fts.js";
+import { indexMcVersion, searchMcIndexed, indexMcSourceSemantic, searchMcSourceSemantic } from "./tools/mc-fts.js";
 import { findMapping, remapModJar, getParchment, listParchmentVersions, getParchmentSummary } from "./tools/mappings.js";
-import { ingestDocumentation, getDocumentation, searchDocumentation, listDocumentation, deleteDocumentation, seedDefaultDocumentation } from "./tools/docs.js";
+import { ingestDocumentation, getDocumentation, searchDocumentation, listDocumentation, deleteDocumentation, seedDefaultDocumentation, semanticSearchDocumentation, backfillDocEmbeddings } from "./tools/docs.js";
 import {
     getMcmetaVersions, getMcBlocks, getMcCommands, getMcRegistries, getMcSounds, getMcItemComponents,
     getMcDataFile, getMcAssetFile, listMcDataFiles, diffMcData, getMcAtlas, getMcmetaRaw, getRegistryEntries,
@@ -51,6 +51,7 @@ import {
 } from "./tools/mcmeta.js";
 import {
     ingestPrimer, getPrimer, getPrimersByVersionRange, searchPrimers, listPrimers, deletePrimer, seedDefaultPrimers,
+    semanticSearchPrimers, backfillPrimerEmbeddings,
 } from "./tools/primers.js";
 import {
     getMcTags, findTagsForEntry,
@@ -305,9 +306,9 @@ server.tool(
 
 server.tool(
     "mc_source",
-    "Vanilla Minecraft source code, decompilation, and validation. action=search_class|get_source|bytecode|class_members|find_refs|inheritance|diff|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin.",
+    "Vanilla Minecraft source code, decompilation, and validation. action=search_class|get_source|bytecode|class_members|find_refs|inheritance|diff|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin|index_semantic|search_semantic. index_semantic/search_semantic require Ollama running.",
     {
-        action:     z.enum(["search_class","get_source","bytecode","class_members","find_refs","inheritance","diff","decompile","decompile_status","search_code","index","search_indexed","search_events","validate_aw","analyze_mixin"]),
+        action:     z.enum(["search_class","get_source","bytecode","class_members","find_refs","inheritance","diff","decompile","decompile_status","search_code","index","search_indexed","search_events","validate_aw","analyze_mixin","index_semantic","search_semantic"]),
         version:    z.string().optional(),
         versionA:   z.string().optional(),
         versionB:   z.string().optional(),
@@ -344,6 +345,8 @@ server.tool(
             case "search_events":   result = await searchEvents(version!, query, modloader as any); break;
             case "validate_aw":     result = await validateAccessWidener(content!, mcVersion ?? version!); break;
             case "analyze_mixin":   result = await analyzeMixin(source!, mcVersion ?? version!); break;
+            case "index_semantic":  result = await indexMcSourceSemantic(version!, (limit as number | undefined) ?? 50); break;
+            case "search_semantic": result = await searchMcSourceSemantic(query!, version!, limit ?? 10); break;
         }
         return out(result);
     }
@@ -383,9 +386,9 @@ server.tool(
 
 server.tool(
     "docs",
-    "Minecraft modding documentation database. action=ingest|seed|get|search|list|delete.",
+    "Minecraft modding documentation database. action=ingest|seed|get|search|list|delete|semantic_search|backfill_embeddings. semantic_search requires Ollama running.",
     {
-        action: z.enum(["ingest","seed","get","search","list","delete"]),
+        action: z.enum(["ingest","seed","get","search","list","delete","semantic_search","backfill_embeddings"]),
         entries: z.array(z.object({
             className: z.string().optional(),
             title:     z.string(),
@@ -412,6 +415,8 @@ server.tool(
             case "search": result = await searchDocumentation(query!, category, namespace); break;
             case "list":   result = await listDocumentation(category, namespace, tag, limit ?? 100); break;
             case "delete": result = await deleteDocumentation(id!); break;
+            case "semantic_search":     result = await semanticSearchDocumentation(query!, limit ?? 10); break;
+            case "backfill_embeddings": result = await backfillDocEmbeddings(); break;
         }
         return out(result);
     }
@@ -421,9 +426,9 @@ server.tool(
 
 server.tool(
     "primers",
-    "Minecraft version migration primers and porting guides. action=ingest|seed|get|by_version|search|list|delete.",
+    "Minecraft version migration primers and porting guides. action=ingest|seed|get|by_version|search|list|delete|semantic_search|backfill_embeddings. semantic_search requires Ollama running.",
     {
-        action: z.enum(["ingest","seed","get","by_version","search","list","delete"]),
+        action: z.enum(["ingest","seed","get","by_version","search","list","delete","semantic_search","backfill_embeddings"]),
         entries: z.array(z.object({
             fromVersion:  z.string(),
             toVersion:    z.string(),
@@ -453,6 +458,8 @@ server.tool(
             case "search":     result = await searchPrimers(query!, modloader, fromVersion, toVersion, limit); break;
             case "list":       result = await listPrimers(modloader, limit); break;
             case "delete":     result = await deletePrimer(id!); break;
+            case "semantic_search":     result = await semanticSearchPrimers(query!, limit ?? 10); break;
+            case "backfill_embeddings": result = await backfillPrimerEmbeddings(); break;
         }
         return out(result);
     }

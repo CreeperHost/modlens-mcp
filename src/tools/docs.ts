@@ -15,6 +15,8 @@
  */
 import { db } from "../db.js";
 import type { Prisma } from "@prisma/client";
+import { embed, isOllamaAvailable } from "../embeddings.js";
+import { upsertDocEmbedding, searchDocsByVector, countUnembedded } from "../repositories/embeddings.js";
 
 export interface DocEntryInput {
     className?: string;
@@ -48,6 +50,7 @@ export async function ingestDocumentation(entries: DocEntryInput[]): Promise<obj
                 },
             });
             results.push({ action: "updated", id: updated.id, title: updated.title });
+            await tryEmbedDoc(updated.id, updated.title, updated.summary);
         } else {
             const created = await db().docEntry.create({
                 data: {
@@ -62,6 +65,7 @@ export async function ingestDocumentation(entries: DocEntryInput[]): Promise<obj
                 },
             });
             results.push({ action: "created", id: created.id, title: created.title });
+            await tryEmbedDoc(created.id, created.title, created.summary);
         }
     }
     return { ingested: results.length, results };
@@ -205,4 +209,48 @@ const DEFAULT_DOCS: DocEntryInput[] = [
 export async function seedDefaultDocumentation(): Promise<object> {
     const result = await ingestDocumentation(DEFAULT_DOCS.map(d => ({ ...d, source: "seed" })));
     return { seeded: true, ...(result as Record<string, unknown>) };
+}
+
+// ── embedding helpers ─────────────────────────────────────────────────────────
+
+async function tryEmbedDoc(id: number, title: string, summary: string | null | undefined): Promise<void> {
+    if (!await isOllamaAvailable()) return;
+    try {
+        const text = [title, summary].filter(Boolean).join(" ");
+        const vec = await embed(text);
+        await upsertDocEmbedding(id, vec);
+    } catch { /* non-fatal */ }
+}
+
+// ── semantic_search ───────────────────────────────────────────────────────────
+
+export async function semanticSearchDocumentation(query: string, limit = 10): Promise<object> {
+    const vec = await embed(query);
+    const rows = await searchDocsByVector(vec, limit);
+    if (!rows.length) return { query, semantic: true, count: 0, results: [] };
+    const ids = rows.map(r => r.id);
+    const entries = await db().docEntry.findMany({ where: { id: { in: ids } } });
+    const byId = Object.fromEntries(entries.map(e => [e.id, e]));
+    const results = rows.map(r => ({ similarity: Math.round(r.similarity * 1000) / 1000, ...byId[r.id] }));
+    return { query, semantic: true, count: results.length, results };
+}
+
+// ── backfill_embeddings ───────────────────────────────────────────────────────
+
+export async function backfillDocEmbeddings(): Promise<object> {
+    if (!await isOllamaAvailable()) {
+        return { error: "Ollama is not available. Set OLLAMA_URL and ensure Ollama is running." };
+    }
+    const rows = await db().docEntry.findMany({ select: { id: true, title: true, summary: true } });
+    const unembedded = await countUnembedded("doc_entries");
+    let done = 0; let failed = 0;
+    for (const row of rows) {
+        try {
+            const text = [row.title, row.summary].filter(Boolean).join(" ");
+            const vec = await embed(text);
+            await upsertDocEmbedding(row.id, vec);
+            done++;
+        } catch { failed++; }
+    }
+    return { total: rows.length, wasUnembedded: unembedded, embedded: done, failed };
 }
