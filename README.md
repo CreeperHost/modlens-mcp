@@ -12,7 +12,7 @@ Store mod metadata, class indexes, mixin targets, AT/AW entries, and decompiled 
 | **Docker** | Runs the PostgreSQL container via `docker compose` |
 | **JDK 21+** | Required for decompilation (Vineflower) and bytecode analysis (`javap`). Eclipse Adoptium recommended — auto-discovered at `C:/Program Files/Eclipse Adoptium`, `C:/Program Files/Java`, `C:/Program Files/Microsoft`, or via `JAVA_HOME` |
 | **Vineflower** | Decompiler JAR — **auto-downloaded** from Maven Central on first use |
-| **mcsrc-indexer.jar** | JAR indexer for class analysis — must be placed at `tools/mcsrc-indexer.jar` (built from the `java/` directory or copied from a previous build) |
+| **mcsrc-indexer.jar** | JAR bytecode indexer — **auto-downloaded** from the modlens-mcp GitHub release on first use |
 
 **Optional environment variables:**
 
@@ -68,12 +68,9 @@ npx prisma db push
 
 # 4. Build
 npm run build
-
-# 5. (Optional) Place mcsrc-indexer.jar for class analysis features
-#    cp /path/to/mcsrc-indexer.jar tools/mcsrc-indexer.jar
 ```
 
-> **Note:** Vineflower (decompiler) is downloaded automatically to `~/.modlens-cache/tools/` on first use — no manual step needed.
+> **Note:** Both Vineflower and mcsrc-indexer.jar are downloaded automatically to `~/.modlens-cache/tools/` on first use — no manual steps needed.
 
 ## MCP Configuration
 

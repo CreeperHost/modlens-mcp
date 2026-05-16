@@ -8,7 +8,11 @@ import { paths, ensureDir, exists } from "./cache.js";
 const VINEFLOWER_URL =
     "https://repo1.maven.org/maven2/org/vineflower/vineflower/1.10.1/vineflower-1.10.1.jar";
 
-// mcsrc-indexer.jar lives alongside this package (copied from mcsrc-mcp build)
+// Auto-downloaded on first use, cached to ~/.modlens-cache/tools/
+const INDEXER_URL =
+    "https://github.com/Mattabase/modlens-mcp/releases/download/tools-v1/mcsrc-indexer.jar";
+
+// Fallback: local copy alongside this package (present in dev checkout)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BUNDLED_INDEXER = join(__dirname, "..", "tools", "mcsrc-indexer.jar");
 
@@ -84,17 +88,28 @@ async function runJava(args: string[]): Promise<string> {
 }
 
 export async function ensureIndexer(): Promise<string> {
+    // 1. Already in cache
     if (await exists(paths.indexerJar)) return paths.indexerJar;
+
+    // 2. Local dev copy (present in a dev checkout alongside tools/)
     if (await exists(BUNDLED_INDEXER)) {
-        // Copy to cache so it's accessible from any cwd
         const { copyFile } = await import("fs/promises");
         await ensureDir(paths.indexerJar);
         await copyFile(BUNDLED_INDEXER, paths.indexerJar);
         return paths.indexerJar;
     }
-    throw new Error(
-        "mcsrc-indexer.jar not found. Copy it to tools/mcsrc-indexer.jar or build it from the mcsrc-mcp java/ directory."
-    );
+
+    // 3. Auto-download from GitHub release
+    console.error(`[modlens] Downloading mcsrc-indexer.jar from ${INDEXER_URL} …`);
+    await ensureDir(paths.indexerJar);
+    const res = await fetch(INDEXER_URL);
+    if (!res.ok || !res.body)
+        throw new Error(`Failed to download mcsrc-indexer.jar: HTTP ${res.status}. ` +
+            `Check that the release exists at ${INDEXER_URL}`);
+    const writer = createWriteStream(paths.indexerJar);
+    await pipeline(res.body as unknown as NodeJS.ReadableStream, writer);
+    console.error("[modlens] mcsrc-indexer.jar downloaded and cached.");
+    return paths.indexerJar;
 }
 
 export async function ensureVineflower(): Promise<string> {
