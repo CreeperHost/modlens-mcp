@@ -11,9 +11,10 @@ import { join, resolve } from "path";
 const args = process.argv.slice(2);
 const dir = args.find((a) => !a.startsWith("--"));
 const doIndex = args.includes("--index");
+const doReplace = args.includes("--replace");
 
 if (!dir) {
-    console.error("Usage: node dist/batch-ingest.js <directory> [--index]");
+    console.error("Usage: node dist/batch-ingest.js <directory> [--index] [--replace]");
     process.exit(1);
 }
 
@@ -31,13 +32,14 @@ for (let i = 0; i < jars.length; i++) {
     const prefix = `[${String(i + 1).padStart(3, " ")}/${jars.length}]`;
     process.stdout.write(`${prefix} ${jar.padEnd(70)} `);
     try {
-        const result = await ingestMod(jarPath, true); // skipSource=true for speed
+        const result = await ingestMod(jarPath, true, doReplace); // skipSource=true for speed
         if (result.status === "already_ingested" || result.status === "duplicate_version" || result.status === "duplicate_hash") {
             console.log("SKIP");
             skip++;
         } else {
             const mod = result.mod as { modId: string; loader: string; version: string; };
-            console.log(`OK   ${mod?.modId ?? "?"} (${mod?.loader ?? "?"} ${mod?.version ?? "?"})`);
+            const label = result.status === "replaced" ? "REPL" : "OK  ";
+            console.log(`${label} ${mod?.modId ?? "?"} (${mod?.loader ?? "?"} ${mod?.version ?? "?"})`);
             ok++;
         }
     } catch (e: unknown) {

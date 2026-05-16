@@ -128,7 +128,7 @@ server.tool(
     "action=source: browse or read decompiled source tree (dbId, path). " +
     "action=search_source: text/regex search across decompiled source (query, dbId, isRegex, limit). " +
     "action=reindex: re-index class names (dbId optional). " +
-    "action=batch_ingest: ingest all JARs in a directory (directory, skipSource, indexClasses).",
+    "action=batch_ingest: ingest all JARs in a directory (directory, skipSource, indexClasses, replace).",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
@@ -152,11 +152,12 @@ server.tool(
         limit:        z.number().optional().describe("Max results"),
         directory:    z.string().optional().describe("Directory of JARs (batch_ingest)"),
         indexClasses: z.boolean().optional().describe("Index classes during batch_ingest"),
+        replace:      z.boolean().optional().describe("Replace existing mod with same modId (batch_ingest, ingest)"),
     },
-    async ({ action, jarPath, modId, dbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses }) => {
+    async ({ action, jarPath, modId, dbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace }) => {
         let result: unknown;
         switch (action) {
-            case "ingest":           result = await ingestMod(jarPath!, skipSource ?? false); break;
+            case "ingest":           result = await ingestMod(jarPath!, skipSource ?? false, replace ?? false); break;
             case "list":             result = await listMods({ loader: loader as any, mcVersion, hasMixins, decompiled, limit: limit ?? 50 }); break;
             case "get":              result = await getModDetails(modId!); break;
             case "search":           result = await searchMods(query!, { loader, mcVersion, limit: limit ?? 20 }); break;
@@ -171,7 +172,7 @@ server.tool(
             case "source":           result = await getModSource(dbId!, path); break;
             case "search_source":    result = await searchSource(query!, dbId, isRegex ?? false, limit ?? 50); break;
             case "reindex":          result = await reindexClasses(dbId); break;
-            case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false); break;
+            case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false, replace ?? false); break;
         }
         return out(result);
     }

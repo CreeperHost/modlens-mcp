@@ -368,6 +368,13 @@ export async function findModClassesByClassNames(
 
 // ── ModTag queries ────────────────────────────────────────────────────────────
 
+export async function deleteModById(id: number): Promise<void> {
+    // ModClass rows are cascade-deleted by the DB foreign key; ModTag rows are not, delete manually
+    await db().modTag.deleteMany({ where: { modId: id } });
+    await db().modClass.deleteMany({ where: { modId: id } });
+    await db().mod.delete({ where: { id } });
+}
+
 export async function deleteModTags(modId: number): Promise<void> {
     await db().modTag.deleteMany({ where: { modId } });
 }

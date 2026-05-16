@@ -8,7 +8,7 @@ import { join } from "path";
 import {
     findModByJarPath, findModByDupKey, findModBySha512,
     createMod, updateMod, findModById, listAllMods,
-    countModClasses, createModClasses,
+    countModClasses, createModClasses, findModByModId, deleteModById,
 } from "../repositories/mod.js";
 import { validateDbId } from "../validate.js";
 
@@ -18,7 +18,8 @@ export type IngestResult =
     | { status: "already_ingested";  mod: Awaited<ReturnType<typeof findModById>> }
     | { status: "duplicate_version"; message: string; existingJarPath: string; existingDbId: number }
     | { status: "duplicate_hash";    message: string; existingJarPath: string; existingDbId: number }
-    | { status: "ingested";          mod: Awaited<ReturnType<typeof findModById>> };
+    | { status: "ingested";          mod: Awaited<ReturnType<typeof findModById>> }
+    | { status: "replaced";          mod: Awaited<ReturnType<typeof findModById>>; replacedDbId: number };
 
 // ── Platform lookup result types ─────────────────────────────────────────────
 
@@ -77,7 +78,7 @@ async function lookupPlatforms(
 
 // ── Main ingest ───────────────────────────────────────────────────────────────
 
-export async function ingestMod(jarPath: string, skipSource = false): Promise<IngestResult> {
+export async function ingestMod(jarPath: string, skipSource = false, replace = false): Promise<IngestResult> {
     const existing = await findModByJarPath(jarPath);
     if (existing) return { status: "already_ingested", mod: existing };
 
@@ -89,12 +90,21 @@ export async function ingestMod(jarPath: string, skipSource = false): Promise<In
         manifest.modId, manifest.version, manifest.mcVersion, manifest.loader
     );
     if (duplicate) {
-        return {
-            status: "duplicate_version",
-            message: `${manifest.modId} ${manifest.version} (${manifest.loader} / ${manifest.mcVersion}) is already ingested from a different path.`,
-            existingJarPath: duplicate.jarPath,
-            existingDbId:    duplicate.id,
-        };
+        if (!replace) {
+            return {
+                status: "duplicate_version",
+                message: `${manifest.modId} ${manifest.version} (${manifest.loader} / ${manifest.mcVersion}) is already ingested from a different path.`,
+                existingJarPath: duplicate.jarPath,
+                existingDbId:    duplicate.id,
+            };
+        }
+        await deleteModById(duplicate.id);
+    }
+
+    // In replace mode: delete any older version of this modId before inserting
+    if (replace) {
+        const older = await findModByModId(manifest.modId);
+        if (older) await deleteModById(older.id);
     }
 
     // Guard: same file content (sha512) already ingested regardless of path
@@ -186,6 +196,7 @@ export async function batchIngest(
     directory: string,
     skipSource = true,
     indexClasses = false,
+    replace = false,
 ): Promise<object> {
     const { readdir } = await import("fs/promises");
     const { join, resolve } = await import("path");
@@ -207,7 +218,7 @@ export async function batchIngest(
     for (const jar of jars) {
         const jarPath = join(absDir, jar);
         try {
-            const result = await ingestMod(jarPath, skipSource);
+            const result = await ingestMod(jarPath, skipSource, replace);
             if (result.status === "already_ingested" || result.status === "duplicate_version" || result.status === "duplicate_hash") {
                 skipped++;
                 results.push({ file: jar, status: result.status });
