@@ -8,21 +8,26 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
+    "db:setup": "prisma migrate deploy && node scripts/create-fts-index.mjs",
     "db:studio": "prisma studio"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.0",
     "@prisma/client": "^6.0.0",
     "adm-zip": "^0.5.16",
+    "smol-toml": "^1.6.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.7",
     "@types/node": "^22.0.0",
     "prisma": "^6.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.6"
   }
 }

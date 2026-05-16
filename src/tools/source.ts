@@ -1,13 +1,15 @@
-import { db } from "../db.js";
 import { readdir, readFile, stat } from "fs/promises";
 import { join, relative } from "path";
 import { exists } from "../cache.js";
 import { decompileMod, decompileModStatus } from "./ingest.js";
 import { decompileClass as decompileClassJava } from "../java-tools.js";
 import { paths } from "../cache.js";
+import { findModById, listMods } from "../repositories/mod.js";
+import { validatePath, safeRegex } from "../security.js";
+import { validateDbId } from "../validate.js";
 
 async function getDecompPath(dbId: number): Promise<string> {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     if (mod.decompPath && await exists(mod.decompPath)) return mod.decompPath;
     // Auto-decompile on demand — kick off background job then poll
@@ -24,13 +26,14 @@ async function getDecompPath(dbId: number): Promise<string> {
 }
 
 export async function getModSource(dbId: number, path?: string): Promise<string> {
+    validateDbId(dbId);
     const decompPath = await getDecompPath(dbId);
     if (!path) {
         // Directory listing
         const entries = await readdir(decompPath, { recursive: true });
         return entries.filter((e) => e.endsWith(".java")).join("\n");
     }
-    const filePath = join(decompPath, path);
+    const filePath = validatePath(path, decompPath);
     if (!(await exists(filePath))) throw new Error(`File not found: ${path}`);
     const s = await stat(filePath);
     if (s.isDirectory()) {
@@ -42,12 +45,13 @@ export async function getModSource(dbId: number, path?: string): Promise<string>
 }
 
 export async function searchSource(query: string, dbId?: number, isRegex = false, limit = 50): Promise<Array<{ file: string; line: number; text: string; }>> {
+    if (dbId !== undefined) validateDbId(dbId);
     const mods = dbId
-        ? [await db().mod.findUnique({ where: { id: dbId } })]
-        : await db().mod.findMany({ where: { decompiled: true } });
+        ? [await findModById(dbId)]
+        : await listMods({ decompiled: true });
 
     const results: Array<{ file: string; line: number; text: string; }> = [];
-    const regex = isRegex ? new RegExp(query, "i") : null;
+    const regex = isRegex ? safeRegex(query, "i") : null;
 
     for (const mod of mods) {
         if (!mod?.decompPath) continue;
@@ -88,7 +92,7 @@ async function searchDir(
 }
 
 export async function decompileModClass(dbId: number, className: string): Promise<string> {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     const internal = className.replace(/\./g, "/");
     const outDir = join(paths.decompiled(mod.modId, mod.version), "classes");

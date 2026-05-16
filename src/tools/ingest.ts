@@ -1,4 +1,3 @@
-import { db } from "../db.js";
 import { parseJar, computeHashes } from "../processor.js";
 import { lookupBySha512, getProject as getMrProject } from "../modrinth.js";
 import { lookupByFingerprint } from "../curseforge.js";
@@ -6,23 +5,89 @@ import { decompileJar, isDecompileDone } from "../java-tools.js";
 import { indexJar } from "../java-tools.js";
 import { paths, ensureDir } from "../cache.js";
 import { join } from "path";
+import {
+    findModByJarPath, findModByDupKey, findModBySha512,
+    createMod, updateMod, findModById, listAllMods,
+    countModClasses, createModClasses,
+} from "../repositories/mod.js";
+import { validateDbId } from "../validate.js";
 
-export async function ingestMod(jarPath: string, skipSource = false) {
-    const existing = await db().mod.findUnique({ where: { jarPath } });
+// ── IngestResult discriminated union ─────────────────────────────────────────
+
+export type IngestResult =
+    | { status: "already_ingested";  mod: Awaited<ReturnType<typeof findModById>> }
+    | { status: "duplicate_version"; message: string; existingJarPath: string; existingDbId: number }
+    | { status: "duplicate_hash";    message: string; existingJarPath: string; existingDbId: number }
+    | { status: "ingested";          mod: Awaited<ReturnType<typeof findModById>> };
+
+// ── Platform lookup result types ─────────────────────────────────────────────
+
+type MrLookupOk  = { platform: "modrinth";   projectId: string; slug?: string; sourceUrl?: string | null };
+type CfLookupOk  = { platform: "curseforge"; projectId: number; slug?: string; sourceUrl?: string };
+type PlatformHit = MrLookupOk | CfLookupOk;
+
+async function lookupPlatforms(
+    sha512: string | null,
+    murmur2: string | null,
+): Promise<PlatformHit[]> {
+    const tasks: Promise<PlatformHit | null>[] = [];
+
+    if (sha512) {
+        tasks.push(
+            lookupBySha512(sha512)
+                .then(async (ver) => {
+                    if (!ver) return null;
+                    const proj = await getMrProject(ver.project_id).catch(() => null);
+                    return {
+                        platform: "modrinth" as const,
+                        projectId: ver.project_id,
+                        slug: proj?.slug,
+                        sourceUrl: proj?.source_url,
+                    };
+                })
+                .catch(() => null),
+        );
+    }
+
+    if (murmur2) {
+        const m = parseInt(murmur2, 10);
+        if (!isNaN(m)) {
+            tasks.push(
+                lookupByFingerprint(m)
+                    .then((proj) => {
+                        if (!proj) return null;
+                        return {
+                            platform: "curseforge" as const,
+                            projectId: proj.id,
+                            slug: proj.slug,
+                            sourceUrl: proj.links?.sourceUrl,
+                        };
+                    })
+                    .catch(() => null),
+            );
+        }
+    }
+
+    const results = await Promise.allSettled(tasks);
+    return results
+        .filter((r): r is PromiseFulfilledResult<PlatformHit | null> => r.status === "fulfilled")
+        .map((r) => r.value)
+        .filter((v): v is PlatformHit => v !== null);
+}
+
+// ── Main ingest ───────────────────────────────────────────────────────────────
+
+export async function ingestMod(jarPath: string, skipSource = false): Promise<IngestResult> {
+    const existing = await findModByJarPath(jarPath);
     if (existing) return { status: "already_ingested", mod: existing };
 
     const manifest = await parseJar(jarPath);
     const hashes = await computeHashes(jarPath);
 
     // Guard: same modId+version+mcVersion+loader already ingested from a different path
-    const duplicate = await db().mod.findFirst({
-        where: {
-            modId:     manifest.modId,
-            version:   manifest.version,
-            mcVersion: manifest.mcVersion,
-            loader:    manifest.loader,
-        },
-    });
+    const duplicate = await findModByDupKey(
+        manifest.modId, manifest.version, manifest.mcVersion, manifest.loader
+    );
     if (duplicate) {
         return {
             status: "duplicate_version",
@@ -34,7 +99,7 @@ export async function ingestMod(jarPath: string, skipSource = false) {
 
     // Guard: same file content (sha512) already ingested regardless of path
     if (hashes.sha512) {
-        const bySha = await db().mod.findFirst({ where: { sha512: hashes.sha512 } });
+        const bySha = await findModBySha512(hashes.sha512);
         if (bySha) {
             return {
                 status: "duplicate_hash",
@@ -45,67 +110,54 @@ export async function ingestMod(jarPath: string, skipSource = false) {
         }
     }
 
-    const mod = await db().mod.create({
-        data: {
-            modId: manifest.modId,
-            displayName: manifest.displayName,
-            version: manifest.version,
-            mcVersion: manifest.mcVersion,
-            loader: manifest.loader,
-            jarPath,
-            sha256: hashes.sha256,
-            sha512: hashes.sha512,
-            murmur2: hashes.murmur2,
-            hasMixins: manifest.hasMixins,
-            hasAt: manifest.hasAt,
-            hasAw: manifest.hasAw,
-            mixinConfigs: manifest.mixinConfigs,
-            mixinTargets: manifest.mixinTargets,
-            atEntries: manifest.atEntries,
-            awEntries: manifest.awEntries,
-            dependencies: manifest.dependencies,
-            metadata: { description: manifest.description, sourceUrl: manifest.sourceUrl },
-        },
+    const mod = await createMod({
+        modId: manifest.modId,
+        displayName: manifest.displayName,
+        version: manifest.version,
+        mcVersion: manifest.mcVersion,
+        loader: manifest.loader,
+        jarPath,
+        sha256: hashes.sha256,
+        sha512: hashes.sha512,
+        murmur2: hashes.murmur2,
+        hasMixins: manifest.hasMixins,
+        hasAt: manifest.hasAt,
+        hasAw: manifest.hasAw,
+        mixinConfigs: manifest.mixinConfigs,
+        mixinTargets: manifest.mixinTargets,
+        atEntries: manifest.atEntries,
+        awEntries: manifest.awEntries,
+        dependencies: manifest.dependencies,
+        metadata: { description: manifest.description, sourceUrl: manifest.sourceUrl },
     });
 
     if (!skipSource) {
-        // Try Modrinth lookup
-        try {
-            const mrVersion = await lookupBySha512(hashes.sha512);
-            if (mrVersion) {
-                const mrProject = await getMrProject(mrVersion.project_id);
-                await db().mod.update({
-                    where: { id: mod.id },
-                    data: {
-                        modrinthId: mrVersion.project_id,
-                        metadata: {
-                            ...(mod.metadata as object),
-                            modrinthSlug: mrProject?.slug,
-                            sourceUrl: mrProject?.source_url ?? manifest.sourceUrl,
-                        },
-                    },
-                });
-            }
-        } catch { /* non-fatal */ }
+        const hits = await lookupPlatforms(hashes.sha512, hashes.murmur2);
+        let merged: Record<string, unknown> & { sourceUrl?: string | null } = { ...(mod.metadata as object) };
 
-        // Try CurseForge lookup
-        try {
-            const cfProject = await lookupByFingerprint(parseInt(hashes.murmur2));
-            if (cfProject) {
-                await db().mod.update({
-                    where: { id: mod.id },
-                    data: {
-                        curseforgeId: cfProject.id,
-                        metadata: {
-                            ...(mod.metadata as object),
-                            cfSlug: cfProject.slug,
-                            sourceUrl: (mod.metadata as Record<string, string>).sourceUrl ??
-                                cfProject.links.sourceUrl,
-                        },
-                    },
+        for (const hit of hits) {
+            if (hit.platform === "modrinth") {
+                merged = {
+                    ...merged,
+                    modrinthSlug: hit.slug,
+                    sourceUrl: merged.sourceUrl ?? hit.sourceUrl,
+                };
+                await updateMod(mod.id, {
+                    modrinthId: hit.projectId,
+                    metadata: merged as Parameters<typeof updateMod>[1]["metadata"],
+                });
+            } else {
+                merged = {
+                    ...merged,
+                    cfSlug: hit.slug,
+                    sourceUrl: merged.sourceUrl ?? hit.sourceUrl,
+                };
+                await updateMod(mod.id, {
+                    curseforgeId: hit.projectId,
+                    metadata: merged as Parameters<typeof updateMod>[1]["metadata"],
                 });
             }
-        } catch { /* non-fatal */ }
+        }
     }
 
     // Index classes in background (non-blocking)
@@ -113,20 +165,17 @@ export async function ingestMod(jarPath: string, skipSource = false) {
         .then(async (index) => {
             const classes = Object.values(index.classes);
             if (!classes.length) return;
-            await db().modClass.createMany({
-                data: classes.map((c) => ({
-                    modId: mod.id,
-                    className: c.name,
-                    superClass: c.superName || null,
-                    interfaces: c.interfaces,
-                    accessFlags: c.accessFlags,
-                })),
-                skipDuplicates: true,
-            });
+            await createModClasses(classes.map((c) => ({
+                modId: mod.id,
+                className: c.name,
+                superClass: c.superName || null,
+                interfaces: c.interfaces,
+                accessFlags: c.accessFlags,
+            })));
         })
         .catch(() => { /* non-fatal — class index can be retried */ });
 
-    return { status: "ingested", mod: await db().mod.findUnique({ where: { id: mod.id } }) };
+    return { status: "ingested", mod: await findModById(mod.id) };
 }
 
 /**
@@ -180,29 +229,27 @@ export async function batchIngest(
 }
 
 export async function reindexClasses(dbId?: number): Promise<{ indexed: number; failed: number; skipped: number; }> {
-    const mods = dbId
-        ? await db().mod.findMany({ where: { id: dbId } })
-        : await db().mod.findMany();
+    if (dbId !== undefined) validateDbId(dbId);
+    const mods = dbId !== undefined
+        ? await findModById(dbId).then((m) => (m ? [m] : []))
+        : await listAllMods();
 
     let indexed = 0, failed = 0, skipped = 0;
 
     for (const mod of mods) {
-        const existing = await db().modClass.count({ where: { modId: mod.id } });
+        const existing = await countModClasses(mod.id);
         if (existing > 0) { skipped++; continue; }
         try {
             const index = await indexJar(mod.jarPath);
             const classes = Object.values(index.classes);
             if (!classes.length) { skipped++; continue; }
-            await db().modClass.createMany({
-                data: classes.map((c) => ({
+            await createModClasses(classes.map((c) => ({
                     modId: mod.id,
                     className: c.name,
                     superClass: c.superName || null,
                     interfaces: c.interfaces,
                     accessFlags: c.accessFlags,
-                })),
-                skipDuplicates: true,
-            });
+                })));
             indexed++;
         } catch {
             failed++;
@@ -213,7 +260,7 @@ export async function reindexClasses(dbId?: number): Promise<{ indexed: number; 
 }
 
 export async function decompileMod(dbId: number): Promise<{ status: string; outDir: string; message: string }> {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
 
     const outDir = join(paths.decompiled(mod.modId, mod.version));
@@ -221,7 +268,7 @@ export async function decompileMod(dbId: number): Promise<{ status: string; outD
     // Check if already done
     const state = await isDecompileDone(outDir);
     if (state === "done") {
-        await db().mod.update({ where: { id: dbId }, data: { decompiled: true, decompPath: outDir } });
+        await updateMod(dbId, { decompiled: true, decompPath: outDir });
         return { status: "done", outDir, message: "Already decompiled. Use get_mod_source to browse." };
     }
     if (state === "running") {
@@ -239,7 +286,7 @@ export async function decompileMod(dbId: number): Promise<{ status: string; outD
 }
 
 export async function decompileModStatus(dbId: number): Promise<{ status: string; outDir: string; message: string }> {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
 
     const outDir = join(paths.decompiled(mod.modId, mod.version));
@@ -248,7 +295,7 @@ export async function decompileModStatus(dbId: number): Promise<{ status: string
     if (state === "done") {
         // Mark DB as done if not already
         if (!mod.decompiled) {
-            await db().mod.update({ where: { id: dbId }, data: { decompiled: true, decompPath: outDir } });
+        await updateMod(dbId, { decompiled: true, decompPath: outDir });
         }
         return { status: "done", outDir, message: "Decompile complete. Use get_mod_source to browse." };
     }

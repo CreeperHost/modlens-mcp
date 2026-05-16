@@ -1,12 +1,13 @@
-import { db } from "../db.js";
 import { lookupBySha512, getProject as getMrProject, getLatestVersion as getMrLatest } from "../modrinth.js";
 import { lookupByFingerprint, getLatestFile as getCfLatest } from "../curseforge.js";
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { ensureDir } from "../cache.js";
+import { findModById, updateMod, listModsForSync, getModMetadata } from "../repositories/mod.js";
+import { fileSha512, verifyFileHash, HashMismatchError } from "../security.js";
 
 export async function syncModrinth(dbId: number) {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     if (!mod.sha512) throw new Error("Mod has no SHA-512 hash — re-ingest to compute it");
 
@@ -14,15 +15,12 @@ export async function syncModrinth(dbId: number) {
     if (!version) return { matched: false };
 
     const project = await getMrProject(version.project_id);
-    await db().mod.update({
-        where: { id: dbId },
-        data: {
-            modrinthId: version.project_id,
-            metadata: {
-                ...(mod.metadata as object),
-                modrinthSlug: project?.slug,
-                sourceUrl: (mod.metadata as Record<string, string>).sourceUrl ?? project?.source_url,
-            },
+    await updateMod(dbId, {
+        modrinthId: version.project_id,
+        metadata: {
+            ...(mod.metadata as object),
+            modrinthSlug: project?.slug,
+            sourceUrl: (mod.metadata as Record<string, string>).sourceUrl ?? project?.source_url,
         },
     });
 
@@ -30,22 +28,19 @@ export async function syncModrinth(dbId: number) {
 }
 
 export async function syncCurseforge(dbId: number) {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     if (!mod.murmur2) throw new Error("Mod has no Murmur2 hash — re-ingest to compute it");
 
     const project = await lookupByFingerprint(parseInt(mod.murmur2));
     if (!project) return { matched: false };
 
-    await db().mod.update({
-        where: { id: dbId },
-        data: {
-            curseforgeId: project.id,
-            metadata: {
-                ...(mod.metadata as object),
-                cfSlug: project.slug,
-                sourceUrl: (mod.metadata as Record<string, string>).sourceUrl ?? project.links.sourceUrl,
-            },
+    await updateMod(dbId, {
+        curseforgeId: project.id,
+        metadata: {
+            ...(mod.metadata as object),
+            cfSlug: project.slug,
+            sourceUrl: (mod.metadata as Record<string, string>).sourceUrl ?? project.links.sourceUrl,
         },
     });
 
@@ -53,7 +48,7 @@ export async function syncCurseforge(dbId: number) {
 }
 
 export async function checkUpdates(dbId: number) {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
 
     const results: Record<string, unknown> = {};
@@ -95,7 +90,7 @@ export async function checkUpdates(dbId: number) {
 }
 
 export async function downloadSource(dbId: number): Promise<string> {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
 
     const meta = mod.metadata as Record<string, string>;
@@ -124,9 +119,35 @@ export async function downloadSource(dbId: number): Promise<string> {
 
     const AdmZip = (await import("adm-zip")).default;
     const zip = new AdmZip(zipPath);
-    zip.extractAllTo(outDir, true);
 
-    await db().mod.update({ where: { id: dbId }, data: { sourcePath: outDir } });
+    // ── Integrity check ────────────────────────────────────────────────────
+    const metaObj = mod.metadata as Record<string, unknown>;
+    const expectedSha512 = metaObj.modrinthFileSha512 as string | undefined;
+
+    if (expectedSha512) {
+        try {
+            await verifyFileHash(zipPath, expectedSha512);
+        } catch (e) {
+            if (e instanceof HashMismatchError) {
+                await import("fs/promises").then((f) => f.unlink(zipPath).catch(() => {}));
+                throw new Error(`Source ZIP integrity check FAILED for mod #${dbId}: ${e.message}`);
+            }
+            throw e;
+        }
+    } else {
+        const actualSha = await fileSha512(zipPath);
+        await updateMod(dbId, {
+            metadata: { ...(mod.metadata as object), sourceZipSha256: actualSha } as Parameters<typeof updateMod>[1]["metadata"],
+        });
+    }
+
+    try {
+        zip.extractAllTo(outDir, true);
+    } catch (e) {
+        throw new Error(`Failed to extract source ZIP for mod #${dbId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    await updateMod(dbId, { sourcePath: outDir });
     return outDir;
 }
 
@@ -154,15 +175,7 @@ export async function batchSyncSources(opts: {
         limit = 500,
     } = opts;
 
-    const mods = await db().mod.findMany({
-        where: {
-            ...(modIdFilter ? { modId: { contains: modIdFilter } } : {}),
-        },
-        select: { id: true, modId: true, version: true, sha512: true, murmur2: true,
-                  modrinthId: true, curseforgeId: true, sourcePath: true, metadata: true },
-        orderBy: { id: "asc" },
-        take: limit,
-    });
+    const mods = await listModsForSync({ modIdFilter, limit });
 
     let mrMatched = 0, mrSkipped = 0, mrFailed = 0;
     let cfMatched = 0, cfSkipped = 0, cfFailed = 0;
@@ -204,7 +217,7 @@ export async function batchSyncSources(opts: {
         // ── GitHub source download ─────────────────────────────────────────────
         if (doGH && !mod.sourcePath) {
             // Re-read metadata after potential sync above
-            const fresh = await db().mod.findUnique({ where: { id: mod.id }, select: { metadata: true } });
+            const fresh = await getModMetadata(mod.id);
             const sourceUrl = (fresh?.metadata as Record<string, string>)?.sourceUrl;
             if (sourceUrl) {
                 try {

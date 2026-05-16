@@ -1,6 +1,6 @@
-import { db } from "../db.js";
 import { getBytecode } from "../java-tools.js";
 import AdmZip from "adm-zip";
+import { findModById, findModByModId, resolveModRef, updateMod, listMods } from "../repositories/mod.js";
 
 function parseMixinTargetsFromJavap(output: string): string[] {
     const targets: string[] = [];
@@ -65,7 +65,7 @@ function readMixinClassesFromJar(jarPath: string, mixinConfigs: string[]): strin
 export async function resolveMixinTargets(dbId: number): Promise<{
     resolved: number; failed: number; skipped: number; targets: string[];
 }> {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
 
     // Always re-read mixin class names from the JAR — never from DB mixinTargets
@@ -90,10 +90,7 @@ export async function resolveMixinTargets(dbId: number): Promise<{
     }
 
     const targetArray = [...allTargets];
-    await db().mod.update({
-        where: { id: dbId },
-        data: { mixinTargets: targetArray },
-    });
+    await updateMod(dbId, { mixinTargets: targetArray });
 
     return { resolved, failed, skipped, targets: targetArray };
 }
@@ -101,9 +98,9 @@ export async function resolveMixinTargets(dbId: number): Promise<{
 export async function getMixinTargets(modId: string | number) {
     let mod;
     if (typeof modId === "number" || !isNaN(parseInt(String(modId), 10))) {
-        mod = await db().mod.findUnique({ where: { id: Number(modId) } });
+        mod = await findModById(Number(modId));
     }
-    if (!mod) mod = await db().mod.findFirst({ where: { modId: String(modId) } });
+    if (!mod) mod = await findModByModId(String(modId));
     if (!mod) throw new Error(`Mod not found: ${modId}`);
 
     return {
@@ -115,23 +112,8 @@ export async function getMixinTargets(modId: string | number) {
 }
 
 export async function getMixinConflicts(targetClass: string) {
-    // Find all mods whose mixinTargets array contains the target class
-    const mods = await db().mod.findMany({
-        where: {
-            mixinTargets: {
-                array_contains: [targetClass],
-            },
-        },
-        select: {
-            id: true,
-            modId: true,
-            displayName: true,
-            version: true,
-            mcVersion: true,
-            loader: true,
-            mixinTargets: true,
-        },
-    });
+    const all = await listMods({ hasMixins: true, limit: 9999 });
+    const mods = all.filter((m) => (m.mixinTargets as string[])?.includes(targetClass));
 
     return {
         targetClass,
@@ -141,7 +123,7 @@ export async function getMixinConflicts(targetClass: string) {
 }
 
 export async function getAtEntries(dbId: number) {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     return {
         modId: mod.modId,
@@ -151,7 +133,7 @@ export async function getAtEntries(dbId: number) {
 }
 
 export async function getAwEntries(dbId: number) {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     return {
         modId: mod.modId,
@@ -168,20 +150,9 @@ export async function getAwEntries(dbId: number) {
 export async function getMixinsTargetingPackage(packagePrefix: string, mcVersion?: string) {
     const prefix = packagePrefix.replace(/\./g, "/").replace(/\/$/, "");
 
-    const mods = await db().mod.findMany({
-        where: {
-            hasMixins: true,
-            ...(mcVersion ? { mcVersion } : {}),
-        },
-        select: {
-            id: true,
-            modId: true,
-            displayName: true,
-            version: true,
-            mcVersion: true,
-            loader: true,
-            mixinTargets: true,
-        },
+    const mods = await listMods({
+        hasMixins: true,
+        mcVersion,
     });
 
     const results: Array<{ modId: string; displayName: string; version: string; mcVersion: string; loader: string; matchingTargets: string[] }> = [];
@@ -221,13 +192,9 @@ export async function getMixinsTargetingPackage(packagePrefix: string, mcVersion
  * loader: optional filter ("neoforge" | "forge" | "fabric" | "quilt")
  */
 export async function findAtAwConflicts(mcVersion?: string, loader?: string): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            ...(mcVersion ? { mcVersion } : {}),
-            ...(loader ? { loader } : {}),
-            OR: [{ hasAt: true }, { hasAw: true }],
-        },
-        select: { id: true, modId: true, displayName: true, version: true, loader: true, hasAt: true, hasAw: true, atEntries: true, awEntries: true },
+    const mods = await listMods({
+        ...(mcVersion ? { mcVersion } : {}),
+        ...(loader ? { loader } : {}),
     });
 
     // Map: canonical target signature → [{mod, access}]

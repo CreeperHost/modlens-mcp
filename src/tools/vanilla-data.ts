@@ -11,7 +11,7 @@
 import { readFile, writeFile, readdir } from "fs/promises";
 import { join } from "path";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
-import { db } from "../db.js";
+import { resolveModRef } from "../repositories/mod.js";
 import { searchSource } from "./source.js";
 
 const RAW_BASE     = "https://raw.githubusercontent.com/misode/mcmeta";
@@ -730,9 +730,7 @@ export async function getEntityAttributes(entity?: string, version?: string, mod
     if (modId !== undefined || (entity && entity.includes(":") && !entity.startsWith("minecraft:"))) {
         // Resolve mod record
         const mod = modId !== undefined
-            ? (typeof modId === "number"
-                ? await db().mod.findUnique({ where: { id: modId } })
-                : await db().mod.findFirst({ where: { modId: { contains: String(modId) } } }))
+            ? await resolveModRef(String(modId))
             : null;
 
         if (!mod && modId !== undefined) {

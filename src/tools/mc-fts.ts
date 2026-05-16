@@ -4,27 +4,18 @@
  *   source in the mc_source_files table.
  * search_mc_indexed: runs a fast FTS query via to_tsvector('simple', content).
  *
- * For best performance, create a GIN index once after migration:
- *   CREATE INDEX CONCURRENTLY mc_source_files_tsv_idx
- *     ON mc_source_files USING GIN (to_tsvector('simple', content));
+ * The GIN index is created automatically by `npm run db:setup`.
+ * (scripts/create-fts-index.mjs — runs after prisma migrate deploy)
  */
 import { readFile, readdir } from "fs/promises";
 import { join, relative } from "path";
 import { mcPaths, fetchMcVersionList } from "../minecraft.js";
 import { isDecompileDone } from "../java-tools.js";
 import { exists } from "../cache.js";
-import { db } from "../db.js";
+import { ensureMcVersion, findMcVersionById, findMcVersionByVersionId, updateMcVersion, upsertMcSourceFile, searchMcSourceFiles } from "../repositories/mcVersion.js";
 
 async function ensureMcVersionRecord(version: string): Promise<number> {
-    const existing = await db().mcVersion.findUnique({ where: { versionId: version } });
-    if (existing) return existing.id;
-    const allVersions = await fetchMcVersionList(true);
-    const entry = allVersions.find((v) => v.id === version);
-    const releaseTime = entry ? new Date(entry.releaseTime) : new Date();
-    const created = await db().mcVersion.create({
-        data: { versionId: version, type: entry?.type ?? "release", releaseTime },
-    });
-    return created.id;
+    return ensureMcVersion(version);
 }
 
 /** Collect all .java file paths under a directory tree. */
@@ -60,7 +51,7 @@ export async function indexMcVersion(version: string, force = false): Promise<{
     const mcVersionId = await ensureMcVersionRecord(version);
 
     if (!force) {
-        const existing = await db().mcVersion.findUnique({ where: { id: mcVersionId } });
+        const existing = await findMcVersionById(mcVersionId);
         if (existing?.indexed) return { status: "already_indexed", indexed: 0, skipped: 0 };
     }
 
@@ -78,11 +69,7 @@ export async function indexMcVersion(version: string, force = false): Promise<{
             const className = relPath.replace(/\\/g, "/").replace(/\.java$/, "");
             try {
                 const content = await readFile(filePath, "utf8");
-                await db().mcSourceFile.upsert({
-                    where: { mcVersionId_className: { mcVersionId, className } },
-                    create: { mcVersionId, className, content },
-                    update: { content },
-                });
+                await upsertMcSourceFile(mcVersionId, className, content);
                 indexed++;
             } catch {
                 skipped++;
@@ -90,10 +77,7 @@ export async function indexMcVersion(version: string, force = false): Promise<{
         }
     }
 
-    await db().mcVersion.update({
-        where: { id: mcVersionId },
-        data: { indexed: true },
-    });
+    await updateMcVersion(mcVersionId, { indexed: true });
 
     return { status: "done", indexed, skipped };
 }
@@ -112,24 +96,18 @@ export async function searchMcIndexed(
     version: string,
     limit = 20,
 ): Promise<Array<{ className: string; snippet: string }>> {
-    const mcVersionId = await db().mcVersion.findUnique({ where: { versionId: version } })
-        .then((r) => r?.id);
-
-    if (!mcVersionId) {
+    const row = await findMcVersionByVersionId(version);
+    if (!row) {
         throw new Error(`Version "${version}" is not in the database. Run index_minecraft_version("${version}") first.`);
     }
+    return searchMcSourceFiles(row.id, query, limit);
+}
 
-    // Use plainto_tsquery for safe user input (no syntax errors on plain text).
-    // Uses 'simple' dictionary so class/method names aren't stemmed.
-    const rows = await db().$queryRaw<FtsRow[]>`
-        SELECT
-            class_name,
-            LEFT(content, 500) AS snippet
-        FROM mc_source_files
-        WHERE mc_version_id = ${mcVersionId}
-          AND to_tsvector('simple', content) @@ plainto_tsquery('simple', ${query})
-        LIMIT ${limit}
-    `;
-
-    return rows.map((r) => ({ className: r.class_name, snippet: r.snippet }));
+/**
+ * Returns true if the FTS index has been built for this MC version.
+ * Checks `indexed` flag on the McVersion row.
+ */
+export async function isMcVersionIndexed(version: string): Promise<boolean> {
+    const row = await findMcVersionByVersionId(version);
+    return row?.indexed === true;
 }

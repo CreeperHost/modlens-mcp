@@ -1,16 +1,20 @@
-import { db } from "../db.js";
 import { indexJar, inspectClass, getBytecode } from "../java-tools.js";
 import { searchClasses } from "../search.js";
 import { listClasses } from "../jar.js";
-import { accessStr, descriptorToSimpleType, Opcodes } from "../access-flags.js";
+import { accessStr, formatClassMembers, Opcodes } from "../access-flags.js";
+import {
+    findModById, resolveModRefSlim, listModsSlim, findModClassesForCrossModSearch,
+} from "../repositories/mod.js";
+import { validateDbId, validateClassName } from "../validate.js";
 
 async function getModJar(dbId: number): Promise<string> {
-    const mod = await db().mod.findUnique({ where: { id: dbId } });
+    const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     return mod.jarPath;
 }
 
 export async function searchModClass(dbId: number, query: string): Promise<string[]> {
+    validateDbId(dbId);
     const jarPath = await getModJar(dbId);
     const classes = listClasses(jarPath)
         .map((c) => c.replace(/\.class$/, ""))
@@ -19,58 +23,17 @@ export async function searchModClass(dbId: number, query: string): Promise<strin
 }
 
 export async function getModClassMembers(dbId: number, className: string) {
+    validateDbId(dbId);
+    validateClassName(className);
     const jarPath = await getModJar(dbId);
     const internal = className.replace(/\./g, "/");
     const info = await inspectClass(jarPath, internal);
-
-    const methods = info.methods.map((m) => {
-        const access = accessStr(m.access);
-        const isStatic = !!(m.access & Opcodes.ACC_STATIC);
-        const isFinal = !!(m.access & Opcodes.ACC_FINAL);
-        const isAbstract = !!(m.access & Opcodes.ACC_ABSTRACT);
-        return {
-            name: m.name,
-            descriptor: m.descriptor,
-            access,
-            isStatic,
-            isFinal,
-            isAbstract,
-            mixinTarget: `${m.name}${m.descriptor}`,
-            atString: `accessible method ${info.name} ${m.name} ${m.descriptor}`,
-        };
-    });
-
-    const fields = info.fields.map((f) => {
-        const access = accessStr(f.access);
-        const isStatic = !!(f.access & Opcodes.ACC_STATIC);
-        const isFinal = !!(f.access & Opcodes.ACC_FINAL);
-        const javaType = descriptorToSimpleType(f.descriptor);
-        const atPrefix = isFinal ? "mutable" : "accessible";
-        return {
-            name: f.name,
-            descriptor: f.descriptor,
-            access,
-            isStatic,
-            isFinal,
-            shadowAnnotation: `@Shadow ${access}${isStatic ? " static" : ""} ${javaType} ${f.name};`,
-            atString: `${atPrefix} field ${info.name} ${f.name} ${f.descriptor}`,
-        };
-    });
-
-    return {
-        className: info.name,
-        superClass: info.superName,
-        interfaces: info.interfaces,
-        atStrings: {
-            accessible: `accessible class ${info.name}`,
-            extendable: `extendable class ${info.name}`,
-        },
-        methods,
-        fields,
-    };
+    return formatClassMembers(info);
 }
 
 export async function getModClassBytecode(dbId: number, className: string): Promise<string> {
+    validateDbId(dbId);
+    validateClassName(className);
     const jarPath = await getModJar(dbId);
     return getBytecode(jarPath, className.replace(/\./g, "/"));
 }
@@ -107,8 +70,8 @@ export async function getModInheritance(dbId: number, className: string) {
 
 export async function diffModVersions(dbIdA: number, dbIdB: number) {
     const [a, b] = await Promise.all([
-        db().mod.findUnique({ where: { id: dbIdA } }),
-        db().mod.findUnique({ where: { id: dbIdB } }),
+        findModById(dbIdA),
+        findModById(dbIdB),
     ]);
     if (!a) throw new Error(`Mod #${dbIdA} not found`);
     if (!b) throw new Error(`Mod #${dbIdB} not found`);
@@ -154,7 +117,7 @@ export async function findImplementors(
         if (typeof modId === "number") {
             modDbId = modId;
         } else {
-            const mod = await db().mod.findFirst({ where: { modId: { contains: modId } }, select: { id: true } });
+            const mod = await resolveModRefSlim(modId);
             if (!mod) return { error: `Mod not found: ${modId}` };
             modDbId = mod.id;
         }
@@ -167,10 +130,7 @@ export async function findImplementors(
     });
 
     const fetchDirect = async (t: string) => {
-        const [bySuper, byIface] = await Promise.all([
-            db().modClass.findMany({ where: where(t, undefined), include: { mod: { select: { modId: true, displayName: true, version: true } } }, take: limit }),
-            db().modClass.findMany({ where: where(undefined, t), include: { mod: { select: { modId: true, displayName: true, version: true } } }, take: limit }),
-        ]);
+        const [bySuper, byIface] = await findModClassesForCrossModSearch(where(t, undefined), where(undefined, t), limit);
         return [...bySuper, ...byIface];
     };
 
@@ -241,13 +201,11 @@ export async function findAnnotatedClasses(
 
     let mods;
     if (modId !== undefined) {
-        const mod = typeof modId === "number"
-            ? await db().mod.findUnique({ where: { id: modId }, select: { id: true, modId: true, displayName: true, version: true, jarPath: true } })
-            : await db().mod.findFirst({ where: { modId: { contains: String(modId) } }, select: { id: true, modId: true, displayName: true, version: true, jarPath: true } });
+        const mod = await resolveModRefSlim(modId);
         if (!mod) return { error: `Mod not found: ${modId}` };
         mods = [mod];
     } else {
-        mods = await db().mod.findMany({ select: { id: true, modId: true, displayName: true, version: true, jarPath: true } });
+        mods = await listModsSlim();
     }
 
     const results: Array<{ mod: string; modDisplay: string; version: string; classes: string[] }> = [];
@@ -386,13 +344,7 @@ export async function crossModRefs(
 ): Promise<object> {
     const internal = target.replace(/\./g, "/");
 
-    const mods = await db().mod.findMany({
-        where: {
-            ...(mcVersion ? { mcVersion } : {}),
-            ...(loader ? { loader } : {}),
-        },
-        select: { id: true, modId: true, displayName: true, version: true, mcVersion: true, loader: true, jarPath: true },
-    });
+    const mods = await listModsSlim({ mcVersion, loader });
 
     const results: Array<{ mod: string; modDisplay: string; version: string; loader: string; referencingClasses: string[] }> = [];
     let total = 0;
@@ -445,13 +397,11 @@ export async function findEventListeners(
 
     let mods;
     if (modId !== undefined) {
-        const mod = typeof modId === "number"
-            ? await db().mod.findUnique({ where: { id: modId }, select: { id: true, modId: true, displayName: true, version: true, jarPath: true } })
-            : await db().mod.findFirst({ where: { modId: { contains: String(modId) } }, select: { id: true, modId: true, displayName: true, version: true, jarPath: true } });
+        const mod = await resolveModRefSlim(modId);
         if (!mod) return { error: `Mod not found: ${modId}` };
         mods = [mod];
     } else {
-        mods = await db().mod.findMany({ select: { id: true, modId: true, displayName: true, version: true, jarPath: true } });
+        mods = await listModsSlim();
     }
 
     const results: Array<{

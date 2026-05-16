@@ -1,6 +1,18 @@
-import { db } from "../db.js";
 import { extractEntry, listEntries } from "../jar.js";
 import type { Mod } from "@prisma/client";
+import {
+    listMods as dbListMods,
+    resolveModRef,
+    searchModsFts,
+    countMods,
+    countAllModClasses,
+    groupModsByLoader,
+    findModByModId,
+    listModsForConflictCheck,
+    listModsForDepGraph,
+    listModsForSourceUrls,
+    resolveModRefSlim,
+} from "../repositories/mod.js";
 
 export async function listMods(opts: {
     loader?: string;
@@ -9,30 +21,11 @@ export async function listMods(opts: {
     decompiled?: boolean;
     limit?: number;
 }): Promise<Mod[]> {
-    return db().mod.findMany({
-        where: {
-            ...(opts.loader ? { loader: opts.loader } : {}),
-            ...(opts.mcVersion ? { mcVersion: { contains: opts.mcVersion } } : {}),
-            ...(opts.hasMixins !== undefined ? { hasMixins: opts.hasMixins } : {}),
-            ...(opts.decompiled !== undefined ? { decompiled: opts.decompiled } : {}),
-        },
-        orderBy: { ingestedAt: "desc" },
-        take: opts.limit ?? 100,
-    });
+    return dbListMods(opts);
 }
 
 export async function getModDetails(modId: string | number): Promise<Mod | null> {
-    if (typeof modId === "number") {
-        return db().mod.findUnique({ where: { id: modId } });
-    }
-    // Try numeric id first
-    const numeric = parseInt(modId, 10);
-    if (!isNaN(numeric)) {
-        const byId = await db().mod.findUnique({ where: { id: numeric } });
-        if (byId) return byId;
-    }
-    // Fall back to mod_id string match
-    return db().mod.findFirst({ where: { modId } });
+    return resolveModRef(modId);
 }
 
 export async function searchMods(query: string, opts?: {
@@ -40,36 +33,19 @@ export async function searchMods(query: string, opts?: {
     mcVersion?: string;
     limit?: number;
 }): Promise<Mod[]> {
-    const q = query.toLowerCase();
-    return db().mod.findMany({
-        where: {
-            AND: [
-                {
-                    OR: [
-                        { modId: { contains: q, mode: "insensitive" } },
-                        { displayName: { contains: q, mode: "insensitive" } },
-                        { metadata: { path: ["description"], string_contains: q } },
-                    ],
-                },
-                ...(opts?.loader ? [{ loader: opts.loader }] : []),
-                ...(opts?.mcVersion ? [{ mcVersion: { contains: opts.mcVersion } }] : []),
-            ],
-        },
-        orderBy: { ingestedAt: "desc" },
-        take: opts?.limit ?? 50,
-    });
+    return searchModsFts(query, opts);
 }
 
 export async function getDbStats() {
     const [total, decompiled, loaderBreakdown, classCount, hasMixins, hasAt, hasAw] =
         await Promise.all([
-            db().mod.count(),
-            db().mod.count({ where: { decompiled: true } }),
-            db().mod.groupBy({ by: ["loader"], _count: { id: true } }),
-            db().modClass.count(),
-            db().mod.count({ where: { hasMixins: true } }),
-            db().mod.count({ where: { hasAt: true } }),
-            db().mod.count({ where: { hasAw: true } }),
+            countMods(),
+            countMods({ decompiled: true }),
+            groupModsByLoader(),
+            countAllModClasses(),
+            countMods({ hasMixins: true }),
+            countMods({ hasAt: true }),
+            countMods({ hasAw: true }),
         ]);
 
     return {
@@ -102,7 +78,7 @@ export async function getDependencies(modId: string | number, recursive = false)
     const resolve = async (id: string): Promise<unknown[]> => {
         if (seen.has(id)) return [];
         seen.add(id);
-        const dep = await db().mod.findFirst({ where: { modId: id } });
+        const dep = await findModByModId(id);
         if (!dep) return [];
         const subDeps = dep.dependencies as Array<{ id: string; }>;
         const children = await Promise.all(subDeps.map((d) => resolve(d.id)));
@@ -117,10 +93,7 @@ export async function getDependencies(modId: string | number, recursive = false)
  * Also checks cross-mod dependency version range satisfaction.
  */
 export async function findVersionConflicts(): Promise<object> {
-    const mods = await db().mod.findMany({
-        select: { id: true, modId: true, displayName: true, version: true, mcVersion: true, loader: true, dependencies: true },
-        orderBy: [{ modId: "asc" }, { version: "asc" }],
-    });
+    const mods = await listModsForConflictCheck();
 
     // 1. Multiple ingested versions of the same modId
     const byModId: Record<string, typeof mods> = {};
@@ -171,11 +144,7 @@ export async function findVersionConflicts(): Promise<object> {
  * Returns adjacency list: modId → { requires: string[], requiredBy: string[] }
  */
 export async function getDependencyGraph(mcVersion?: string): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: mcVersion ? { mcVersion: { contains: mcVersion } } : undefined,
-        select: { modId: true, displayName: true, version: true, loader: true, dependencies: true, metadata: true },
-        orderBy: { modId: "asc" },
-    });
+    const mods = await listModsForDepGraph(mcVersion);
 
     type Dep = { id: string; version: string; required: boolean };
     type Node = { display: string; version: string; loader: string; sourceUrl?: string; requires: Array<{ id: string; version: string; required: boolean; inDb: boolean }>; requiredBy: string[] };
@@ -212,13 +181,7 @@ export async function getDependencyGraph(mcVersion?: string): Promise<object> {
  * Show source URLs for all ingested mods (extracted from JAR metadata at ingest time).
  */
 export async function listModSourceUrls(query?: string): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: query
-            ? { OR: [{ modId: { contains: query, mode: "insensitive" } }, { displayName: { contains: query, mode: "insensitive" } }] }
-            : undefined,
-        select: { modId: true, displayName: true, version: true, loader: true, metadata: true },
-        orderBy: { modId: "asc" },
-    });
+    const mods = await listModsForSourceUrls(query);
 
     const results = mods.map((m) => {
         const meta = m.metadata as Record<string, string> | null;
@@ -261,9 +224,7 @@ export async function listModRegistryEntries(
     limit = 200,
 ): Promise<object> {
     // Resolve mod
-    const mod = typeof modId === "number"
-        ? await db().mod.findUnique({ where: { id: modId } })
-        : await db().mod.findFirst({ where: { modId: { contains: modId } } });
+    const mod = await resolveModRefSlim(modId);
 
     if (!mod) return { error: `Mod not found: ${modId}` };
 

@@ -108,9 +108,7 @@ model ModTag {
 }
 
 // Stores decompiled vanilla source per class — enables PostgreSQL FTS search.
-// After schema migration run:
-//   CREATE INDEX CONCURRENTLY mc_source_files_tsv_idx
-//     ON mc_source_files USING GIN (to_tsvector('simple', content));
+// GIN index is created automatically by `npm run db:setup` (scripts/create-fts-index.mjs).
 model McSourceFile {
   id          Int       @id @default(autoincrement())
   mcVersionId Int       @map("mc_version_id")

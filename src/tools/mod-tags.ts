@@ -8,7 +8,11 @@
  *   - "which tag paths have a replace:true conflict?"
  */
 import AdmZip from "adm-zip";
-import { db } from "../db.js";
+import {
+    resolveModRef, listModsSlim, deleteModTags, createModTags,
+    findModTagsByPath, findAllModTagsByPath, findModTagsByMod,
+    findReplaceModTags, searchModTagsByPath, listModTagNamespaces,
+} from "../repositories/mod.js";
 
 // ── JAR scanner ───────────────────────────────────────────────────────────────
 
@@ -24,7 +28,7 @@ interface ScannedTag {
  * Read all data/<ns>/tags/<registry>/... JSON files from a JAR and return
  * structured tag records.
  */
-function scanTagsFromJar(jarPath: string): ScannedTag[] {
+export function scanTagsFromJar(jarPath: string): ScannedTag[] {
     const zip = new AdmZip(jarPath);
     const results: ScannedTag[] = [];
 
@@ -37,7 +41,9 @@ function scanTagsFromJar(jarPath: string): ScannedTag[] {
 
         let json: { values?: unknown[]; replace?: boolean } = {};
         try {
-            json = JSON.parse(zip.readFile(entry)!.toString("utf8"));
+            const raw = zip.readFile(entry);
+            if (!raw) continue;
+            json = JSON.parse(raw.toString("utf8"));
         } catch { continue; }
 
         const rawValues = json.values ?? [];
@@ -65,19 +71,16 @@ function scanTagsFromJar(jarPath: string): ScannedTag[] {
  * Safe to re-run — deletes existing rows for this mod first (full re-index).
  */
 export async function indexModTags(modIdOrDbId: string | number): Promise<object> {
-    const mod = typeof modIdOrDbId === "number" || !isNaN(Number(modIdOrDbId))
-        ? await db().mod.findUnique({ where: { id: Number(modIdOrDbId) } })
-        : await db().mod.findFirst({ where: { modId: String(modIdOrDbId) } });
+    const mod = await resolveModRef(String(modIdOrDbId));
     if (!mod) return { error: `Mod not found: ${modIdOrDbId}` };
 
     const scanned = scanTagsFromJar(mod.jarPath);
 
     // Full re-index
-    await db().modTag.deleteMany({ where: { modId: mod.id } });
+    await deleteModTags(mod.id);
 
     if (scanned.length > 0) {
-        await db().modTag.createMany({
-            data: scanned.map((t) => ({
+        await createModTags(scanned.map((t) => ({
                 modId:     mod.id,
                 registry:  t.registry,
                 tagPath:   t.tagPath,
@@ -85,7 +88,7 @@ export async function indexModTags(modIdOrDbId: string | number): Promise<object
                 entries:   t.entries,
                 replace:   t.replace,
             })),
-        });
+        );
     }
 
     return {
@@ -102,7 +105,7 @@ export async function indexModTags(modIdOrDbId: string | number): Promise<object
  * Returns a summary per mod.
  */
 export async function indexAllModTags(): Promise<object> {
-    const mods = await db().mod.findMany({ select: { id: true, modId: true, version: true } });
+    const mods = await listModsSlim();
     const results: Array<{ mod: string; version: string; indexed: number; error?: string }> = [];
 
     for (const mod of mods) {
@@ -123,11 +126,7 @@ export async function indexAllModTags(): Promise<object> {
  * Useful for discovering what tag namespaces mods use (minecraft, c, forge, neoforge, mymod, …).
  */
 export async function listTagNamespaces(): Promise<object> {
-    const rows = await db().modTag.findMany({
-        select: { namespace: true, registry: true },
-        distinct: ["namespace", "registry"],
-        orderBy: [{ namespace: "asc" }, { registry: "asc" }],
-    });
+    const rows = await listModTagNamespaces();
 
     // Group by namespace
     const byNs: Record<string, string[]> = {};
@@ -144,14 +143,7 @@ export async function listTagNamespaces(): Promise<object> {
 export async function getTagContributors(tagPath: string, registry?: string): Promise<object> {
     const normalPath = tagPath.startsWith("#") ? tagPath.slice(1) : tagPath;
 
-    const rows = await db().modTag.findMany({
-        where: {
-            tagPath: normalPath,
-            ...(registry ? { registry } : {}),
-        },
-        include: { mod: { select: { modId: true, displayName: true, version: true, mcVersion: true, loader: true } } },
-        orderBy: { mod: { modId: "asc" } },
-    });
+    const rows = await findModTagsByPath(normalPath, registry);
 
     return {
         tagPath: `#${normalPath}`,
@@ -174,15 +166,10 @@ export async function getTagContributors(tagPath: string, registry?: string): Pr
  * Optionally filter by registry.
  */
 export async function getModTagList(modIdOrDbId: string | number, registry?: string): Promise<object> {
-    const mod = typeof modIdOrDbId === "number" || !isNaN(Number(modIdOrDbId))
-        ? await db().mod.findUnique({ where: { id: Number(modIdOrDbId) } })
-        : await db().mod.findFirst({ where: { modId: String(modIdOrDbId) } });
+    const mod = await resolveModRef(String(modIdOrDbId));
     if (!mod) return { error: `Mod not found: ${modIdOrDbId}` };
 
-    const rows = await db().modTag.findMany({
-        where: { modId: mod.id, ...(registry ? { registry } : {}) },
-        orderBy: [{ registry: "asc" }, { tagPath: "asc" }],
-    });
+    const rows = await findModTagsByMod(mod.id, registry);
 
     return {
         mod:     mod.modId,
@@ -203,11 +190,7 @@ export async function getModTagList(modIdOrDbId: string | number, registry?: str
  */
 export async function findTagConflicts(registry?: string): Promise<object> {
     // Find tagPaths with replace:true from more than one mod
-    const replaceTags = await db().modTag.findMany({
-        where: { replace: true, ...(registry ? { registry } : {}) },
-        include: { mod: { select: { modId: true, displayName: true, version: true } } },
-        orderBy: [{ tagPath: "asc" }],
-    });
+    const replaceTags = await findReplaceModTags(registry);
 
     // Group by tagPath
     const byPath: Record<string, typeof replaceTags> = {};
@@ -234,10 +217,7 @@ export async function findTagConflicts(registry?: string): Promise<object> {
     const softConflicts: Array<{ tagPath: string; registry: string; replacer: string; silencedMods: string[] }> = [];
 
     for (const tagPath of allTagPaths) {
-        const allContribs = await db().modTag.findMany({
-            where: { tagPath, ...(registry ? { registry } : {}) },
-            include: { mod: { select: { modId: true } } },
-        });
+        const allContribs = await findAllModTagsByPath(tagPath, registry);
         const replacers = allContribs.filter((r) => r.replace).map((r) => r.mod.modId);
         const silenced  = allContribs.filter((r) => !r.replace).map((r) => r.mod.modId);
         if (replacers.length > 0 && silenced.length > 0) {
@@ -282,10 +262,7 @@ export async function expandTag(
         if (depth > maxDepth || visited.has(path)) return;
         visited.add(path);
 
-        const rows = await db().modTag.findMany({
-            where: { tagPath: path, ...(registry ? { registry } : {}) },
-            include: { mod: { select: { modId: true } } },
-        });
+        const rows = await findAllModTagsByPath(path, registry);
         dbLookups++;
 
         if (rows.length === 0) {
@@ -327,15 +304,7 @@ export async function expandTag(
  * Search tags by path substring across all indexed mods.
  */
 export async function searchModTags(query: string, registry?: string, limit = 50): Promise<object> {
-    const rows = await db().modTag.findMany({
-        where: {
-            tagPath: { contains: query, mode: "insensitive" },
-            ...(registry ? { registry } : {}),
-        },
-        include: { mod: { select: { modId: true, displayName: true, version: true } } },
-        orderBy: [{ tagPath: "asc" }, { mod: { modId: "asc" } }],
-        take: limit,
-    });
+    const rows = await searchModTagsByPath(query, registry, limit);
 
     // Group by tagPath
     const byPath: Record<string, { registry: string; contributors: Array<{ mod: string; replace: boolean; entries: string[] }> }> = {};

@@ -15,7 +15,7 @@
  */
 import { writeFile, mkdir } from "fs/promises";
 import { join, dirname } from "path";
-import { db } from "../db.js";
+import { resolveModRef, findModTagsByMod } from "../repositories/mod.js";
 import { getMixinConflictMatrix, getMixinHotspots, listModsWithMixins } from "./mixin-scan.js";
 import { findTagConflicts, getTagContributors, getModTagList, searchModTags } from "./mod-tags.js";
 import { findVersionConflicts, getDependencyGraph, listModSourceUrls } from "./catalog.js";
@@ -159,18 +159,13 @@ async function reportVersionConflicts(): Promise<string> {
 }
 
 async function reportModOverview(modIdOrDbId: string | number): Promise<string> {
-    const mod = typeof modIdOrDbId === "number" || !isNaN(Number(modIdOrDbId))
-        ? await db().mod.findUnique({ where: { id: Number(modIdOrDbId) } })
-        : await db().mod.findFirst({ where: { modId: String(modIdOrDbId) } });
+    const mod = await resolveModRef(String(modIdOrDbId));
     if (!mod) return `# Error\nMod not found: ${modIdOrDbId}\n`;
 
     const meta = mod.metadata as Record<string, string> | null;
     const mixinTargets = (mod.mixinTargets as string[]) ?? [];
     const deps = (mod.dependencies as Array<{ id: string; version: string; required: boolean }>) ?? [];
-    const tags = await db().modTag.findMany({
-        where: { modId: mod.id },
-        orderBy: [{ registry: "asc" }, { tagPath: "asc" }],
-    });
+    const tags = await findModTagsByMod(mod.id);
 
     let md = h1(`Mod Overview: ${mod.displayName}`);
     md += `${timestamp()}\n`;

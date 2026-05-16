@@ -10,7 +10,7 @@
  */
 
 import AdmZip from "adm-zip";
-import { db } from "../db.js";
+import { resolveModRef, listModsSlim, listMods, findModsByIds } from "../repositories/mod.js";
 import { listEntries } from "../jar.js";
 import { indexJar } from "../java-tools.js";
 
@@ -30,13 +30,7 @@ export async function findAssetConflicts(
     loader?: string,
     limit = 300,
 ): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            ...(mcVersion ? { mcVersion } : {}),
-            ...(loader    ? { loader }    : {}),
-        },
-        select: { id: true, modId: true, displayName: true, version: true, jarPath: true },
-    });
+    const mods = await listModsSlim({ mcVersion, loader });
 
     const typeFilter = assetType && assetType !== "all" ? assetType : null;
     const pathMap = new Map<string, Array<{ mod: string; display: string }>>();
@@ -94,13 +88,7 @@ export async function findVanillaOverrides(
     mcVersion?: string,
     loader?: string,
 ): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            ...(mcVersion ? { mcVersion } : {}),
-            ...(loader    ? { loader }    : {}),
-        },
-        select: { id: true, modId: true, displayName: true, version: true, jarPath: true },
-    });
+    const mods = await listModsSlim({ mcVersion, loader });
 
     const checkData   = !overrideType || overrideType === "all" || overrideType === "data";
     const checkAssets = !overrideType || overrideType === "all" || overrideType === "assets";
@@ -184,9 +172,7 @@ export type ModSidedness = "client_only" | "server_only" | "client_optional" | "
  *   3. Bytecode reference heuristic (fallback)
  */
 export async function analyzeModSidedness(modIdOrDbId: string | number): Promise<object> {
-    const mod = typeof modIdOrDbId === "number" || !isNaN(Number(modIdOrDbId))
-        ? await db().mod.findUnique({ where: { id: Number(modIdOrDbId) } })
-        : await db().mod.findFirst({ where: { modId: String(modIdOrDbId) } });
+    const mod = await resolveModRef(String(modIdOrDbId));
     if (!mod) return { error: `Mod not found: ${modIdOrDbId}` };
 
     let sidedness: ModSidedness = "unknown";
@@ -262,13 +248,7 @@ export async function analyzePackSidedness(
     mcVersion?: string,
     loader?: string,
 ): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            ...(mcVersion ? { mcVersion } : {}),
-            ...(loader    ? { loader }    : {}),
-        },
-        select: { id: true },
-    });
+    const mods = await listModsSlim({ mcVersion, loader });
 
     // Analyse concurrently in batches of 10 to avoid overwhelming the JAR reader
     const BATCH = 10;
@@ -317,16 +297,7 @@ export async function computeModComplexity(
     mcVersion?: string,
     loader?: string,
 ): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            ...(mcVersion ? { mcVersion } : {}),
-            ...(loader    ? { loader }    : {}),
-        },
-        select: {
-            id: true, modId: true, displayName: true, version: true, loader: true,
-            jarPath: true, atEntries: true, awEntries: true, mixinTargets: true, hasMixins: true,
-        },
-    });
+    const mods = await listMods({ mcVersion, loader, limit: 9999 });
 
     const results: Array<{
         mod: string; display: string; version: string; loader: string;
@@ -372,14 +343,8 @@ export async function computePackChangelog(
     newIds: number[],
 ): Promise<object> {
     const [oldMods, newMods] = await Promise.all([
-        db().mod.findMany({
-            where: { id: { in: oldIds } },
-            select: { id: true, modId: true, displayName: true, version: true, mcVersion: true, loader: true },
-        }),
-        db().mod.findMany({
-            where: { id: { in: newIds } },
-            select: { id: true, modId: true, displayName: true, version: true, mcVersion: true, loader: true },
-        }),
+        findModsByIds(oldIds),
+        findModsByIds(newIds),
     ]);
 
     const oldMap = new Map(oldMods.map(m => [m.modId, m]));

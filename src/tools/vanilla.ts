@@ -8,12 +8,15 @@ import { readFile, writeFile, readdir } from "fs/promises";
 import { join, relative } from "path";
 import { getMcJarPath, mcPaths, fetchMcVersionList } from "../minecraft.js";
 import { listClasses } from "../jar.js";
+import { safeRegex } from "../security.js";
+import { validateVersion, validateClassName } from "../validate.js";
+import { isMcVersionIndexed, searchMcIndexed } from "./mc-fts.js";
 import { searchClasses } from "../search.js";
 import { inspectClass, getBytecode, indexJar, decompileClass, decompileJar,
          isDecompileDone, decompileSentinelDone, type JarIndex } from "../java-tools.js";
 import { exists, ensureDir } from "../cache.js";
-import { accessStr, descriptorToSimpleType, Opcodes } from "../access-flags.js";
-import { db } from "../db.js";
+import { formatClassMembers } from "../access-flags.js";
+import { ensureMcVersion, updateMcVersion } from "../repositories/mcVersion.js";
 
 // ── Index cache (disk-backed per version, mirroring mcsrc's index-manager) ───
 
@@ -40,64 +43,11 @@ async function getMcIndex(version: string): Promise<JarIndex> {
 // ── McVersion DB helper ───────────────────────────────────────────────────────
 
 async function ensureMcVersionRecord(version: string): Promise<number> {
-    const existing = await db().mcVersion.findUnique({ where: { versionId: version } });
-    if (existing) return existing.id;
-
-    const allVersions = await fetchMcVersionList(true);
-    const entry = allVersions.find((v) => v.id === version);
-    const releaseTime = entry ? new Date(entry.releaseTime) : new Date();
-    const type = entry?.type ?? "release";
-
-    const created = await db().mcVersion.create({
-        data: { versionId: version, type, releaseTime },
-    });
-    return created.id;
+    return ensureMcVersion(version);
 }
 
-// ── Format helpers (shared with mod bytecode tool) ────────────────────────────
-
-function formatMcMembers(info: Awaited<ReturnType<typeof inspectClass>>) {
-    const methods = info.methods.map((m) => {
-        const access = accessStr(m.access);
-        const isStatic = !!(m.access & Opcodes.ACC_STATIC);
-        const isFinal  = !!(m.access & Opcodes.ACC_FINAL);
-        const isAbstract = !!(m.access & Opcodes.ACC_ABSTRACT);
-        return {
-            name: m.name,
-            descriptor: m.descriptor,
-            access, isStatic, isFinal, isAbstract,
-            mixinTarget: `${m.name}${m.descriptor}`,
-            atString: `accessible method ${info.name} ${m.name} ${m.descriptor}`,
-        };
-    });
-
-    const fields = info.fields.map((f) => {
-        const access = accessStr(f.access);
-        const isStatic = !!(f.access & Opcodes.ACC_STATIC);
-        const isFinal  = !!(f.access & Opcodes.ACC_FINAL);
-        const javaType = descriptorToSimpleType(f.descriptor);
-        const atPrefix = isFinal ? "mutable" : "accessible";
-        return {
-            name: f.name,
-            descriptor: f.descriptor,
-            access, isStatic, isFinal,
-            shadowAnnotation: `@Shadow ${access}${isStatic ? " static" : ""} ${javaType} ${f.name};`,
-            atString: `${atPrefix} field ${info.name} ${f.name} ${f.descriptor}`,
-        };
-    });
-
-    return {
-        className: info.name,
-        superClass: info.superName,
-        interfaces: info.interfaces,
-        atStrings: {
-            accessible: `accessible class ${info.name}`,
-            extendable: `extendable class ${info.name}`,
-        },
-        methods,
-        fields,
-    };
-}
+// ── Format helpers ────────────────────────────────────────────────────────────
+// formatClassMembers is re-exported from access-flags.ts
 
 // ── Similarity helper for validation suggestions ──────────────────────────────
 
@@ -137,6 +87,8 @@ export async function getMinecraftSource(
     endLine?: number,
     maxLines?: number,
 ): Promise<string> {
+    validateVersion(version);
+    validateClassName(className);
     const internal = className.replace(/\./g, "/");
     const outDir = mcPaths.decompiled(version);
     const cached = mcPaths.classFile(version, internal);
@@ -161,15 +113,19 @@ export async function getMinecraftSource(
 
 /** get_mc_class_bytecode */
 export async function getMcClassBytecode(version: string, className: string): Promise<string> {
+    validateVersion(version);
+    validateClassName(className);
     const jarPath = await getMcJarPath(version);
     return getBytecode(jarPath, className.replace(/\./g, "/"));
 }
 
 /** get_mc_class_members */
 export async function getMcClassMembers(version: string, className: string) {
+    validateVersion(version);
+    validateClassName(className);
     const jarPath = await getMcJarPath(version);
     const info = await inspectClass(jarPath, className.replace(/\./g, "/"));
-    return formatMcMembers(info);
+    return formatClassMembers(info);
 }
 
 /** find_mc_references */
@@ -235,20 +191,14 @@ export async function decompileMcVersion(version: string, force = false) {
     if (!force) {
         const status = await isDecompileDone(outDir);
         if (status === "done") {
-            await db().mcVersion.update({
-                where: { id: dbId },
-                data: { decompiled: true, decompPath: outDir },
-            });
+            await updateMcVersion(dbId, { decompiled: true, decompPath: outDir });
             return { status: "already_done", outDir };
         }
         if (status === "running") return { status: "running", outDir };
     }
 
     await decompileJar(jarPath, outDir);
-    await db().mcVersion.update({
-        where: { id: dbId },
-        data: { decompPath: outDir, jarPath },
-    });
+    await updateMcVersion(dbId, { decompPath: outDir, jarPath });
     return { status: "started", outDir };
 }
 
@@ -259,10 +209,7 @@ export async function decompileMcVersionStatus(version: string) {
 
     if (status === "done") {
         const dbId = await ensureMcVersionRecord(version);
-        await db().mcVersion.update({
-            where: { id: dbId },
-            data: { decompiled: true, decompPath: outDir },
-        });
+        await updateMcVersion(dbId, { decompiled: true, decompPath: outDir });
     }
 
     return { version, status, outDir };
@@ -276,6 +223,7 @@ export async function searchMcCode(
     isRegex: boolean,
     limit: number,
 ): Promise<Array<{ file: string; line: number; text: string }>> {
+    validateVersion(version);
     const outDir = mcPaths.decompiled(version);
     const status = await isDecompileDone(outDir);
     if (status !== "done") {
@@ -283,6 +231,21 @@ export async function searchMcCode(
             `MC ${version} has not been fully decompiled. ` +
             `Run decompile_minecraft_version("${version}") first, then wait for it to finish.`
         );
+    }
+
+    // ── Fast path: use PostgreSQL FTS index when available ───────────────────
+    // FTS only supports plain-text queries. For regex or type-scoped searches
+    // (class/method/field), fall through to the filesystem walk.
+    if (!isRegex && (searchType === "content" || searchType === "all")) {
+        const indexed = await isMcVersionIndexed(version);
+        if (indexed) {
+            const ftsResults = await searchMcIndexed(query, version, limit);
+            return ftsResults.map((r) => ({
+                file: r.className + ".java",
+                line: 0, // FTS returns snippets, not line numbers
+                text: r.snippet,
+            }));
+        }
     }
 
     // Build effective regex based on searchType
@@ -295,18 +258,18 @@ export async function searchMcCode(
     let pattern: RegExp;
     switch (searchType) {
         case "class":
-            pattern = new RegExp(`(?:class|interface|enum|record)\\s+.*${effectiveQuery}`, "i");
+            pattern = safeRegex(`(?:class|interface|enum|record)\\s+.*${effectiveQuery}`, "i");
             break;
         case "method":
-            pattern = new RegExp(`(?:public|protected|private|package-private|static|final|abstract|\\s)\\s+\\w[\\w<>\\[\\]]*\\s+${effectiveQuery}\\s*\\(`, "i");
+            pattern = safeRegex(`(?:public|protected|private|package-private|static|final|abstract|\\s)\\s+\\w[\\w<>\\[\\]]*\\s+${effectiveQuery}\\s*\\(`, "i");
             break;
         case "field":
-            pattern = new RegExp(`(?:public|protected|private|static|final|volatile|transient|\\s)\\s+\\w[\\w<>\\[\\]]*\\s+${effectiveQuery}\\s*[=;]`, "i");
+            pattern = safeRegex(`(?:public|protected|private|static|final|volatile|transient|\\s)\\s+\\w[\\w<>\\[\\]]*\\s+${effectiveQuery}\\s*[=;]`, "i");
             break;
         case "content":
         case "all":
         default:
-            pattern = new RegExp(effectiveQuery, "i");
+            pattern = safeRegex(effectiveQuery, "i");
     }
 
     const results: Array<{ file: string; line: number; text: string }> = [];
@@ -389,10 +352,10 @@ export async function validateAccessWidener(content: string, mcVersion: string) 
     const jarPath = await getMcJarPath(mcVersion);
 
     for (const [className, classEntries] of byClass) {
-        let members: ReturnType<typeof formatMcMembers> | null = null;
+        let members: ReturnType<typeof formatClassMembers> | null = null;
         try {
             const info = await inspectClass(jarPath, className);
-            members = formatMcMembers(info);
+            members = formatClassMembers(info);
         } catch {
             for (const e of classEntries) {
                 const allClasses = listClasses(jarPath).map((c) => c.replace(/\.class$/, ""));
@@ -538,10 +501,10 @@ export async function analyzeMixin(source: string, mcVersion: string) {
     }
 
     const jarPath = await getMcJarPath(mcVersion);
-    let members: ReturnType<typeof formatMcMembers>;
+    let members: ReturnType<typeof formatClassMembers>;
     try {
         const info = await inspectClass(jarPath, targetClass);
-        members = formatMcMembers(info);
+        members = formatClassMembers(info);
     } catch {
         const allClasses = listClasses(jarPath).map((c) => c.replace(/\.class$/, ""));
         return {

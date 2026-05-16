@@ -81,7 +81,7 @@ async function extractTinyFromJar(jarPath: string, entry: string, dest: string):
 }
 
 // ── Tiny V2 parser ────────────────────────────────────────────────────────────
-function parseTinyV2(content: string): TinyV2Index {
+export function parseTinyV2(content: string): TinyV2Index {
     const lines = content.split("\n");
     const header = lines[0].split("\t");
     const ns0 = header[3] ?? "official";
@@ -229,7 +229,7 @@ async function getMojmapClassMap(version: string): Promise<Map<string, string> |
 }
 
 // ── Index lookup helper ───────────────────────────────────────────────────────
-function lookupInIndex(idx: TinyV2Index, symbol: string, reverse: boolean): TranslateResult {
+export function lookupInIndex(idx: TinyV2Index, symbol: string, reverse: boolean): TranslateResult {
     const notFound: TranslateResult = { found: false, source: symbol, type: "unknown" };
 
     // Class lookup

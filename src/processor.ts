@@ -1,6 +1,7 @@
 import AdmZip from "adm-zip";
 import { createHash } from "crypto";
 import { readFile } from "fs/promises";
+import { parse as parseToml } from "smol-toml";
 
 export interface ParsedManifest {
     modId: string;
@@ -158,42 +159,62 @@ function parseForge(raw: string, entries: string[]): ParsedManifest {
 }
 
 function parseForgeToml(raw: string, loader: "neoforge" | "forge", entries: string[]): ParsedManifest {
-    // Minimal TOML extraction without a full parser
-    const get = (key: string) => {
-        const m = new RegExp(`^\\s*${key}\\s*=\\s*["']?([^"'\\n]+)["']?`, "m").exec(raw);
-        return m ? m[1].trim() : "";
-    };
-    const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
-    const mcDep = raw.match(/modId\s*=\s*["']minecraft["'][^]*?versionRange\s*=\s*["']([^"']+)["']/);
-
-    // Extract source URL from displayURL, issueTrackerURL, or any GitHub URL in the file
-    const displayUrl = get("displayURL");
-    const issueUrl   = get("issueTrackerURL");
-    const ghMatch    = raw.match(/https:\/\/github\.com\/[^\s"']+/);
-    const sourceUrl  = displayUrl || issueUrl || (ghMatch ? ghMatch[0] : null);
-
-    // Extract [[dependencies.<modId>]] blocks
-    const deps: ParsedManifest["dependencies"] = [];
-    const depBlockRe = /\[\[dependencies\.[^\]]+\]\]([\s\S]*?)(?=\[\[|\[(?!(?:dependencies))|$)/g;
-    for (const block of raw.matchAll(depBlockRe)) {
-        const blockText = block[1];
-        const depId  = (blockText.match(/^\s*modId\s*=\s*["']([^"']+)["']/m) ?? [])[1];
-        const depVer = (blockText.match(/^\s*versionRange\s*=\s*["']([^"']+)["']/m) ?? [])[1];
-        const reqStr = (blockText.match(/^\s*mandatory\s*=\s*(true|false)/m) ?? [])[1];
-        if (depId && depId !== "minecraft" && depId !== "neoforge" && depId !== "forge") {
-            deps.push({ id: depId, version: depVer ?? "*", required: reqStr !== "false" });
-        }
+    let doc: Record<string, unknown>;
+    try {
+        doc = parseToml(raw) as Record<string, unknown>;
+    } catch {
+        doc = {};
     }
 
+    const str = (v: unknown, fallback = "") => (typeof v === "string" ? v : fallback);
+
+    // [[mods]] array — first entry holds the primary mod info
+    const mods = Array.isArray(doc.mods) ? doc.mods as Record<string, unknown>[] : [];
+    const mod = mods[0] ?? {};
+
+    const modId = str(mod.modId, "unknown");
+    const version = str(mod.version, "0.0.0");
+    const displayName = str(mod.displayName, modId);
+    const description = str(mod.description);
+    const displayUrl = str(mod.displayURL);
+    const issueUrl = str(mod.issueTrackerURL);
+    const ghMatch = raw.match(/https:\/\/github\.com\/[^\s"']+/);
+    const sourceUrl: string | null = displayUrl || issueUrl || (ghMatch ? ghMatch[0] : null);
+
+    // [[dependencies.<modId>]] — flatten all dep arrays, find minecraft range
+    const depsTable = (typeof doc.dependencies === "object" && doc.dependencies !== null)
+        ? doc.dependencies as Record<string, unknown>
+        : {};
+    const allDepObjs: Record<string, unknown>[] = [];
+    for (const v of Object.values(depsTable)) {
+        if (Array.isArray(v)) allDepObjs.push(...v as Record<string, unknown>[]);
+    }
+
+    const mcDepEntry = allDepObjs.find((d) => str(d.modId) === "minecraft");
+    const mcVersion = str(mcDepEntry?.versionRange);
+
+    const dependencies: ParsedManifest["dependencies"] = allDepObjs
+        .filter((d) => {
+            const id = str(d.modId);
+            return id && id !== "minecraft" && id !== "neoforge" && id !== "forge";
+        })
+        .map((d) => ({
+            id: str(d.modId),
+            version: str(d.versionRange, "*"),
+            required: d.mandatory !== false,
+        }));
+
+    const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
+
     return {
-        modId: get("modId") || "unknown",
-        displayName: get("displayName") || get("modId") || "unknown",
-        version: get("version") || "0.0.0",
-        mcVersion: mcDep ? mcDep[1] : "",
+        modId,
+        displayName,
+        version,
+        mcVersion,
         loader,
-        description: get("description"),
+        description,
         sourceUrl,
-        dependencies: deps,
+        dependencies,
         mixinConfigs,
         hasMixins: mixinConfigs.length > 0,
         hasAt: entries.includes("META-INF/accesstransformer.cfg"),
@@ -225,14 +246,14 @@ function unknownMod(jarPath: string): ParsedManifest {
     };
 }
 
-function parseAtEntries(content: string): string[] {
+export function parseAtEntries(content: string): string[] {
     return content
         .split("\n")
         .map((l) => l.trim())
         .filter((l) => l && !l.startsWith("#"));
 }
 
-function parseAwEntries(content: string): string[] {
+export function parseAwEntries(content: string): string[] {
     return content
         .split("\n")
         .map((l) => l.trim())
@@ -261,7 +282,7 @@ export async function computeHashes(jarPath: string): Promise<{ sha256: string; 
 }
 
 /** CurseForge Murmur2 hash — matches CF API fingerprint (whitespace-normalized). */
-function computeMurmur2(data: Buffer): number {
+export function computeMurmur2(data: Buffer): number {
     // Filter whitespace bytes as CF does (9, 10, 13, 32)
     const filtered = Buffer.from(data.filter((b) => b !== 9 && b !== 10 && b !== 13 && b !== 32));
     const seed = 1;

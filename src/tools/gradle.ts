@@ -7,8 +7,8 @@
  */
 import { readFile, readdir } from "fs/promises";
 import { join } from "path";
-import { db } from "../db.js";
 import { exists } from "../cache.js";
+import { findModById, findModByModId, listMods } from "../repositories/mod.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -69,8 +69,8 @@ function extractRepositoriesFromGradle(content: string): string[] {
  */
 export async function getModGradleFiles(modIdOrDbId: string | number): Promise<object> {
     const mod = typeof modIdOrDbId === "number" || !isNaN(Number(modIdOrDbId))
-        ? await db().mod.findUnique({ where: { id: Number(modIdOrDbId) } })
-        : await db().mod.findFirst({ where: { modId: String(modIdOrDbId) } });
+        ? await findModById(Number(modIdOrDbId))
+        : await findModByModId(String(modIdOrDbId));
     if (!mod) return { error: `Mod not found: ${modIdOrDbId}` };
 
     const searchDirs = [mod.sourcePath, mod.decompPath].filter(Boolean) as string[];
@@ -106,15 +106,7 @@ export async function searchGradleFiles(
     modIdFilter?: string,
     limit = 20,
 ): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            AND: [
-                { OR: [{ sourcePath: { not: null } }, { decompPath: { not: null } }] },
-                ...(modIdFilter ? [{ modId: { contains: modIdFilter, mode: "insensitive" as const } }] : []),
-            ],
-        },
-        select: { id: true, modId: true, displayName: true, version: true, sourcePath: true, decompPath: true },
-    });
+    const mods = await listMods({ modIdFilter });
 
     const results: Array<{ mod: string; file: string; lineNumber: number; line: string; context: string[] }> = [];
     const lowerQuery = query.toLowerCase();
@@ -123,7 +115,6 @@ export async function searchGradleFiles(
         if (results.length >= limit) break;
         const dirs = [mod.sourcePath, mod.decompPath].filter(Boolean) as string[];
         for (const dir of dirs) {
-            if (results.length >= limit) break;
             const gradleFiles = await findGradleFiles(dir);
             for (const gf of gradleFiles) {
                 if (results.length >= limit) break;
@@ -158,15 +149,7 @@ export async function compareGradleDeps(
     groupFilter?: string,
     modIdFilter?: string,
 ): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            AND: [
-                { OR: [{ sourcePath: { not: null } }, { decompPath: { not: null } }] },
-                ...(modIdFilter ? [{ modId: { contains: modIdFilter, mode: "insensitive" as const } }] : []),
-            ],
-        },
-        select: { id: true, modId: true, version: true, sourcePath: true, decompPath: true },
-    });
+    const mods = await listMods({ modIdFilter });
 
     // notation → [{ mod, config, version }]
     const depMap: Record<string, Array<{ mod: string; config: string; version: string }>> = {};

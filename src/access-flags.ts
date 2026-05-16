@@ -28,3 +28,61 @@ export function descriptorToSimpleType(descriptor: string): string {
     if (descriptor.startsWith("L")) return descriptor.slice(1, -1).split("/").pop() ?? descriptor;
     return primitives[descriptor] ?? descriptor;
 }
+
+// ── Class member formatting (shared by mod and vanilla tools) ─────────────────
+
+export interface ClassInfo {
+    name: string;
+    superName: string;
+    interfaces: string[];
+    methods: Array<{ name: string; descriptor: string; access: number }>;
+    fields: Array<{ name: string; descriptor: string; access: number }>;
+}
+
+export function formatClassMembers(info: ClassInfo) {
+    const methods = info.methods.map((m) => {
+        const access = accessStr(m.access);
+        const isStatic = !!(m.access & Opcodes.ACC_STATIC);
+        const isFinal = !!(m.access & Opcodes.ACC_FINAL);
+        const isAbstract = !!(m.access & Opcodes.ACC_ABSTRACT);
+        return {
+            name: m.name,
+            descriptor: m.descriptor,
+            access,
+            isStatic,
+            isFinal,
+            isAbstract,
+            mixinTarget: `${m.name}${m.descriptor}`,
+            atString: `accessible method ${info.name} ${m.name} ${m.descriptor}`,
+        };
+    });
+
+    const fields = info.fields.map((f) => {
+        const access = accessStr(f.access);
+        const isStatic = !!(f.access & Opcodes.ACC_STATIC);
+        const isFinal = !!(f.access & Opcodes.ACC_FINAL);
+        const javaType = descriptorToSimpleType(f.descriptor);
+        const atPrefix = isFinal ? "mutable" : "accessible";
+        return {
+            name: f.name,
+            descriptor: f.descriptor,
+            access,
+            isStatic,
+            isFinal,
+            shadowAnnotation: `@Shadow ${access}${isStatic ? " static" : ""} ${javaType} ${f.name};`,
+            atString: `${atPrefix} field ${info.name} ${f.name} ${f.descriptor}`,
+        };
+    });
+
+    return {
+        className: info.name,
+        superClass: info.superName,
+        interfaces: info.interfaces,
+        atStrings: {
+            accessible: `accessible class ${info.name}`,
+            extendable: `extendable class ${info.name}`,
+        },
+        methods,
+        fields,
+    };
+}

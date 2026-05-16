@@ -32,7 +32,7 @@ for (let i = 0; i < jars.length; i++) {
     process.stdout.write(`${prefix} ${jar.padEnd(70)} `);
     try {
         const result = await ingestMod(jarPath, true); // skipSource=true for speed
-        if (result.status === "already_ingested") {
+        if (result.status === "already_ingested" || result.status === "duplicate_version" || result.status === "duplicate_hash") {
             console.log("SKIP");
             skip++;
         } else {

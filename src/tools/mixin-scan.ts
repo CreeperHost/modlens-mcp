@@ -6,7 +6,7 @@
  *   - Full conflict matrix: for each class, every mod that mixes into it
  *   - Summary: most-contested classes, mods with the most mixins, etc.
  */
-import { db } from "../db.js";
+import { listModsForMixinScan, listModsSlim, getMixinConflictRaw, findModsByIds } from "../repositories/mod.js";
 
 type MixinMod = {
     id: number;
@@ -26,18 +26,7 @@ type MixinMod = {
  * Does NOT scan JARs — reads resolved mixinTargets from DB (populated by resolve_mixin_targets).
  */
 export async function listModsWithMixins(loader?: string, mcVersion?: string): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            hasMixins: true,
-            ...(loader    ? { loader }                                      : {}),
-            ...(mcVersion ? { mcVersion: { contains: mcVersion } }          : {}),
-        },
-        select: {
-            id: true, modId: true, displayName: true, version: true,
-            mcVersion: true, loader: true, mixinTargets: true, mixinConfigs: true,
-        },
-        orderBy: { modId: "asc" },
-    }) as MixinMod[];
+    const mods = (await listModsForMixinScan({ hasMixins: true, loader, mcVersion })) as MixinMod[];
 
     return {
         count: mods.length,
@@ -69,43 +58,28 @@ export async function getMixinConflictMatrix(
     mcVersion?: string,
     minConflicts = 2,
 ): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            hasMixins: true,
-            ...(loader    ? { loader }                             : {}),
-            ...(mcVersion ? { mcVersion: { contains: mcVersion } } : {}),
-        },
-        select: {
-            modId: true, displayName: true, version: true,
-            mcVersion: true, loader: true, mixinTargets: true,
-        },
-    });
+    const conflictRows = await getMixinConflictRaw(loader, mcVersion, minConflicts);
 
-    // class → [{ modId, displayName, version }]
-    const classToMods: Record<string, Array<{ modId: string; display: string; version: string }>> = {};
+    // Collect all unique mod IDs referenced across all conflict rows
+    const allModIds = [...new Set(conflictRows.flatMap((r) => r.modIds))];
+    const modList = allModIds.length ? await findModsByIds(allModIds) : [];
+    const modById = new Map(modList.map((m) => [m.id, m]));
 
-    for (const mod of mods) {
-        const targets = (mod.mixinTargets as string[]) ?? [];
-        for (const cls of targets) {
-            (classToMods[cls] ??= []).push({
-                modId:   mod.modId,
-                display: mod.displayName,
-                version: mod.version,
-            });
-        }
-    }
-
-    const conflicts = Object.entries(classToMods)
-        .filter(([, mods]) => mods.length >= minConflicts)
-        .sort((a, b) => b[1].length - a[1].length)
-        .map(([cls, mods]) => ({ class: cls, mixedByCount: mods.length, mods }));
+    const conflicts = conflictRows.map(({ className, modCount, modIds }) => ({
+        class: className,
+        mixedByCount: modCount,
+        mods: modIds
+            .map((id) => {
+                const m = modById.get(id);
+                return m ? { modId: m.modId, display: m.displayName, version: m.version } : null;
+            })
+            .filter(Boolean),
+    }));
 
     // Summary stats
-    const totalClasses = Object.keys(classToMods).length;
-    const conflictClasses = conflicts.length;
     const modConflictCounts: Record<string, number> = {};
     for (const { mods } of conflicts) {
-        for (const m of mods) {
+        for (const m of mods as Array<{ modId: string }>) {
             modConflictCounts[m.modId] = (modConflictCounts[m.modId] ?? 0) + 1;
         }
     }
@@ -115,10 +89,10 @@ export async function getMixinConflictMatrix(
         .map(([modId, count]) => ({ modId, conflictingClasses: count }));
 
     return {
-        totalMixinMods:      mods.length,
-        totalTargetClasses:  totalClasses,
-        conflictingClasses:  conflictClasses,
-        mostConflictedMods:  mostConflicted,
+        totalMixinMods:     allModIds.length,
+        totalTargetClasses: conflictRows.length,
+        conflictingClasses: conflicts.length,
+        mostConflictedMods: mostConflicted,
         conflicts,
     };
 }
@@ -131,14 +105,8 @@ export async function getMixinClassDetail(targetClass: string): Promise<object> 
     // Normalise separators
     const normalClass = targetClass.replace(/\./g, "/");
 
-    const mods = await db().mod.findMany({
-        where: { mixinTargets: { array_contains: [normalClass] } },
-        select: {
-            id: true, modId: true, displayName: true, version: true,
-            mcVersion: true, loader: true, mixinConfigs: true,
-        },
-        orderBy: { modId: "asc" },
-    });
+    const all = await listModsForMixinScan({ hasMixins: true });
+    const mods = all.filter((m) => (m.mixinTargets as string[])?.includes(normalClass));
 
     return {
         targetClass:  normalClass,
@@ -160,13 +128,7 @@ export async function getMixinClassDetail(targetClass: string): Promise<object> 
  * Top-N most contested classes by number of mods targeting them.
  */
 export async function getMixinHotspots(top = 20, loader?: string): Promise<object> {
-    const mods = await db().mod.findMany({
-        where: {
-            hasMixins: true,
-            ...(loader ? { loader } : {}),
-        },
-        select: { modId: true, displayName: true, version: true, mixinTargets: true },
-    });
+    const mods = await listModsForMixinScan({ hasMixins: true, loader });
 
     const counts: Record<string, number> = {};
     for (const mod of mods) {
@@ -194,15 +156,7 @@ export async function batchResolveMixins(
 ): Promise<object> {
     const { resolveMixinTargets } = await import("./mixins.js");
 
-    const mods = await db().mod.findMany({
-        where: {
-            hasMixins: true,
-            ...(loader    ? { loader }                             : {}),
-            ...(mcVersion ? { mcVersion: { contains: mcVersion } } : {}),
-        },
-        select: { id: true, modId: true, version: true },
-        orderBy: { id: "asc" },
-    });
+    const mods = await listModsForMixinScan({ hasMixins: true, loader, mcVersion });
 
     let resolved = 0, noneFound = 0, failed = 0;
     const results: Array<{ dbId: number; modId: string; version: string; status: string; targets: number }> = [];

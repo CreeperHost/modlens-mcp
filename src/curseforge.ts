@@ -1,3 +1,5 @@
+import { fetchWithRetry } from "./fetch-utils.js";
+
 const CF_BASE = "https://api.curseforge.com/v1";
 const CF_KEY = process.env.CURSEFORGE_API_KEY ?? "";
 const MINECRAFT_GAME_ID = 432;
@@ -26,7 +28,7 @@ export interface CFFile {
 }
 
 export async function lookupByFingerprint(murmur2: number): Promise<CFProject | null> {
-    const res = await fetch(`${CF_BASE}/fingerprints/${MINECRAFT_GAME_ID}`, {
+    const res = await fetchWithRetry(`${CF_BASE}/fingerprints/${MINECRAFT_GAME_ID}`, {
         method: "POST",
         headers,
         body: JSON.stringify({ fingerprints: [murmur2] }),
@@ -39,7 +41,7 @@ export async function lookupByFingerprint(murmur2: number): Promise<CFProject | 
 }
 
 export async function getProject(modId: number): Promise<CFProject | null> {
-    const res = await fetch(`${CF_BASE}/mods/${modId}`, { headers });
+    const res = await fetchWithRetry(`${CF_BASE}/mods/${modId}`, { headers });
     if (!res.ok) return null;
     const data = await res.json() as { data: CFProject; };
     return data.data;

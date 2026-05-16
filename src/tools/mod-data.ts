@@ -10,21 +10,21 @@
  * No decompilation is required.
  */
 
-import { db } from "../db.js";
 import { extractEntry, listEntries } from "../jar.js";
+import { resolveModRef, findModById, listModsSlim } from "../repositories/mod.js";
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 async function resolveMod(modId: string | number) {
     if (typeof modId === "number") {
-        return db().mod.findUnique({ where: { id: modId } });
+        return findModById(modId);
     }
     const numeric = parseInt(modId, 10);
     if (!isNaN(numeric)) {
-        const byNum = await db().mod.findUnique({ where: { id: numeric } });
+        const byNum = await findModById(numeric);
         if (byNum) return byNum;
     }
-    return db().mod.findFirst({ where: { modId: { contains: modId } } });
+    return resolveModRef(String(modId));
 }
 
 /**
@@ -954,8 +954,8 @@ export async function diffModData(
     dataType?: string, // e.g. "recipe", "loot_table" — filters by path substring
 ): Promise<object> {
     const [modA, modB] = await Promise.all([
-        db().mod.findUnique({ where: { id: dbIdA } }),
-        db().mod.findUnique({ where: { id: dbIdB } }),
+        findModById(dbIdA),
+        findModById(dbIdB),
     ]);
     if (!modA) return { error: `Mod #${dbIdA} not found` };
     if (!modB) return { error: `Mod #${dbIdB} not found` };
@@ -1070,7 +1070,7 @@ export async function traceRecipeChain(
     maxDepth = 6,
 ): Promise<object> {
     // Build a recipe index: resultId → [{modId, recipeId, type, ingredients, raw}]
-    const allMods = await db().mod.findMany({ select: { id: true, modId: true, version: true, jarPath: true } });
+    const allMods = await listModsSlim();
 
     // Index all recipes from all mods (lazy — cache by modId)
     const recipeIndex = new Map<string, Array<{ mod: string; recipeId: string; type: string; ingredients: string[]; resultCount: number }>>();
