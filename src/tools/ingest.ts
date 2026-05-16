@@ -325,7 +325,7 @@ export async function decompileModStatus(dbId: number): Promise<{ status: string
 export async function batchDecompileMods(opts?: {
     concurrency?: number;
 }): Promise<{ started: number; alreadyDone: number; errors: number; total: number }> {
-    const concurrency = opts?.concurrency ?? 2;
+    const concurrency = opts?.concurrency ?? 4;
     const mods = await listModsSlim({ decompiled: false });
     let started = 0, alreadyDone = 0, errors = 0;
 
