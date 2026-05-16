@@ -15,7 +15,7 @@ import { parseJar } from "../processor.js";
 import { listEntries, extractEntry } from "../jar.js";
 import { validatePath } from "../security.js";
 import { getDb } from "../db.js";
-import { listModsSlim, findModsWithMixinTargetsMatching } from "../repositories/mod.js";
+import { listModsSlim } from "../repositories/mod.js";
 
 export type IssueSeverity = "error" | "warn" | "info";
 export type IssueType =
@@ -35,6 +35,42 @@ const SKIP_DEP_IDS = new Set([
     "minecraft", "neoforge", "forge", "fabric-api",
     "fabricloader", "quilt_loader", "java",
 ]);
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+async function findModsWithMixinTargetsMatching(
+    targets: string[],
+    loader?: string,
+    mcVersion?: string,
+): Promise<Array<{ modId: string; displayName: string; matchedTargets: string[] }>> {
+    if (targets.length === 0) return [];
+
+    const params: unknown[] = [targets];
+    const extra: string[] = [];
+    if (loader)    { params.push(loader);    extra.push(`m.loader = $${params.length}`); }
+    if (mcVersion) { params.push(mcVersion); extra.push(`m.mc_version = $${params.length}`); }
+    const whereExtra = extra.length ? " AND " + extra.join(" AND ") : "";
+
+    const db = await getDb();
+    const rows = await db.$queryRawUnsafe<
+        Array<{ mod_id: string; display_name: string; matched: string[] }>
+    >(`
+        SELECT
+            m.mod_id,
+            m.display_name,
+            ARRAY_AGG(t.cls) FILTER (WHERE t.cls = ANY($1)) AS matched
+        FROM "mods" m
+        CROSS JOIN LATERAL jsonb_array_elements_text(m.mixin_targets::jsonb) AS t(cls)
+        WHERE t.cls = ANY($1) ${whereExtra}
+        GROUP BY m.mod_id, m.display_name
+    `, ...params);
+
+    return rows.map((r) => ({
+        modId: r.mod_id,
+        displayName: r.display_name,
+        matchedTargets: r.matched ?? [],
+    }));
+}
 
 const DISPLAY_TEST_MAP: Record<string, string> = {
     MATCH_VERSION:          "common",

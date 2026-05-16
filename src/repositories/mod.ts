@@ -104,44 +104,6 @@ export async function findModsByIds(ids: number[]): Promise<Mod[]> {
     return db.mod.findMany({ where: { id: { in: ids } } });
 }
 
-/**
- * Returns mods whose mixinTargets JSON array contains ANY of the given class names.
- * Used by checkModCompat to find existing mods that conflict with a candidate JAR.
- */
-export async function findModsWithMixinTargetsMatching(
-    targets: string[],
-    loader?: string,
-    mcVersion?: string,
-): Promise<Array<{ modId: string; displayName: string; matchedTargets: string[] }>> {
-    if (targets.length === 0) return [];
-
-    const params: unknown[] = [targets];
-    const extra: string[] = [];
-    if (loader)    { params.push(loader);    extra.push(`m.loader = $${params.length}`); }
-    if (mcVersion) { params.push(mcVersion); extra.push(`m.mc_version = $${params.length}`); }
-    const whereExtra = extra.length ? " AND " + extra.join(" AND ") : "";
-
-    const db = await getDb();
-    const rows = await db.$queryRawUnsafe<
-        Array<{ mod_id: string; display_name: string; matched: string[] }>
-    >(`
-        SELECT
-            m.mod_id,
-            m.display_name,
-            ARRAY_AGG(t.cls) FILTER (WHERE t.cls = ANY($1)) AS matched
-        FROM "mods" m
-        CROSS JOIN LATERAL jsonb_array_elements_text(m.mixin_targets::jsonb) AS t(cls)
-        WHERE t.cls = ANY($1) ${whereExtra}
-        GROUP BY m.mod_id, m.display_name
-    `, ...params);
-
-    return rows.map((r) => ({
-        modId: r.mod_id,
-        displayName: r.display_name,
-        matchedTargets: r.matched ?? [],
-    }));
-}
-
 
 export async function listMods(opts: {
     loader?: string; mcVersion?: string; hasMixins?: boolean;
