@@ -30,8 +30,8 @@
 
 - [ ] **Step 1: Find every import of the two functions**
 
-```bash
-grep -rn "getMixinConflictRaw\|findModsWithMixinTargetsMatching" src/
+```powershell
+Select-String -Path src/**/*.ts -Pattern "getMixinConflictRaw|findModsWithMixinTargetsMatching" -Recurse
 ```
 
 Expected: `getMixinConflictRaw` imported only in `tools/mixin-scan.ts`. `findModsWithMixinTargetsMatching` imported in one or two tool files.
@@ -60,13 +60,13 @@ import { getDb } from "../db.js";
 - [ ] **Step 4: Delete `getMixinConflictRaw` from `repositories/mod.ts`.**
 
 - [ ] **Step 5: Build**
-```bash
+```powershell
 npm run build
 ```
 Expected: zero errors.
 
-- [ ] **Step 6: Commit**
-```bash
+- [ ] **Step 5: Commit**
+```powershell
 git add src/tools/mixin-scan.ts src/repositories/mod.ts
 git commit -m "refactor: move getMixinConflictRaw into tools/mixin-scan (data layer cleanup)"
 ```
@@ -86,13 +86,13 @@ git commit -m "refactor: move getMixinConflictRaw into tools/mixin-scan (data la
 - [ ] **Step 3: Delete `findModsWithMixinTargetsMatching` from `repositories/mod.ts`.**
 
 - [ ] **Step 4: Build**
-```bash
+```powershell
 npm run build
 ```
 Expected: zero errors.
 
 - [ ] **Step 5: Commit**
-```bash
+```powershell
 git add -A
 git commit -m "refactor: move findModsWithMixinTargetsMatching to tools layer (data layer cleanup)"
 ```
@@ -111,7 +111,7 @@ git commit -m "refactor: move findModsWithMixinTargetsMatching to tools layer (d
 - [ ] **Step 2: If any domain logic remains**, move it by the same pattern as Tasks 2–3.
 
 - [ ] **Step 3: Final build + push**
-```bash
+```powershell
 npm run build
 git push
 ```

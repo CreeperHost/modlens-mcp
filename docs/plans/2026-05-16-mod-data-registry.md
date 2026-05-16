@@ -151,7 +151,7 @@ function getDescriptor(type: string): DataTypeDescriptor | undefined {
 
 - [ ] **Step 4: Build** — expect no errors yet since old functions still exist.
 
-```bash
+```powershell
 npm run build
 ```
 
@@ -253,7 +253,7 @@ export async function getModData(
 
 - [ ] **Step 3: Build** — should still compile since old functions haven't been removed.
 
-```bash
+```powershell
 npm run build
 ```
 
@@ -266,8 +266,8 @@ npm run build
 
 - [ ] **Step 1: Find the mod_data (or mod_jar) tool in server.ts** — look for all switch cases that call the now-redundant specific functions:
 
-```bash
-grep -n "listModRecipes\|getModRecipe\|listModLootTables\|getModLootTable\|listModAdvancements\|getModAdvancement\|listModBlockstates\|getModBlockstate\|listModModels\|getModModel\|listModBiomes\|getModBiome\|listModStructures\|getModStructureData\|listModParticles" src/server.ts
+```powershell
+Select-String -Path src/server.ts -Pattern 'listModRecipes|getModRecipe|listModLootTables|getModLootTable|listModAdvancements|getModAdvancement|listModBlockstates|getModBlockstate|listModModels|getModModel|listModBiomes|getModBiome|listModStructures|getModStructureData|listModParticles'
 ```
 
 - [ ] **Step 2: For each matched case**, replace the specific function call with `listModData` or `getModData`:
@@ -289,7 +289,7 @@ case "list_loot_tables": result = await listModData(modId!, "loot_table", { name
 - [ ] **Step 3: Update the imports** in server.ts — replace the individual function imports with `listModData, getModData` (plus retain `listModJarFiles`, `getModJarFile`, `getModLang`, `getModSounds`, `listModDataTags`, `getModDataTag`).
 
 - [ ] **Step 4: Build**
-```bash
+```powershell
 npm run build
 ```
 Expected: any remaining errors are from callers of functions not yet removed — fix import by import.
@@ -302,8 +302,8 @@ Expected: any remaining errors are from callers of functions not yet removed —
 - Modify: `src/tools/mod-data.ts`
 
 - [ ] **Step 1: Verify no remaining callers** of the old specific functions:
-```bash
-grep -rn "listModRecipes\|getModRecipe\|listModLootTables\|getModLootTable\|listModAdvancements\|getModAdvancement\|listModBlockstates\|getModBlockstate\|listModModels\|getModModel\|listModBiomes\|getModBiome\|listModStructures\|getModStructureData\|listModParticles" src/
+```powershell
+Select-String -Path src/**/*.ts -Pattern 'listModRecipes|getModRecipe|listModLootTables|getModLootTable|listModAdvancements|getModAdvancement|listModBlockstates|getModBlockstate|listModModels|getModModel|listModBiomes|getModBiome|listModStructures|getModStructureData|listModParticles' -Recurse
 ```
 Expected: zero results.
 
@@ -317,13 +317,13 @@ Expected: zero results.
   - All internal helpers (`resolveMod`, `detectNamespaces`, `readJson`, `listJsonEntries`)
 
 - [ ] **Step 3: Final build**
-```bash
+```powershell
 npm run build
 ```
 Expected: zero errors.
 
 - [ ] **Step 4: Commit and push**
-```bash
+```powershell
 git add src/tools/mod-data.ts src/server.ts
 git commit -m "refactor: registry-driven mod-data — 40 shallow functions → 2 deep entry points + descriptor table"
 git push
@@ -334,8 +334,8 @@ git push
 ### Task 6: Verify the interface
 
 - [ ] **Step 1: Count remaining exported functions in `mod-data.ts`**
-```bash
-grep -c "^export async function" src/tools/mod-data.ts
+```powershell
+(Select-String -Path src/tools/mod-data.ts -Pattern '^export async function').Count
 ```
 Expected: ≤ 8 (listModJarFiles, getModJarFile, getModLang, getModSounds, listModDataTags, getModDataTag, listModData, getModData).
 

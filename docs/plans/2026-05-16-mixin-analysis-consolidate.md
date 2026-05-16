@@ -26,15 +26,15 @@
 ### Task 1: Audit all callers of `tools/mixins.ts`
 
 - [ ] **Step 1: Find every import of `tools/mixins.ts`**
-```bash
-grep -rn "from.*tools/mixins\|from.*mixins\.js" src/
+```powershell
+Select-String -Path src/**/*.ts -Pattern 'from.*tools/mixins|from.*mixins\.js' -Recurse
 ```
 
 Expected callers: `server.ts` (mod_mixins tool), `mixin-scan.ts` (batch_resolve calls `resolveMixinTargets`), possibly `compat-check.ts`.
 
 - [ ] **Step 2: List all exported functions from `tools/mixins.ts`**
-```bash
-grep -n "^export async function\|^export function" src/tools/mixins.ts
+```powershell
+Select-String -Path src/tools/mixins.ts -Pattern '^export (async )?function'
 ```
 
 Note each one — they all move into `mixin-scan.ts`.
@@ -64,7 +64,7 @@ Note each one — they all move into `mixin-scan.ts`.
 - [ ] **Step 3: Remove the `import ... from "./mixins.js"` line** from `mixin-scan.ts` (it was importing `resolveMixinTargets` for `batchResolveMixins` — now it's local).
 
 - [ ] **Step 4: Build**
-```bash
+```powershell
 npm run build
 ```
 Expected: errors only from callers that still import from `./mixins.js` — those get fixed next.
@@ -98,18 +98,18 @@ import {
 - [ ] **Step 2: Update any other callers** found in Task 1.
 
 - [ ] **Step 3: Delete `src/tools/mixins.ts`**
-```bash
-rm src/tools/mixins.ts
+```powershell
+Remove-Item src/tools/mixins.ts
 ```
 
 - [ ] **Step 4: Build**
-```bash
+```powershell
 npm run build
 ```
 Expected: zero errors.
 
 - [ ] **Step 5: Commit**
-```bash
+```powershell
 git add -A
 git commit -m "refactor: merge tools/mixins into tools/mixin-scan — one module owns mixin analysis"
 ```
@@ -121,12 +121,12 @@ git commit -m "refactor: merge tools/mixins into tools/mixin-scan — one module
 - [ ] **Step 1: Skim the public exports of `tools/mixin-scan.ts`** — the module now presents one clean surface: resolve targets, query conflicts, list hotspots, batch operations. Nothing about "how bytecode is read" leaks through the interface.
 
 - [ ] **Step 2: Confirm `tools/mixins.ts` no longer exists and no file imports from it**
-```bash
-grep -rn "tools/mixins" src/
+```powershell
+Select-String -Path src/**/*.ts -Pattern 'tools/mixins' -Recurse
 ```
 Expected: zero results.
 
 - [ ] **Step 3: Push**
-```bash
-npm run build && git push
+```powershell
+npm run build; git push
 ```
