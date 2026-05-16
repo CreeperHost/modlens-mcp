@@ -112,23 +112,7 @@ function out(result: unknown): { content: Array<{ type: "text"; text: string }> 
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. " +
-    "action=ingest: add JAR to DB (jarPath, skipSource). " +
-    "action=list: list mods (loader, mcVersion, hasMixins, decompiled, limit). " +
-    "action=get: get full metadata (modId). " +
-    "action=search: search by name/description (query, loader, mcVersion, limit). " +
-    "action=stats: DB statistics. " +
-    "action=dependencies: dep list for a mod (modId, recursive). " +
-    "action=dep_graph: full dependency graph (mcVersion). " +
-    "action=version_conflicts: detect duplicate modIds / unsatisfied deps. " +
-    "action=source_urls: show GitHub/GitLab URLs (query). " +
-    "action=decompile: bulk decompile mod JAR via Vineflower — runs in background (dbId, force). " +
-    "action=decompile_status: poll background decompile job (dbId). " +
-    "action=decompile_class: decompile a single class on demand (dbId, className). " +
-    "action=source: browse or read decompiled source tree (dbId, path). " +
-    "action=search_source: text/regex search across decompiled source — omit dbId to search ALL decompiled mods (query, dbId?, isRegex, limit). " +
-    "action=reindex: re-index class names (dbId optional). " +
-    "action=batch_ingest: ingest all JARs in a directory (directory, skipSource, indexClasses, replace).",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest. Omit dbId on search_source to grep all decompiled mods. batch_ingest replace=true removes old modId row first.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
@@ -182,21 +166,7 @@ server.tool(
 
 server.tool(
     "mod_bytecode",
-    "Mod JAR bytecode and class analysis. " +
-    "action=search_class: find class by name with CamelCase/prefix/substring matching (dbId, query). " +
-    "action=class_members: list methods/fields with @Inject mixin targets, @Shadow, AT/AW strings (dbId, className). " +
-    "action=bytecode: raw javap output (dbId, className). " +
-    "action=find_refs: find all classes referencing a class/method/field within one mod JAR (dbId, target). " +
-    "action=cross_refs: find which mods in the DB reference a given class/method/field — cross-mod coupling analysis (target, mcVersion, loader, limit). " +
-    "action=inheritance: superclass, interfaces, subclasses, implementors (dbId, className). " +
-    "action=diff: added/removed classes between two mod versions (dbIdA, dbIdB). " +
-    "action=find_implementors: find mod classes across DB that extend/implement a target (target, modId, limit, transitive). Set transitive=true to walk the full inheritance chain. " +
-    "action=scan_registrations: scan all classes for registration patterns — DeferredRegister, @SubscribeEvent, commands, keybindings, network payloads, config builders, capabilities, loot modifiers (dbId). " +
-    "action=annotated_by: find all classes across the DB annotated with a given annotation (annotation, modId, limit). Works without decompilation. " +
-    "action=event_listeners: find @SubscribeEvent methods listening to a specific event class across the DB (event, modId, limit). " +
-    "action=optional_integrations: detect which optional/conditional mod integrations a mod includes (JEI, Jade, REI, Curios, etc.) via bytecode reference analysis (dbId). " +
-    "action=network_payloads: inventory all network packet/payload classes a mod ships — CustomPacketPayload implementors, StreamCodec types, channel registrations (dbId). " +
-    "action=config_schema: extract config key schema from ModConfigSpec/ForgeConfigSpec/ClothConfig builder classes (dbId).",
+    "Mod JAR bytecode and class analysis. action=search_class|class_members|bytecode|find_refs|cross_refs|inheritance|diff|find_implementors|scan_registrations|annotated_by|event_listeners|optional_integrations|network_payloads|config_schema.",
     {
         action:     z.enum(["search_class","class_members","bytecode","find_refs","cross_refs","inheritance","diff","find_implementors","scan_registrations","annotated_by","event_listeners","optional_integrations","network_payloads","config_schema"]).describe("Operation to perform"),
         dbId:      z.number().optional().describe("DB id of mod (most actions)"),
@@ -239,14 +209,7 @@ server.tool(
 
 server.tool(
     "mod_mixins",
-    "Mod mixin and access transformer analysis. " +
-    "action=targets: list Minecraft classes a mod injects into via @Mixin (modId). " +
-    "action=resolve: read @Mixin bytecode annotations to discover actual target classes and update DB (dbId). " +
-    "action=conflicts: find all mods in DB injecting into the same MC class (targetClass). " +
-    "action=targets_in_package: find all mods whose mixin targets fall under a given package prefix (packagePrefix, mcVersion optional). " +
-    "action=at_conflicts: find AT/AW entries shared by multiple mods, highlighting access-level disagreements (mcVersion, loader optional). " +
-    "action=at_entries: NeoForge/Forge Access Transformer entries for a mod (dbId). " +
-    "action=aw_entries: Fabric/Quilt Access Widener entries for a mod (dbId).",
+    "Mod mixin and access transformer analysis. action=targets|resolve|conflicts|targets_in_package|at_conflicts|at_entries|aw_entries.",
     {
         action:        z.enum(["targets","resolve","conflicts","targets_in_package","at_conflicts","at_entries","aw_entries"]).describe("Operation to perform"),
         modId:         z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (targets)"),
@@ -275,12 +238,7 @@ server.tool(
 
 server.tool(
     "platform",
-    "Modrinth/CurseForge platform sync and source download. " +
-    "action=sync_modrinth: SHA-512 lookup on Modrinth (dbId). " +
-    "action=sync_curseforge: Murmur2 fingerprint lookup on CurseForge (dbId). " +
-    "action=check_updates: check both platforms for newer version (dbId). " +
-    "action=batch_sync: run lookups for all unmatched mods (syncModrinth, syncCurseforge, downloadSources, modIdFilter, limit). " +
-    "action=download_source: download GitHub/GitLab source for a mod (dbId).",
+    "Modrinth/CurseForge platform sync and source download. action=sync_modrinth|sync_curseforge|check_updates|batch_sync|download_source.",
     {
         action:          z.enum(["sync_modrinth","sync_curseforge","check_updates","batch_sync","download_source"]).describe("Operation to perform"),
         dbId:            z.number().optional().describe("DB id (sync_modrinth, sync_curseforge, check_updates, download_source)"),
@@ -307,12 +265,7 @@ server.tool(
 
 server.tool(
     "mc_versions",
-    "Minecraft and mod loader version management. " +
-    "action=list_mc: list MC versions from Mojang Piston Meta (type=release|snapshot|all). " +
-    "action=list_neoforge: list NeoForge loader versions from Maven (mcVersion, limit). " +
-    "action=list_fabric: list Fabric API versions from Modrinth (mcVersion, limit). " +
-    "action=ingest_neoforge: download NeoForge universal JAR and ingest into DB (version, skipIndex). " +
-    "action=ingest_fabric: download Fabric API JAR and ingest into DB (version, skipIndex).",
+    "Minecraft and mod loader version management. action=list_mc|list_neoforge|list_fabric|ingest_neoforge|ingest_fabric.",
     {
         action:    z.enum(["list_mc","list_neoforge","list_fabric","ingest_neoforge","ingest_fabric"]).describe("Operation to perform"),
         type:      z.enum(["release","snapshot","all"]).optional().describe("Version filter for list_mc (default release)"),
@@ -352,22 +305,7 @@ server.tool(
 
 server.tool(
     "mc_source",
-    "Vanilla Minecraft source code analysis, decompilation, and validation. " +
-    "action=search_class: find class by name (version, query). " +
-    "action=get_source: read decompiled source (version, className, startLine, endLine, maxLines). " +
-    "action=bytecode: raw javap output (version, className). " +
-    "action=class_members: list methods/fields with mixin target strings (version, className). " +
-    "action=find_refs: find classes referencing a target (version, target). " +
-    "action=inheritance: superclass/interfaces/subclasses (version, className). " +
-    "action=diff: added/removed classes between two MC versions (versionA, versionB). " +
-    "action=decompile: bulk decompile entire MC JAR via Vineflower — runs in background (version, force). " +
-    "action=decompile_status: poll bulk decompile job (version). " +
-    "action=search_code: regex/text search across decompiled MC source (version, query, searchType, isRegex, limit). " +
-    "action=index: index decompiled MC into PostgreSQL FTS (version, force). " +
-    "action=search_indexed: fast FTS search (version, query, limit). " +
-    "action=search_events: find Event subclasses in decompiled source (version, query, modloader). " +
-    "action=validate_aw: validate a Fabric Access Widener against MC JAR (content, mcVersion). " +
-    "action=analyze_mixin: parse + validate a Mixin class source against MC (source, mcVersion).",
+    "Vanilla Minecraft source code, decompilation, and validation. action=search_class|get_source|bytecode|class_members|find_refs|inheritance|diff|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin.",
     {
         action:     z.enum(["search_class","get_source","bytecode","class_members","find_refs","inheritance","diff","decompile","decompile_status","search_code","index","search_indexed","search_events","validate_aw","analyze_mixin"]).describe("Operation to perform"),
         version:    z.string().optional().describe("MC version id, e.g. '26.1.2' (most actions)"),
@@ -415,12 +353,7 @@ server.tool(
 
 server.tool(
     "mappings",
-    "Minecraft name mappings and Parchment parameter documentation. " +
-    "action=find: translate a symbol between namespaces official/intermediary/yarn/mojmap (symbol, version, sourceNs, targetNs). " +
-    "action=remap: remap a mod JAR from official to yarn/mojmap using TinyRemapper (inputJar, outputJar, version, toMapping). " +
-    "action=parchment: get community parameter names/javadocs for a class (className, mcVersion). " +
-    "action=list_parchment: list available Parchment builds for a MC version (mcVersion). " +
-    "action=parchment_summary: all classes with Parchment coverage for a MC version (mcVersion).",
+    "Minecraft name mappings (official/intermediary/yarn/mojmap) and Parchment parameter docs. action=find|remap|parchment|list_parchment|parchment_summary.",
     {
         action:    z.enum(["find","remap","parchment","list_parchment","parchment_summary"]).describe("Operation to perform"),
         symbol:    z.string().optional().describe("Symbol to translate, e.g. 'net/minecraft/world/entity/Entity' or 'tick' (find)"),
@@ -450,13 +383,7 @@ server.tool(
 
 server.tool(
     "docs",
-    "Minecraft modding documentation database. " +
-    "action=ingest: add/update doc entries (entries array). " +
-    "action=seed: populate built-in defaults (~20 Fabric/MC/NeoForge entries). " +
-    "action=get: look up by class name or keyword (query). " +
-    "action=search: full-text search (query, category, namespace). " +
-    "action=list: list all entries with optional filters (category, namespace, tag, limit). " +
-    "action=delete: remove entry by DB id (id).",
+    "Minecraft modding documentation database. action=ingest|seed|get|search|list|delete.",
     {
         action: z.enum(["ingest","seed","get","search","list","delete"]).describe("Operation to perform"),
         entries: z.array(z.object({
@@ -494,14 +421,7 @@ server.tool(
 
 server.tool(
     "primers",
-    "Minecraft version migration primers and guides. " +
-    "action=ingest: add primer entries (entries array). " +
-    "action=seed: populate built-in defaults (NeoForge, Forge, Fabric migration guides). " +
-    "action=get: get primer by DB id (id). " +
-    "action=by_version: get all guides covering a version span (fromVersion, toVersion, modloader). " +
-    "action=search: full-text search across primers (query, modloader, fromVersion, toVersion, limit). " +
-    "action=list: list all primers (modloader, limit). " +
-    "action=delete: remove primer by DB id (id).",
+    "Minecraft version migration primers and porting guides. action=ingest|seed|get|by_version|search|list|delete.",
     {
         action: z.enum(["ingest","seed","get","by_version","search","list","delete"]).describe("Operation to perform"),
         entries: z.array(z.object({
@@ -542,14 +462,7 @@ server.tool(
 
 server.tool(
     "mc_registry",
-    "Vanilla Minecraft registry and meta data from misode/mcmeta. " +
-    "action=blocks: block state property definitions and valid values (version). " +
-    "action=commands: full Brigadier command tree (version). " +
-    "action=registries: all registry keys, or entries for one specific registry (version, registry). " +
-    "action=sounds: sounds.json — all sound events and their file variants (version). " +
-    "action=item_components: data-driven item component definitions (version). " +
-    "action=registry_entries: full entry list for a registry from the registries branch — more complete than registries action (registry, version). " +
-    "action=mcmeta_versions: list all MC versions tracked by misode/mcmeta (filter=release|snapshot|all).",
+    "Vanilla MC registry and meta data (blocks, commands, registries, sounds, item components). action=blocks|commands|registries|sounds|item_components|registry_entries|mcmeta_versions.",
     {
         action:   z.enum(["blocks","commands","registries","sounds","item_components","registry_entries","mcmeta_versions"]).describe("Operation to perform"),
         version:  z.string().optional().describe("MC version id (default latest)"),
@@ -575,30 +488,7 @@ server.tool(
 
 server.tool(
     "mc_data",
-    "Vanilla Minecraft data browser — tags, recipes, loot tables, lang, blockstates, models, biomes, structures, damage types, enchantments, advancements, particles, entity attributes. " +
-    "action=tags: browse tags (version, registry, tagId, namespace). " +
-    "action=find_tags_for: reverse tag lookup — all tags containing an entry (entry, registry, version, namespace). " +
-    "action=recipes: list recipes with optional type/output filters (version, type, outputItem). " +
-    "action=get_recipe: get recipe JSON by id (recipeId, version). " +
-    "action=find_recipes_for: all recipes whose output is a given item (item, version). " +
-    "action=loot_tables: list loot tables by category (version, category). " +
-    "action=get_loot_table: get loot table JSON (path, version). " +
-    "action=lang: search en_us.json translation keys/values (version, filter, limit). " +
-    "action=blockstate: blockstate JSON for a block (block, version). " +
-    "action=model: model JSON with resolved parent chain (modelPath, version, resolveParents). " +
-    "action=model_tree: full model inheritance chain with merged textures (modelPath, version). " +
-    "action=biomes: list all biomes (version). " +
-    "action=get_biome: biome worldgen JSON (biomeId, version). " +
-    "action=damage_types: list all damage types with JSON (version). " +
-    "action=enchantments: list all enchantments (version). " +
-    "action=get_enchantment: enchantment JSON (id, version). " +
-    "action=advancements: list advancements by tab (version, category). " +
-    "action=get_advancement: advancement JSON (id, version). " +
-    "action=structures: list worldgen structures (version). " +
-    "action=get_structure: structure JSON (id, version). " +
-    "action=particles: list particle types (version). " +
-    "action=get_particle: particle description JSON (id, version). " +
-    "action=entity_attributes: default entity attributes — vanilla or modded (entity, version, modId).",
+    "Vanilla MC data browser — tags, recipes, loot tables, lang, blockstates, models, biomes, enchantments, advancements, structures, particles, entity attributes. action=tags|find_tags_for|recipes|get_recipe|find_recipes_for|loot_tables|get_loot_table|lang|blockstate|model|model_tree|biomes|get_biome|damage_types|enchantments|get_enchantment|advancements|get_advancement|structures|get_structure|particles|get_particle|entity_attributes.",
     {
         action: z.enum([
             "tags","find_tags_for","recipes","get_recipe","find_recipes_for",
@@ -663,15 +553,7 @@ server.tool(
 
 server.tool(
     "mc_files",
-    "Vanilla Minecraft file access via misode/mcmeta GitHub repository. " +
-    "action=get_data: fetch a specific data pack file (filePath, version, jsonOnly). " +
-    "action=get_asset: fetch a specific resource pack file — binary files are cached locally (filePath, version, jsonOnly). " +
-    "action=list_files: list files/directories in a path on a given branch (dirPath, version, branch). " +
-    "action=diff: compare a file between two MC versions side-by-side (filePath, versionA, versionB, branch). " +
-    "action=atlas: texture atlas definitions (version, atlas — omit atlas to list all). " +
-    "action=raw: fetch any mcmeta file by full git ref and path (ref, filePath). " +
-    "action=compare: GitHub compare API between two MC versions — lists added/modified/removed files (versionA, versionB, branch). " +
-    "action=changelog: files changed in a specific MC version vs previous version (version, branch).",
+    "Vanilla MC file access via misode/mcmeta (data packs, assets, atlases, diffs, changelogs). action=get_data|get_asset|list_files|diff|atlas|raw|compare|changelog.",
     {
         action:   z.enum(["get_data","get_asset","list_files","diff","atlas","raw","compare","changelog"]).describe("Operation to perform"),
         filePath: z.string().optional().describe("Relative path within branch (get_data, get_asset, diff, raw), e.g. 'minecraft/recipes/iron_sword.json'"),
@@ -704,16 +586,7 @@ server.tool(
 
 server.tool(
     "mod_jar",
-    "Mod JAR file access and registry discovery. " +
-    "action=list_files: list all files inside a mod JAR, optionally scoped to a path prefix (modId, prefix). " +
-    "action=get_file: read any JAR file by internal path — JSON files are parsed (modId, path). " +
-    "action=lang: get translation strings from en_us.json with optional filter (modId, filter, limit). " +
-    "action=sounds: get sounds.json — all registered sound events and file mappings (modId, namespace). " +
-    "action=atlas: get texture atlas JSON (modId, atlas, namespace). " +
-    "action=registry_entries: list items/blocks/entities/sounds/containers/potions/paintings/attributes/trims/creative tabs/fluids registered by a mod via lang key inspection — works without decompilation (modId, type, filter, limit). " +
-    "action=manifest: read the mod loader manifest (neoforge.mods.toml, mods.toml, fabric.mod.json, quilt.mod.json) — returns raw TOML or parsed JSON (modId). " +
-    "action=list_configs: list default config files shipped inside the JAR under defaultconfigs/ or config/ (modId). " +
-    "action=get_config: read a specific config file from the JAR by path (modId, path).",
+    "Mod JAR file access and registry discovery (lang, sounds, atlases, configs, manifests). action=list_files|get_file|lang|sounds|atlas|registry_entries|manifest|list_configs|get_config.",
     {
         action:    z.enum(["list_files","get_file","lang","sounds","atlas","registry_entries","manifest","list_configs","get_config"]).describe("Operation to perform"),
         modId:     z.union([z.string(), z.number()]).describe("Mod ID string or numeric DB id"),
@@ -746,16 +619,7 @@ server.tool(
 
 server.tool(
     "mod_data",
-    "Mod JAR structured data content — list or fetch JSON for any data type a mod ships. " +
-    "action=list: enumerate all items of a type in the JAR. action=get: fetch full JSON for a specific item. " +
-    "action=diff: compare data files between two mod versions — shows added/removed/changed files (dbIdA, dbIdB, dataType optional filter). " +
-    "action=trace_item: recursively build the full crafting dependency tree for an item — resolves all recipes that produce it across all mods, then recurses into ingredients (itemId, maxDepth). " +
-    "type values: recipe | loot_table | advancement | blockstate | model | biome | structure | data_tag | particle | damage_type | enchantment | " +
-    "configured_feature | placed_feature | structure_set | noise | density_function | processor_list | template_pool | " +
-    "dimension_type | dimension | trim_material | trim_pattern | painting_variant | wolf_variant | cat_variant | chat_type. " +
-    "Common params: modId (required for list/get), namespace (optional scope), filter (list only, substring). " +
-    "id: resource id for get, e.g. 'mymod:iron_sword'. modelPath: use instead of id for type=model. " +
-    "registry: required for data_tag type, e.g. 'item', 'block', 'entity_type'.",
+    "Mod JAR structured data — list/get/diff JSON (recipes, loot tables, advancements, blockstates, models, biomes, tags, etc.) or trace a crafting dependency tree. action=list|get|diff|trace_item.",
     {
         action:    z.enum(["list","get","diff","trace_item"]).describe("list/get: JAR data operations; diff: compare two mod versions; trace_item: recipe chain"),
         type:      z.enum(["recipe","loot_table","advancement","blockstate","model","biome","structure","data_tag","particle","damage_type","enchantment","configured_feature","placed_feature","structure_set","noise","density_function","processor_list","template_pool","dimension_type","dimension","trim_material","trim_pattern","painting_variant","wolf_variant","cat_variant","chat_type"]).describe("Data type to query"),
@@ -816,15 +680,7 @@ server.tool(
 
 server.tool(
     "mod_tags",
-    "Cross-mod data-pack tag indexing and analysis. " +
-    "action=index: scan and index tag files for one mod (modId). " +
-    "action=index_all: index tags for ALL ingested mods. " +
-    "action=namespaces: list all tag namespaces and registries present across indexed mods. " +
-    "action=contributors: show every mod contributing to a specific tag path (tagPath, registry). " +
-    "action=expand: recursively unfurl a tag through all nested #tag refs into a flat member list — follows the full tag closure across the DB (tagPath, registry, maxDepth). " +
-    "action=mod_list: list all tags registered by a specific mod (modId, registry). " +
-    "action=find_conflicts: find replace:true conflicts across all mods (registry optional). " +
-    "action=search: search tag paths by substring (query, registry, limit).",
+    "Cross-mod data-pack tag indexing — index, browse, expand, find contributors, and detect replace:true conflicts. action=index|index_all|namespaces|contributors|expand|mod_list|find_conflicts|search.",
     {
         action:   z.enum(["index","index_all","namespaces","contributors","expand","mod_list","find_conflicts","search"]).describe("Operation to perform"),
         modId:    z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (index, mod_list)"),
@@ -854,12 +710,7 @@ server.tool(
 
 server.tool(
     "mixin_scan",
-    "Cross-mod mixin conflict analysis. " +
-    "action=list_mods: list all ingested mods that have mixins with their resolved target classes (loader, mcVersion). " +
-    "action=conflict_matrix: full matrix of MC classes targeted by 2+ mods (loader, mcVersion, minConflicts). " +
-    "action=class_detail: every mod injecting into a specific MC class (targetClass). " +
-    "action=hotspots: top-N most contested MC classes by number of mods targeting them (top, loader). " +
-    "action=batch_resolve: resolve @Mixin bytecode annotations for all mixin mods and update DB (loader, mcVersion).",
+    "Cross-mod mixin conflict analysis. action=list_mods|conflict_matrix|class_detail|hotspots|batch_resolve.",
     {
         action:       z.enum(["list_mods","conflict_matrix","class_detail","hotspots","batch_resolve"]).describe("Operation to perform"),
         loader:       z.string().optional().describe("fabric|neoforge|forge|quilt filter"),
@@ -885,10 +736,7 @@ server.tool(
 
 server.tool(
     "gradle",
-    "Gradle build file analysis across mods. " +
-    "action=get_files: get parsed build.gradle / build.gradle.kts for a mod with extracted deps, plugins, and repo URLs (modId). " +
-    "action=search: search gradle files across all mods for a text pattern — returns matching lines with context (query, modIdFilter, limit). " +
-    "action=compare_deps: compare gradle dependencies across mods — find shared libraries, conflicting versions, embed vs compileOnly (groupFilter, modIdFilter).",
+    "Gradle build file analysis — extract deps/plugins, search across mods, compare dependency versions. action=get_files|search|compare_deps.",
     {
         action:      z.enum(["get_files","search","compare_deps"]).describe("Operation to perform"),
         modId:       z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (get_files)"),
@@ -912,18 +760,7 @@ server.tool(
 
 server.tool(
     "reports",
-    "Generate human-readable Markdown reports from modlens data. " +
-    "report=mixin_conflicts: cross-mod mixin conflict report (loader, mcVersion, minConflicts). " +
-    "report=tag_conflicts: replace:true tag conflict report (registry). " +
-    "report=version_conflicts: duplicate modId and unresolved dep report. " +
-    "report=mod_overview: full overview for one mod (modId required). " +
-    "report=gradle_deps: gradle dependency comparison report (groupFilter, modIdFilter). " +
-    "report=pack_compat: one-shot pack compatibility audit combining mixin conflicts, AT/AW conflicts, tag conflicts, and dep issues (mcVersion, loader). " +
-    "report=dep_graph: full mod dependency graph with Mermaid diagram — shows requires/required-by relationships and orphaned mods (mcVersion, modId for single-mod focus). " +
-    "report=sidedness: classify all mods as client_only / client_optional / common / server_only (mcVersion, loader). " +
-    "report=mod_complexity: rank mods by class count + mixin + AT/AW footprint — useful for crash/lag triage (mcVersion, loader). " +
-    "report=pack_changelog: diff two pack snapshots — added/removed/updated mods (oldIds, newIds required). " +
-    "savePath: optional absolute path to save the .md file.",
+    "Generate Markdown reports. report=mixin_conflicts|tag_conflicts|version_conflicts|mod_overview|gradle_deps|pack_compat|dep_graph|sidedness|mod_complexity|pack_changelog. savePath to write to disk.",
     {
         report:       z.enum(["mixin_conflicts","tag_conflicts","version_conflicts","mod_overview","gradle_deps","pack_compat","dep_graph","sidedness","mod_complexity","pack_changelog"]).describe("Which report to generate"),
         savePath:     z.string().optional().describe("Absolute path to save the .md file, e.g. 'C:/reports/mixin_conflicts.md'"),
@@ -988,9 +825,7 @@ server.tool(
 
 server.tool(
     "kubejs",
-    "KubeJS script analysis tools. " +
-    "action=index: scan a kubejs scripts directory and produce a per-file breakdown of which event categories are touched \u2014 recipe changes, tag modifications, loot overrides, item/block registration, worldgen, etc. (scriptsDir). " +
-    "action=search: full-text search across all scripts in a directory (scriptsDir, query, limit).",
+    "KubeJS script analysis — index a kubejs/ directory or text-search scripts. action=index|search.",
     {
         action:     z.enum(["index","search"]).describe("Operation to perform"),
         scriptsDir: z.string().describe("Absolute path to the kubejs/ folder or a subfolder like kubejs/server_scripts/"),
@@ -1011,10 +846,7 @@ server.tool(
 
 server.tool(
     "analyze_crash_log",
-    "Paste a NeoForge/Forge/Fabric crash log and get a ranked list of suspect mods. " +
-    "Cross-references stack frames against the ModClass index (populated by reindex_classes). " +
-    "Also extracts the '-- Mod List --' section when present. " +
-    "Returns suspects ranked by frame count, recognized/unrecognized frame counts, and a coverage warning if the class index is sparse.",
+    "Parse a NeoForge/Forge/Fabric crash log and return suspect mods ranked by stack-frame hits against the indexed class DB.",
     {
         logText: z.string().describe("Full text of the crash report or log snippet"),
     },
@@ -1028,10 +860,7 @@ server.tool(
 
 server.tool(
     "find_missing_deps",
-    "Find declared mod dependencies that are not satisfied by any ingested mod in the DB. " +
-    "Reads the dependencies JSON column from all mods, collects the full ingested modId set, " +
-    "and flags any referenced modId that is absent. " +
-    "Skips loader-level pseudo-deps (minecraft, neoforge, forge, fabric-api, java, etc.).",
+    "Find declared mod dependencies not satisfied by any ingested mod in the DB. Skips loader pseudo-deps (minecraft, neoforge, java, etc.).",
     {
         mcVersion: z.string().optional().describe("Filter checked mods to this MC version"),
         loader:    z.string().optional().describe("Filter checked mods to this loader (neoforge|forge|fabric|quilt)"),
@@ -1046,15 +875,7 @@ server.tool(
 
 server.tool(
     "check_mod_compat",
-    "Pre-flight compatibility check for a candidate mod JAR before adding it to a pack. " +
-    "Does NOT require the JAR to be ingested first. " +
-    "Checks against all mods currently in the DB for: " +
-    "(1) mixin target conflicts (error), " +
-    "(2) Access Transformer/Widener overlaps (error), " +
-    "(3) asset path conflicts (warn), " +
-    "(4) missing declared dependencies (warn), " +
-    "(5) sidedness info (client_only/server_only). " +
-    "Returns issues[], summary.safe (true if no errors), and candidate metadata.",
+    "Pre-flight check a candidate JAR against the DB — mixin conflicts, AT/AW overlaps, asset conflicts, missing deps, sidedness. Does not require prior ingestion.",
     {
         jarPath:   z.string().describe("Absolute path to the candidate mod JAR"),
         mcVersion: z.string().optional().describe("Filter comparison pool to this MC version"),
