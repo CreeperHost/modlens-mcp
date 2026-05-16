@@ -122,6 +122,35 @@ Or manually edit `~/.claude/mcp.json` (same format as VS Code above).
 
 > **Important:** Replace `/path/to/modlens-mcp` with the actual absolute path where you cloned the repo. On Windows use forward slashes or escaped backslashes, e.g. `C:/Users/you/modlens-mcp/dist/server.js`.
 
+### 💡 Token overhead — disable tools you don't need
+
+ModLens ships **22 tools**. Every tool's name, description, and parameter schema is sent to the model on **every request**, whether you use that tool or not. This adds a fixed overhead of ~3,400 tokens per turn.
+
+**Recommendation:** disable any tool groups you don't regularly use. Common profiles:
+
+| If you primarily… | Keep | Disable |
+|---|---|---|
+| Browse vanilla MC source | `mc_source`, `mc_data`, `mc_files`, `mc_registry`, `mappings` | `platform`, `mixin_scan`, `gradle`, `kubejs`, `pack_tools` |
+| Analyze a modpack | `mod`, `mod_mixins`, `mixin_scan`, `reports`, `pack_tools` | `mc_files`, `mappings`, `docs`, `primers`, `gradle` |
+| Mod development | `mod`, `mod_bytecode`, `mc_source`, `mappings`, `docs`, `primers` | `pack_tools`, `kubejs`, `platform`, `mixin_scan` |
+
+**VS Code:** In `mcp.json` you can disable individual tools using the `disabled` list under the server entry:
+```json
+{
+  "servers": {
+    "modlens": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/modlens-mcp/dist/server.js"],
+      "env": { "DATABASE_URL": "postgresql://modlens:modlens@localhost:5433/modlens" },
+      "disabled": ["kubejs", "platform", "gradle", "docs", "primers"]
+    }
+  }
+}
+```
+
+**Claude Desktop / CLI:** Toggle tools off in the MCP settings UI, or maintain separate config files for different workflows.
+
 ---
 
 ## CLI
