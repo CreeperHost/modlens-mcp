@@ -642,9 +642,27 @@ if (sections.has("semantic") || sections.has("containers") || !isReconfigure) {
 
 // ── Prisma schema ─────────────────────────────────────────────────────────────
 if (sections.has("schema")) {
+    const backend = PROFILES[selectedProfile]?.backend ?? "postgres";
+
+    // On Postgres/PGlite the schema contains `embedding vector(N)` columns.
+    // The `vector` type requires the pgvector extension to exist BEFORE
+    // prisma db push — so enable the extension here, quietly.
+    if (backend !== "sqlite") {
+        const spre = p.spinner();
+        spre.start("Enabling pgvector extension (required before schema push)");
+        const rpre = run("node scripts/enable-pgvector.mjs", { silent: true });
+        if (rpre.ok) {
+            spre.stop("pgvector extension ready");
+        } else {
+            // Non-fatal — the extension may already exist or the script may
+            // have partially succeeded; prisma db push will tell us if not.
+            spre.stop("pgvector pre-check had warnings (continuing)");
+        }
+    }
+
     const s = p.spinner();
     s.start("Applying database schema (prisma db push)");
-    const schemaArg = PROFILES[selectedProfile]?.backend === "sqlite"
+    const schemaArg = backend === "sqlite"
         ? "--schema prisma/backends/schema.sqlite.prisma"
         : "";
     const r = run(`npx prisma db push ${schemaArg} --skip-generate`, { silent: true });

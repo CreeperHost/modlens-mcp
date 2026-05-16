@@ -38,13 +38,13 @@ async function main() {
     }
 
     // 3. HNSW indexes for fast approximate nearest-neighbour
-    const indexes: Array<[string, string]> = [
+    const indexes = [
         ["doc_entries_embedding_idx",    "doc_entries"],
         ["primers_embedding_idx",        "primers"],
         ["mc_source_files_embedding_idx","mc_source_files"],
     ];
     for (const [idxName, table] of indexes) {
-        const existing = await prisma.$queryRawUnsafe<unknown[]>(
+        const existing = await prisma.$queryRawUnsafe(
             `SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname=$1 LIMIT 1`,
             idxName,
         );
