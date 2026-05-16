@@ -6,10 +6,45 @@ Store mod metadata, class indexes, mixin targets, AT/AW entries, and decompiled 
 
 ## Prerequisites
 
-- **Node.js 22+**
-- **Docker** (for PostgreSQL)
-- **JDK 21+** (Eclipse Adoptium recommended — `findJava()` scans `C:/Program Files/Eclipse Adoptium` first)
-- A CurseForge API key (optional — needed only for `sync-curseforge`)
+| Requirement | Notes |
+|-------------|-------|
+| **Node.js 22+** | Runtime for the MCP server |
+| **Docker** | Runs the PostgreSQL container via `docker compose` |
+| **JDK 21+** | Required for decompilation (Vineflower) and bytecode analysis (`javap`). Eclipse Adoptium recommended — auto-discovered at `C:/Program Files/Eclipse Adoptium`, `C:/Program Files/Java`, `C:/Program Files/Microsoft`, or via `JAVA_HOME` |
+| **Vineflower** | Decompiler JAR — **auto-downloaded** from Maven Central on first use |
+| **mcsrc-indexer.jar** | JAR indexer for class analysis — must be placed at `tools/mcsrc-indexer.jar` (built from the `java/` directory or copied from a previous build) |
+
+**Optional environment variables:**
+
+| Variable | Purpose |
+|----------|---------|
+| `CURSEFORGE_API_KEY` | CurseForge platform sync (`sync_curseforge` action) |
+| `MODRINTH_TOKEN` | Modrinth API — increases rate limit for batch operations |
+| `JAVA_HOME` | Override Java discovery (falls back to PATH if not set) |
+
+---
+
+## Docker — PostgreSQL Setup
+
+The included `docker-compose.yml` starts a PostgreSQL 16 container on port **5433**.
+
+```bash
+# Start (detached)
+docker compose up -d
+
+# Check it's healthy
+docker compose ps
+
+# Stop (data is preserved in the named volume)
+docker compose down
+
+# Stop and wipe all data
+docker compose down -v
+```
+
+> **⚠ Dev credentials warning:** `docker-compose.yml` uses `modlens:modlens` as the username/password. This is fine for a local dev tool that only binds to `localhost:5433`. If you expose the port externally or run this on a shared machine, change `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` in `docker-compose.yml` **and** update your `.env` accordingly.
+
+---
 
 ## Setup
 
@@ -18,19 +53,27 @@ git clone https://github.com/Mattabase/modlens-mcp
 cd modlens-mcp
 npm install
 
-# Start PostgreSQL
+# 1. Start PostgreSQL
 docker compose up -d
 
-# Create .env
+# 2. Create .env
 echo DATABASE_URL=postgresql://modlens:modlens@localhost:5433/modlens > .env
-# echo CURSEFORGE_API_KEY=<your key> >> .env   # optional
+# Optional — add a CurseForge key for sync_curseforge:
+# echo CURSEFORGE_API_KEY=<your key> >> .env
+# Optional — add a Modrinth token for higher rate limits:
+# echo MODRINTH_TOKEN=<your token> >> .env
 
-# Apply schema
+# 3. Apply the Prisma schema to the DB
 npx prisma db push
 
-# Build
+# 4. Build
 npm run build
+
+# 5. (Optional) Place mcsrc-indexer.jar for class analysis features
+#    cp /path/to/mcsrc-indexer.jar tools/mcsrc-indexer.jar
 ```
+
+> **Note:** Vineflower (decompiler) is downloaded automatically to `~/.modlens-cache/tools/` on first use — no manual step needed.
 
 ## MCP Configuration
 
