@@ -9,6 +9,7 @@ import {
     findModByJarPath, findModByDupKey, findModBySha512,
     createMod, updateMod, findModById, listAllMods,
     countModClasses, createModClasses, findModByModId, deleteModById,
+    listModsSlim,
 } from "../repositories/mod.js";
 import { validateDbId } from "../validate.js";
 
@@ -317,4 +318,49 @@ export async function decompileModStatus(dbId: number): Promise<{ status: string
         return { status: "running", outDir, message: "Still decompiling..." };
     }
     return { status: "not_started", outDir, message: "No decompile job found. Call decompile_mod first." };
+}
+
+// ── Batch decompile ───────────────────────────────────────────────────────────
+
+export async function batchDecompileMods(opts?: {
+    concurrency?: number;
+}): Promise<{ started: number; alreadyDone: number; errors: number; total: number }> {
+    const concurrency = opts?.concurrency ?? 2;
+    const mods = await listModsSlim({ decompiled: false });
+    let started = 0, alreadyDone = 0, errors = 0;
+
+    async function processOne(mod: { id: number; modId: string; version: string; jarPath: string | null }) {
+        if (!mod.jarPath) { errors++; return; }
+        const outDir = paths.decompiled(mod.modId, mod.version);
+        const state = await isDecompileDone(outDir);
+        if (state === "done") {
+            await updateMod(mod.id, { decompiled: true, decompPath: outDir });
+            alreadyDone++;
+            return;
+        }
+        if (state === "running") { alreadyDone++; return; }
+        try {
+            await decompileJar(mod.jarPath, outDir);
+            // Wait for Vineflower to finish (up to 15 minutes per mod)
+            for (let i = 0; i < 450; i++) {
+                await new Promise<void>(r => setTimeout(r, 2000));
+                const s = await isDecompileDone(outDir);
+                if (s === "done") {
+                    await updateMod(mod.id, { decompiled: true, decompPath: outDir });
+                    started++;
+                    return;
+                }
+                if (s === "error") { errors++; return; }
+            }
+            errors++; // timeout
+        } catch { errors++; }
+    }
+
+    // Run with concurrency — process in batches of N
+    for (let i = 0; i < mods.length; i += concurrency) {
+        const batch = mods.slice(i, i + concurrency);
+        await Promise.all(batch.map(m => processOne(m)));
+    }
+
+    return { started, alreadyDone, errors, total: mods.length };
 }

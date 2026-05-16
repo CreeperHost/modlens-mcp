@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { ingestMod, decompileMod, decompileModStatus, reindexClasses, batchIngest } from "./tools/ingest.js";
+import { ingestMod, decompileMod, decompileModStatus, reindexClasses, batchIngest, batchDecompileMods } from "./tools/ingest.js";
 import { listMods, getModDetails, searchMods, getDbStats, getDependencies, findVersionConflicts, getDependencyGraph, listModSourceUrls, listModRegistryEntries } from "./tools/catalog.js";
 import {
     listModJarFiles, getModJarFile,
@@ -114,12 +114,13 @@ function out(result: unknown): { content: Array<{ type: "text"; text: string }> 
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest. Omit dbId on search_source to grep all decompiled mods. batch_ingest replace=true removes old modId row first.",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile. Omit dbId on search_source to grep all decompiled mods. batch_ingest replace=true removes old modId row first. batch_decompile decompiles all not-yet-decompiled mods with concurrency control.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
             "version_conflicts","source_urls","decompile","decompile_status",
             "decompile_class","source","search_source","reindex","batch_ingest",
+            "batch_decompile",
         ]),
         jarPath:      z.string().optional(),
         modId:        z.union([z.string(), z.number()]).optional().describe("mod ID or DB id"),
@@ -159,6 +160,7 @@ server.tool(
             case "search_source":    result = await searchSource(query!, dbId, isRegex ?? false, limit ?? 50); break;
             case "reindex":          result = await reindexClasses(dbId); break;
             case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false, replace ?? false); break;
+            case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2) }); break;
         }
         return out(result);
     }
