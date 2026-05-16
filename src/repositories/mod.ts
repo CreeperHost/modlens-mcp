@@ -105,52 +105,6 @@ export async function findModsByIds(ids: number[]): Promise<Mod[]> {
 }
 
 /**
- * Returns conflict data pre-aggregated in SQL using jsonb_array_elements_text.
- * Each row: class name + count of mods targeting it + array of mod IDs.
- * Only returns classes targeted by >= minConflicts mods.
- */
-export async function getMixinConflictRaw(
-    loader?: string,
-    mcVersion?: string,
-    minConflicts = 2,
-): Promise<Array<{ className: string; modCount: number; modIds: number[] }>> {
-    const params: unknown[] = [minConflicts];
-    const whereClauses: string[] = ["has_mixins = true"];
-
-    if (loader)    { params.push(loader);    whereClauses.push(`loader = $${params.length}`); }
-    if (mcVersion) { params.push(mcVersion); whereClauses.push(`mc_version = $${params.length}`); }
-
-    const whereSQL = whereClauses.join(" AND ");
-
-    const db = await getDb();
-    const rows = await db.$queryRawUnsafe<
-        Array<{ class_name: string; mod_count: string; mod_ids: number[] }>
-    >(`
-        WITH deduped AS (
-            SELECT DISTINCT ON (mod_id) id, mod_id, mixin_targets
-            FROM "mods"
-            WHERE ${whereSQL}
-            ORDER BY mod_id, id DESC
-        )
-        SELECT
-            t.class_name,
-            COUNT(DISTINCT d.mod_id)::int AS mod_count,
-            ARRAY_AGG(DISTINCT d.id) AS mod_ids
-        FROM deduped d
-        CROSS JOIN LATERAL jsonb_array_elements_text(d.mixin_targets::jsonb) AS t(class_name)
-        GROUP BY t.class_name
-        HAVING COUNT(DISTINCT d.mod_id) >= $1
-        ORDER BY mod_count DESC
-    `, ...params);
-
-    return rows.map((r) => ({
-        className: r.class_name,
-        modCount:  Number(r.mod_count),
-        modIds:    r.mod_ids,
-    }));
-}
-
-/**
  * Returns mods whose mixinTargets JSON array contains ANY of the given class names.
  * Used by checkModCompat to find existing mods that conflict with a candidate JAR.
  */
