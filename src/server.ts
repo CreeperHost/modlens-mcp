@@ -80,6 +80,7 @@ import {
 import { generateReport } from "./tools/reports.js";
 import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog, findDataConflicts } from "./tools/packtools.js";
 import { indexKubeJsScripts, searchKubeJsScripts } from "./tools/kubejs.js";
+import { searchPacksAction, featuredPacksAction, packInfoAction, packManifestAction, syncPackModsAction, searchFtbModsAction, ftbModInfoAction } from "./tools/modpacks-ch.js";
 import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
 import { checkModCompat } from "./tools/compat-check.js";
 import { disconnect } from "./db.js";
@@ -262,7 +263,66 @@ server.tool(
     }
 );
 
-// ── 5. mc_versions ────────────────────────────────────────────────────────────
+// ── 5. modpacks_ch ───────────────────────────────────────────────────────────
+
+server.tool(
+    "modpacks_ch",
+    "Search and sync modpacks from the FTB (modpacks.ch) and CurseForge namespaces — no API key required. " +
+    "action=search|featured|info|manifest|sync_pack_mods|search_ftb_mods|ftb_mod_info. " +
+    "namespace=ftb|curseforge (default: ftb). " +
+    "User-Agent is set per FTB team request for usage tracking.",
+    {
+        action:       z.enum(["search", "featured", "info", "manifest", "sync_pack_mods", "search_ftb_mods", "ftb_mod_info"]),
+        namespace:    z.enum(["ftb", "curseforge"]).optional().describe("ftb or curseforge (default: ftb)"),
+        packId:       z.number().optional().describe("Pack ID (required for info, manifest, sync_pack_mods)"),
+        versionId:    z.number().optional().describe("Version ID (required for manifest, sync_pack_mods)"),
+        query:        z.string().optional().describe("Search query (required for search, search_ftb_mods)"),
+        modId:        z.union([z.number(), z.string()]).optional().describe("FTB mod ID (required for ftb_mod_info)"),
+        limit:        z.number().optional().describe("Max results for search/featured (default: 20)"),
+        fileTypes:    z.array(z.string()).optional().describe("File types to ingest (default: ['mod','resource'])"),
+        skipServer:   z.boolean().optional().describe("Skip server-only files (default: false)"),
+        skipOptional: z.boolean().optional().describe("Skip optional files (default: false)"),
+        concurrency:  z.number().optional().describe("Parallel downloads for sync_pack_mods (default: 3)"),
+    },
+    async ({ action, namespace, packId, versionId, query, modId, limit, fileTypes, skipServer, skipOptional, concurrency }) => {
+        const ns = namespace ?? "ftb";
+        let result: unknown;
+        switch (action) {
+            case "search":
+                if (!query) throw new Error("query is required for action=search");
+                result = await searchPacksAction(query, ns, limit ?? 20);
+                break;
+            case "featured":
+                result = await featuredPacksAction(limit ?? 20);
+                break;
+            case "info":
+                if (!packId) throw new Error("packId is required for action=info");
+                result = await packInfoAction(packId, ns);
+                break;
+            case "manifest":
+                if (!packId)    throw new Error("packId is required for action=manifest");
+                if (!versionId) throw new Error("versionId is required for action=manifest");
+                result = await packManifestAction(packId, versionId, ns);
+                break;
+            case "sync_pack_mods":
+                if (!packId)    throw new Error("packId is required for action=sync_pack_mods");
+                if (!versionId) throw new Error("versionId is required for action=sync_pack_mods");
+                result = await syncPackModsAction({ packId, versionId, namespace: ns, fileTypes, skipServer, skipOptional, concurrency });
+                break;
+            case "search_ftb_mods":
+                if (!query) throw new Error("query is required for action=search_ftb_mods");
+                result = await searchFtbModsAction(query, limit ?? 20);
+                break;
+            case "ftb_mod_info":
+                if (modId === undefined) throw new Error("modId is required for action=ftb_mod_info");
+                result = await ftbModInfoAction(modId);
+                break;
+        }
+        return out(result);
+    },
+);
+
+// ── 6. mc_versions ────────────────────────────────────────────────────────────
 
 server.tool(
     "mc_versions",
