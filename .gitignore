@@ -6,6 +6,10 @@ dist/
 output/
 tools/*.jar
 
+# JVM crash logs from mcsrc-indexer
+hs_err_pid*.log
+replay_pid*.log
+
 # Agent skill configuration (local only)
 docs/agents/
 .scratch/
