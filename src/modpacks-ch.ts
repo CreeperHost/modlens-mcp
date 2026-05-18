@@ -1,8 +1,9 @@
 /**
- * modpacks.ch / FTB public API client.
+ * modpacks.ch public API client.
  *
- * API is freely accessible — no auth required.
- * The FTB team (Gigabit101) requested a custom User-Agent for usage tracking.
+ * modpacks.ch is a service by CreeperHost (https://www.creeperhost.net).
+ * The API is freely accessible — no auth required.
+ * The modpacks.ch team requested a custom User-Agent for usage tracking.
  */
 import { fetchWithRetry, DOWNLOAD_OPTS } from "./fetch-utils.js";
 import { createWriteStream } from "fs";
@@ -10,7 +11,7 @@ import { pipeline } from "stream/promises";
 
 export const FTBAPI = "https://api.modpacks.ch/public";
 
-/** User-Agent as requested by the FTB/modpacks.ch team for usage tracking. */
+/** User-Agent as requested by the modpacks.ch (CreeperHost) team for usage tracking. */
 export const USER_AGENT = "modlens-mcp/1.0 (github.com/Mattabase/modlens-mcp)";
 const HEADERS = { "User-Agent": USER_AGENT };
 

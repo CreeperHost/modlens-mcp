@@ -1,9 +1,12 @@
 /**
- * modpacks.ch / FTB tool — search and sync packs from both the FTB and
+ * modpacks.ch tool — search and sync packs from both the FTB and
  * CurseForge namespaces exposed by the modpacks.ch public API (no API key
  * required for either).
  *
- * User-Agent spec: The FTB/modpacks.ch team requested a custom User-Agent for
+ * modpacks.ch is a service by CreeperHost (https://www.creeperhost.net).
+ * Thanks to CreeperHost for providing this free public API.
+ *
+ * User-Agent spec: The modpacks.ch team requested a custom User-Agent for
  * usage tracking.  See USER_AGENT constant in src/modpacks-ch.ts.
  *
  * Supported actions:

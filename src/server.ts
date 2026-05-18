@@ -264,10 +264,10 @@ server.tool(
 
 server.tool(
     "modpacks_ch",
-    "Search and sync modpacks from the FTB (modpacks.ch) and CurseForge namespaces — no API key required. " +
+    "Search and sync modpacks from the modpacks.ch API (a CreeperHost service) — covers FTB and CurseForge namespaces, no API key required. " +
     "action=search|featured|info|manifest|sync_pack_mods|search_ftb_mods|ftb_mod_info|download_mod|download_overrides|list_pack_versions|list_pack_files|find_mod_in_packs. " +
     "namespace=ftb|curseforge (default: ftb). " +
-    "User-Agent is set per FTB team request for usage tracking.",
+    "User-Agent is set per modpacks.ch (CreeperHost) team request for usage tracking.",
     {
         action:           z.enum(["search", "featured", "info", "manifest", "sync_pack_mods", "search_ftb_mods", "ftb_mod_info", "download_mod", "download_overrides", "list_pack_versions", "list_pack_files", "find_mod_in_packs"]),
         namespace:        z.enum(["ftb", "curseforge"]).optional().describe("ftb or curseforge (default: ftb)"),
