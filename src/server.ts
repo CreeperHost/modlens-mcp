@@ -78,17 +78,23 @@ import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
 import { checkModCompat } from "./tools/compat-check.js";
 import { disconnect } from "./db.js";
 
-// Load .env
+// Load .env — try ~/.modlens/.env first (npx/installed users), then local .env (git-clone users)
 import { readFileSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { ENV_PATH } from "./env-path.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const envPath = join(__dirname, "..", ".env");
-if (existsSync(envPath)) {
-    for (const line of readFileSync(envPath, "utf8").split("\n")) {
-        const m = line.match(/^([^#=]+)=(.*)$/);
-        if (m) process.env[m[1].trim()] ??= m[2].trim().replace(/^["']|["']$/g, "");
+
+// Always attempt to load the resolved ENV_PATH (covers both modes)
+const localEnvPath = join(__dirname, "..", ".env");
+for (const ep of [ENV_PATH, localEnvPath]) {
+    if (existsSync(ep)) {
+        for (const line of readFileSync(ep, "utf8").split("\n")) {
+            const m = line.match(/^([^#=]+)=(.*)$/);
+            if (m) process.env[m[1].trim()] ??= m[2].trim().replace(/^["']|["']$/g, "");
+        }
+        break; // only load the first one found
     }
 }
 

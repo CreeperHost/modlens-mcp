@@ -1,0 +1,23 @@
+# Source — not needed at runtime
+src/
+*.test.ts
+
+# Dev config
+tsconfig.json
+vitest.config.ts
+docker-compose.yml
+
+# Dev/internal docs and reports
+docs/
+reports/
+.scratch/
+
+# Crash logs and local dev artifacts
+*.log
+hs_err_pid*.log
+test-*.mjs
+
+# Git
+.git/
+.gitignore
+.gitattributes

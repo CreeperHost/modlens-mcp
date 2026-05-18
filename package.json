@@ -1,10 +1,21 @@
 {
-  "name": "modlens-mcp",
+  "name": "@mattabase/modlens-mcp",
   "version": "1.0.0",
   "description": "MCP server for browsing, decompiling, and analyzing Minecraft mod JARs",
   "type": "module",
   "main": "dist/server.js",
+  "bin": {
+    "modlens-mcp": "dist/launcher.js"
+  },
+  "files": [
+    "dist/",
+    "prisma/",
+    "scripts/",
+    "package.json",
+    "README.md"
+  ],
   "scripts": {
+    "postinstall": "prisma generate",
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/server.js",

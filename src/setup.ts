@@ -21,10 +21,10 @@ import { seedDefaultPrimers } from "./tools/primers.js";
 import { backfillDocEmbeddings } from "./tools/docs.js";
 import { backfillPrimerEmbeddings } from "./tools/primers.js";
 import { disconnect } from "./db.js";
+import { PKG_ROOT, MODLENS_HOME, ENV_PATH, IS_INSTALLED, ensureModlensHome } from "./env-path.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, "..");
-const ENV_PATH = join(ROOT, ".env");
+const ROOT = PKG_ROOT;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -67,6 +67,7 @@ function readEnv(): Record<string, string> {
 
 /** Write key→value map to .env (preserves comments if file exists) */
 function writeEnv(vars: Record<string, string>): void {
+    ensureModlensHome();
     const lines: string[] = [];
     for (const [k, v] of Object.entries(vars)) {
         lines.push(`${k}=${v}`);
@@ -299,7 +300,9 @@ if (!isReconfigure) {
         writeEnv({ ...readEnv(), DATABASE_URL: `pglite://${dataDir as string}` });
         sections = new Set(PROFILES["zero-friction"].sections);
     } else if (selectedProfile === "lightweight") {
-        const defaultFile = join(homedir(), ".modlens-data", "modlens.db");
+        const defaultFile = IS_INSTALLED
+            ? join(MODLENS_HOME, "data", "modlens.db")
+            : join(homedir(), ".modlens-data", "modlens.db");
         const dbFile = await p.text({
             message: "SQLite database file path (created if it does not exist)",
             initialValue: defaultFile,
@@ -765,8 +768,11 @@ if (sections.has("backfill")) {
 
 // ── MCP client config ─────────────────────────────────────────────────────────
 if (sections.has("mcp")) {
-    const serverPath = join(ROOT, "dist", "server.js").replace(/\\/g, "/");
-    const envVars: Record<string, string> = {
+    // For npx/installed mode: env is loaded from ~/.modlens/.env by the launcher,
+    // so we don't need to embed vars in the MCP config — just the command.
+    // For git-clone mode: keep the existing node + env approach.
+    const pkgVersion: string = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version as string;
+    const envVars: Record<string, string> = IS_INSTALLED ? {} : {
         DATABASE_URL: existingEnv.DATABASE_URL ?? "postgresql://modlens:modlens@localhost:5433/modlens",
         ...(wantSemantic ? {
             OLLAMA_URL:         ollamaUrl,
@@ -775,8 +781,16 @@ if (sections.has("mcp")) {
         } : {}),
     };
 
-    const vscodeEntry = { type: "stdio", command: "node", args: [serverPath], env: envVars };
-    const claudeEntry = { command: "node", args: [serverPath], env: envVars };
+    const serverPath = join(ROOT, "dist", "server.js").replace(/\\/g, "/");
+    // Pinned version so MCP client never auto-updates mid-project
+    const npxArgs = ["-y", `@mattabase/modlens-mcp@${pkgVersion}`];
+
+    const vscodeEntry = IS_INSTALLED
+        ? { type: "stdio", command: "npx", args: npxArgs }
+        : { type: "stdio", command: "node", args: [serverPath], env: envVars };
+    const claudeEntry = IS_INSTALLED
+        ? { command: "npx", args: npxArgs }
+        : { command: "node", args: [serverPath], env: envVars };
 
     const mcpClient = await p.select({
         message: "Configure MCP client?",
