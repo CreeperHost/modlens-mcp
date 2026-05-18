@@ -104,6 +104,32 @@ AFTER UPDATE ON primers BEGIN
   INSERT INTO fts_primers(rowid, title, summary, content)
   VALUES (new.id, new.title, new.summary, new.content);
 END;
+
+-- FTS5 virtual table for mod source files (fabric / neoforge / forge / quilt)
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_mod_source (
+  content,
+  class_name,
+  mod_id UNINDEXED
+) USING fts5(content, class_name, mod_id UNINDEXED);
+
+-- Sync triggers for mod_source_files
+CREATE TRIGGER IF NOT EXISTS mod_source_fts_insert
+AFTER INSERT ON mod_source_files BEGIN
+  INSERT INTO fts_mod_source(rowid, content, class_name, mod_id)
+  VALUES (new.id, new.content, new.class_name, new.mod_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS mod_source_fts_delete
+AFTER DELETE ON mod_source_files BEGIN
+  DELETE FROM fts_mod_source WHERE rowid = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS mod_source_fts_update
+AFTER UPDATE ON mod_source_files BEGIN
+  DELETE FROM fts_mod_source WHERE rowid = old.id;
+  INSERT INTO fts_mod_source(rowid, content, class_name, mod_id)
+  VALUES (new.id, new.content, new.class_name, new.mod_id);
+END;
 `);
 
 console.log("FTS5 virtual tables and triggers created");

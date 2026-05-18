@@ -5,6 +5,7 @@
  */
 import { getDb } from "../db.js";
 import type { Mod, Prisma } from "@prisma/client";
+import { ftsSearchModSource } from "../search-adapter.js";
 
 // ── Projections ───────────────────────────────────────────────────────────────
 
@@ -437,4 +438,12 @@ export async function countUnembeddedModSourceFiles(modId: number): Promise<numb
         modId,
     );
     return parseInt(rows[0].count, 10);
+}
+
+export async function searchModSourceFiles(
+    modId: number,
+    query: string,
+    limit: number,
+): Promise<Array<{ className: string; snippet: string }>> {
+    return ftsSearchModSource(modId, query, limit);
 }

@@ -84,6 +84,60 @@ export async function ftsSearchSource(
     return rows.map(r => ({ className: r.class_name, snippet: r.snippet }));
 }
 
+// ── mod_source_files FTS (fabric / neoforge / forge / quilt) ─────────────────
+
+/**
+ * BM25-ranked FTS search over mod source files.
+ * SQLite: fts_mod_source FTS5 table (ORDER BY rank = BM25).
+ * PostgreSQL: to_tsvector GIN index + ts_rank.
+ * Mod source must be indexed first (mod index_fts or index_semantic action).
+ */
+export async function ftsSearchModSource(
+    modId: number,
+    query: string,
+    limit: number,
+): Promise<FtsSourceResult[]> {
+    const backend = detectBackend();
+
+    if (backend === "sqlite") {
+        const url = process.env.DATABASE_URL ?? "";
+        const path = url.replace(/^file:\/\//, "").replace(/^file:/, "");
+        const Database = (await import("better-sqlite3")).default;
+        const db = new Database(path, { readonly: true });
+        type Row = { id: number; content: string; class_name: string };
+        const rows = db.prepare(
+            `SELECT s.id, s.class_name, s.content FROM fts_mod_source f
+             JOIN mod_source_files s ON s.id = f.rowid
+             WHERE f.fts_mod_source MATCH ? AND s.mod_id = ?
+             ORDER BY rank
+             LIMIT ?`,
+        ).all(query, modId, limit) as Row[];
+        db.close();
+        return rows.map(r => ({
+            className: r.class_name,
+            snippet: r.content.slice(0, 300),
+        }));
+    }
+
+    // PostgreSQL — GIN index on to_tsvector('simple', content)
+    const db = await getDb();
+    type FtsRow = { class_name: string; snippet: string };
+    const rows = await db.$queryRaw<FtsRow[]>`
+        SELECT
+            class_name,
+            ts_headline('simple', content,
+                plainto_tsquery('simple', ${query}),
+                'MaxWords=25, MinWords=15, StartSel="", StopSel=""'
+            ) AS snippet
+        FROM mod_source_files
+        WHERE mod_id = ${modId}
+          AND to_tsvector('simple', content) @@ plainto_tsquery('simple', ${query})
+        ORDER BY ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', ${query})) DESC
+        LIMIT ${limit}
+    `;
+    return rows.map(r => ({ className: r.class_name, snippet: r.snippet }));
+}
+
 // ── doc_entries FTS ───────────────────────────────────────────────────────────
 
 export async function ftsSearchDocs(

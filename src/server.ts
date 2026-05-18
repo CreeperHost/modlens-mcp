@@ -35,7 +35,7 @@ import {
     validateAccessWidener, analyzeMixin, searchEvents,
 } from "./tools/vanilla.js";
 import { diffMcVersionsDetailed, diffModVersionsDetailed } from "./tools/version-diff.js";
-import { indexMcVersion, searchMcIndexed, indexMcSourceSemantic, searchMcSourceSemantic, indexModSourceSemantic, searchModSourceSemantic } from "./tools/mc-fts.js";
+import { indexMcVersion, searchMcIndexed, indexMcSourceSemantic, searchMcSourceSemantic, indexModSourceFts, indexModSourceSemantic, searchModSourceIndexed, searchModSourceSemantic } from "./tools/mc-fts.js";
 import { findMapping, remapModJar, getParchment, listParchmentVersions, getParchmentSummary } from "./tools/mappings.js";
 import { ingestDocumentation, getDocumentation, searchDocumentation, listDocumentation, deleteDocumentation, seedDefaultDocumentation, semanticSearchDocumentation, backfillDocEmbeddings } from "./tools/docs.js";
 import {
@@ -117,13 +117,13 @@ function out(result: unknown): { content: Array<{ type: "text"; text: string }> 
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_semantic|search_semantic|get_paths. get_paths returns jarPath and decompPath (null if not yet decompiled) so the agent can grep/search files natively. Omit dbId on search_source to grep all decompiled mods. batch_ingest replace=true removes old modId row first. batch_decompile decompiles all not-yet-decompiled mods with concurrency control. index_semantic/search_semantic require Ollama running.",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_fts|search_indexed|index_semantic|search_semantic|get_paths. index_fts/search_indexed: BM25-ranked FTS over source code (vanilla, fabric, neoforge, forge, quilt). No Ollama required. index_semantic/search_semantic: vector search (requires Ollama). get_paths returns jarPath/decompPath for native grep. Omit dbId on search_source to grep all decompiled mods. batch_ingest replace=true removes old modId row first. batch_decompile decompiles all not-yet-decompiled mods with concurrency control.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
             "version_conflicts","source_urls","decompile","decompile_status",
             "decompile_class","source","search_source","reindex","batch_ingest",
-            "batch_decompile","index_semantic","search_semantic","get_paths",
+            "batch_decompile","index_fts","search_indexed","index_semantic","search_semantic","get_paths",
         ]),
         jarPath:      z.string().optional(),
         modId:        z.union([z.string(), z.number()]).optional().describe("mod ID or DB id"),
@@ -166,6 +166,8 @@ server.tool(
             case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2) }); break;
             case "index_semantic":   result = await indexModSourceSemantic(dbId!, (limit as number | undefined) ?? 50); break;
             case "search_semantic":  result = await searchModSourceSemantic(query!, dbId!, limit ?? 10); break;
+            case "index_fts":        result = await indexModSourceFts(dbId!); break;
+            case "search_indexed":   result = await searchModSourceIndexed(dbId!, query!, limit ?? 20); break;
             case "get_paths": {
                 const mod = await findModById(dbId!);
                 if (!mod) throw new Error(`Mod #${dbId} not found`);

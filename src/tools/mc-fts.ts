@@ -13,7 +13,7 @@ import { mcPaths, fetchMcVersionList } from "../minecraft.js";
 import { isDecompileDone } from "../java-tools.js";
 import { exists } from "../cache.js";
 import { ensureMcVersion, findMcVersionById, findMcVersionByVersionId, updateMcVersion, upsertMcSourceFile, searchMcSourceFiles } from "../repositories/mcVersion.js";
-import { findModById, upsertModSourceFile, findModSourceFilesUnembedded, countUnembeddedModSourceFiles } from "../repositories/mod.js";
+import { findModById, upsertModSourceFile, findModSourceFilesUnembedded, countUnembeddedModSourceFiles, searchModSourceFiles } from "../repositories/mod.js";
 import { embed, isOllamaAvailable, chunkText } from "../embeddings.js";
 import { upsertSourceEmbedding, searchSourceByVector, countUnembedded, upsertModSourceEmbedding, searchModSourceByVector } from "../repositories/embeddings.js";
 
@@ -195,22 +195,19 @@ export async function searchMcSourceSemantic(
 // ── Mod source semantic index / search ────────────────────────────────────────
 
 /**
- * index_mod_source_semantic
- * Walks the decompiled source tree of a mod (by dbId), upserts each .java file
- * into mod_source_files, then embeds each file in batches using Ollama.
+ * index_mod_source_fts
+ * Walks the decompiled source tree of a mod and upserts every .java file into
+ * mod_source_files. This populates both the PostgreSQL GIN index and the SQLite
+ * FTS5 virtual table (via triggers) — no Ollama required.
+ * Safe to re-run; already-indexed files are updated in-place.
  */
-export async function indexModSourceSemantic(
+export async function indexModSourceFts(
     dbId: number,
-    batchSize = 50,
-): Promise<{ status: string; indexed: number; embedded: number; skipped: number; remaining: number }> {
-    if (!await isOllamaAvailable()) {
-        throw new Error("Ollama is not available. Set OLLAMA_URL and ensure Ollama is running with `ollama pull nomic-embed-text`.");
-    }
+): Promise<{ status: string; indexed: number; skipped: number }> {
     const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     if (!mod.decompPath) throw new Error(`Mod #${dbId} has no decompiled source. Run mod decompile first.`);
 
-    // Walk and upsert all .java files
     const javaFiles = await collectJavaFiles(mod.decompPath);
     let indexed = 0; let skipped = 0;
     const BATCH = 50;
@@ -225,10 +222,45 @@ export async function indexModSourceSemantic(
             } catch { skipped++; }
         }
     }
+    return { status: "done", indexed, skipped };
+}
+
+/**
+ * search_mod_source_indexed
+ * BM25-ranked FTS search over indexed mod source files.
+ * Works for any loader (fabric, neoforge, forge, quilt) — mods are filtered by dbId.
+ * Requires index_fts (or index_semantic) to have been run first.
+ */
+export async function searchModSourceIndexed(
+    dbId: number,
+    query: string,
+    limit = 20,
+): Promise<Array<{ className: string; snippet: string }>> {
+    const mod = await findModById(dbId);
+    if (!mod) throw new Error(`Mod #${dbId} not found`);
+    return searchModSourceFiles(dbId, query, limit);
+}
+
+/**
+ * index_mod_source_semantic
+ * Walks the decompiled source tree of a mod (by dbId), upserts each .java file
+ * into mod_source_files (also populates FTS index), then embeds each file in
+ * batches using Ollama.
+ */
+export async function indexModSourceSemantic(
+    dbId: number,
+    batchSize = 50,
+): Promise<{ status: string; indexed: number; embedded: number; skipped: number; remaining: number }> {
+    if (!await isOllamaAvailable()) {
+        throw new Error("Ollama is not available. Set OLLAMA_URL and ensure Ollama is running with `ollama pull nomic-embed-text`.");
+    }
+
+    // Reuse FTS indexer for the file-walk step (also populates FTS index)
+    const { indexed, skipped: walkSkipped } = await indexModSourceFts(dbId);
 
     // Embed in batches — always fetch from offset 0 so we never skip
     // unembedded rows that were inserted after a previous failed run
-    let embedded = 0;
+    let embedded = 0; let embedSkipped = 0;
     while (true) {
         const batch = await findModSourceFilesUnembedded(dbId, batchSize, 0);
         if (!batch.length) break;
@@ -238,14 +270,14 @@ export async function indexModSourceSemantic(
                 const vec = await embed(chunk);
                 await upsertModSourceEmbedding(file.id, vec);
                 embedded++;
-            } catch { skipped++; }
+            } catch { embedSkipped++; }
         }
         process.stdout.write(".");
         await new Promise(r => setTimeout(r, 50));
     }
 
     const remaining = await countUnembeddedModSourceFiles(dbId);
-    return { status: "done", indexed, embedded, skipped, remaining };
+    return { status: "done", indexed, embedded, skipped: walkSkipped + embedSkipped, remaining };
 }
 
 /**
