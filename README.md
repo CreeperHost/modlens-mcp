@@ -695,3 +695,11 @@ node dist/cli.js sync-modrinth 2
 node dist/cli.js check-updates 2
 ```
 
+---
+
+## Acknowledgements
+
+- **[CreeperHost](https://www.creeperhost.net)** — for providing the free [modpacks.ch](https://www.modpacks.ch) public API used for modpack search, sync, and mod downloads. No API key required thanks to them.
+- **[Vineflower](https://github.com/Vineflower/vineflower)** — the decompiler powering all Java source reconstruction.
+- **[Mojang](https://www.minecraft.net)** — for publishing official mappings and the Piston Meta API used for version discovery.
+
