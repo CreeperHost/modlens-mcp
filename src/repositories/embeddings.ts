@@ -97,3 +97,27 @@ export async function countUnembedded(table: "doc_entries" | "primers" | "mc_sou
     );
     return parseInt(rows[0].count, 10);
 }
+
+// ── mod_source_files ──────────────────────────────────────────────────────────
+
+export async function upsertModSourceEmbedding(id: number, vec: number[]): Promise<void> {
+    const db = await getDb();
+    await db.$executeRawUnsafe(
+        `UPDATE mod_source_files SET embedding = $1::vector WHERE id = $2`,
+        vecLiteral(vec), id,
+    );
+}
+
+export async function searchModSourceByVector(
+    vec: number[], modId: number, limit = 10,
+): Promise<Array<{ id: number; class_name: string; similarity: number }>> {
+    const db = await getDb();
+    return db.$queryRawUnsafe<Array<{ id: number; class_name: string; similarity: number }>>(
+        `SELECT id, class_name, (1 - (embedding <=> $1::vector))::float AS similarity
+         FROM mod_source_files
+         WHERE mod_id = $3 AND embedding IS NOT NULL
+         ORDER BY embedding <=> $1::vector
+         LIMIT $2`,
+        vecLiteral(vec), limit, modId,
+    );
+}

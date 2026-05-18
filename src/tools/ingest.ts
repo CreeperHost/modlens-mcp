@@ -2,7 +2,7 @@ import { parseJar, computeHashes } from "../processor.js";
 import { modrinthPlatformAdapter } from "../modrinth.js";
 import { curseforgePlatformAdapter } from "../curseforge.js";
 import type { PlatformHit } from "../platform-adapter.js";
-import { decompileJar, isDecompileDone } from "../java-tools.js";
+import { decompileJar, decompileJarJiJ, isDecompileDone } from "../java-tools.js";
 import { indexJar } from "../java-tools.js";
 import { paths, ensureDir } from "../cache.js";
 import { join } from "path";
@@ -255,7 +255,8 @@ export async function decompileMod(dbId: number): Promise<{ status: string; outD
     }
 
     // Kick off background decompile — returns in ~300ms
-    await decompileJar(mod.jarPath, outDir);
+    // decompileJarJiJ handles Fabric-style Jar-in-Jar bundles automatically
+    await decompileJarJiJ(mod.jarPath, outDir);
 
     return {
         status: "started",
@@ -307,7 +308,7 @@ export async function batchDecompileMods(opts?: {
         }
         if (state === "running") { alreadyDone++; return; }
         try {
-            await decompileJar(mod.jarPath, outDir);
+            await decompileJarJiJ(mod.jarPath, outDir);
             // Wait for Vineflower to finish (up to 15 minutes per mod)
             for (let i = 0; i < 450; i++) {
                 await new Promise<void>(r => setTimeout(r, 2000));

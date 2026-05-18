@@ -40,6 +40,7 @@ model Mod {
   classes       ModClass[]
   modTags       ModTag[]
   packFiles     PackFile[]
+  sourceFiles   ModSourceFile[]
 
   @@unique([modId, version, mcVersion, loader])
   @@index([modId])
@@ -151,7 +152,25 @@ model DocEntry {
   @@map("doc_entries")
 }
 
-// ── Version migration primers ─────────────────────────────────────────────────
+// ── Mod decompiled source files (for semantic + FTS search) ─────────────────
+// One row per .java file from a decompiled mod JAR.
+// Mirrors mc_source_files but scoped to ingested mods instead of vanilla MC.
+model ModSourceFile {
+  id        Int                      @id @default(autoincrement())
+  modId     Int                      @map("mod_id")
+  className String                   @map("class_name")
+  content   String
+  /// pgvector embedding — populated by mod index_semantic action
+  embedding Unsupported("vector")?   @map("embedding")
+
+  mod       Mod                      @relation(fields: [modId], references: [id], onDelete: Cascade)
+
+  @@unique([modId, className])
+  @@index([modId])
+  @@map("mod_source_files")
+}
+
+// ── Version migration primers ──────────────────────────────────────────────────────────
 // Documents that guide modders through upgrading mods from one MC/loader version to another.
 // fromDataVersion / toDataVersion store the integer data_version from mcmeta for numeric range queries.
 

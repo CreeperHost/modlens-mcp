@@ -21,7 +21,7 @@ import { readdir } from "fs/promises";
 import { join, resolve } from "path";
 import { backfillDocEmbeddings } from "./tools/docs.js";
 import { backfillPrimerEmbeddings } from "./tools/primers.js";
-import { indexMcSourceSemantic } from "./tools/mc-fts.js";
+import { indexMcSourceSemantic, indexModSourceSemantic } from "./tools/mc-fts.js";
 
 // ── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -467,6 +467,13 @@ try {
                 if (!version) die("--version=<mc-version> is required for --type=source");
                 console.log(`Embedding MC source for ${version}...`);
                 out(await indexMcSourceSemantic(version));
+            }
+            if (type === "mod") {
+                const dbId = flags.dbId as number | undefined;
+                if (!dbId) die("--db-id=<n> is required for --type=mod");
+                const batchSize = (flags.batchSize as number | undefined) ?? 50;
+                console.log(`Embedding mod source for dbId=${dbId} (batch=${batchSize})...`);
+                out(await indexModSourceSemantic(dbId, batchSize));
             }
             break;
         }

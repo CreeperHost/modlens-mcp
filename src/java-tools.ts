@@ -3,6 +3,7 @@ import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { tmpdir } from "os";
 import { paths, ensureDir, exists } from "./cache.js";
 
 const VINEFLOWER_URL =
@@ -221,4 +222,62 @@ export async function decompileJar(jarPath: string, outputDir: string): Promise<
     // Give the process a moment to confirm it actually started
     await new Promise<void>((res) => setTimeout(res, 300));
     if (!pid) throw new Error("Failed to spawn Vineflower process");
+}
+
+/**
+ * Decompile a JAR into outputDir, with Jar-in-Jar (JiJ) support.
+ * If the JAR contains nested JARs under META-INF/jars/ (Fabric API bundle pattern),
+ * each nested JAR is extracted to a temp dir, decompiled sequentially into outputDir,
+ * then the done sentinel is written once all are complete.
+ *
+ * For normal JARs (no nesting) this behaves identically to decompileJar().
+ */
+export async function decompileJarJiJ(jarPath: string, outputDir: string): Promise<void> {
+    const AdmZip = (await import("adm-zip")).default;
+    const { writeFile, mkdir } = await import("fs/promises");
+    const zip = new AdmZip(jarPath);
+    const nestedEntries = zip.getEntries().filter(
+        (e) => e.entryName.startsWith("META-INF/jars/") && e.entryName.endsWith(".jar")
+    );
+
+    if (nestedEntries.length === 0) {
+        // Plain JAR — use the original background launcher
+        return decompileJar(jarPath, outputDir);
+    }
+
+    const vf = await ensureVineflower();
+    const java = await findJava();
+    await mkdir(outputDir, { recursive: true });
+
+    // Remove stale sentinels
+    const { unlink } = await import("fs/promises");
+    await unlink(decompileSentinelDone(outputDir)).catch(() => {});
+    await unlink(decompileSentinelErr(outputDir)).catch(() => {});
+
+    // Kick off background worker that decompiles every nested JAR sequentially
+    (async () => {
+        const tmpDir = join(tmpdir(), "modlens-jij-" + Date.now());
+        await mkdir(tmpDir, { recursive: true });
+        try {
+            for (const entry of nestedEntries) {
+                const buf = zip.readFile(entry);
+                if (!buf) continue;
+                const nestedJarPath = join(tmpDir, entry.entryName.replace(/\//g, "_"));
+                await writeFile(nestedJarPath, buf);
+
+                // Run Vineflower synchronously per nested JAR
+                await new Promise<void>((resolve, reject) => {
+                    const proc = spawn(java, ["-jar", vf, nestedJarPath, outputDir], { stdio: "ignore" });
+                    proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`Vineflower exited ${code} for ${entry.entryName}`)));
+                    proc.on("error", reject);
+                });
+            }
+            await writeFile(decompileSentinelDone(outputDir), "0");
+        } catch (err) {
+            await writeFile(decompileSentinelErr(outputDir), String(err)).catch(() => {});
+        }
+    })();
+
+    // Brief pause to confirm the worker started
+    await new Promise<void>((res) => setTimeout(res, 300));
 }

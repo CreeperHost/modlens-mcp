@@ -14,7 +14,7 @@
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
-    "db:setup": "prisma migrate deploy && node scripts/create-fts-index.mjs",
+    "db:setup": "prisma migrate deploy && node scripts/create-fts-index.mjs && node scripts/migrate-mod-source-files.mjs",
     "db:vector": "node scripts/enable-pgvector.mjs",
     "db:studio": "prisma studio",
     "db:push:sqlite": "prisma db push --schema prisma/backends/schema.sqlite.prisma",

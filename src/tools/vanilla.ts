@@ -17,6 +17,8 @@ import { inspectClass, getBytecode, indexJar, decompileClass, decompileJar,
 import { exists, ensureDir } from "../cache.js";
 import { formatClassMembers } from "../access-flags.js";
 import { ensureMcVersion, updateMcVersion } from "../repositories/mcVersion.js";
+import { findModByModIdLike } from "../repositories/mod.js";
+import { searchSource } from "./source.js";
 
 // ── Index cache (disk-backed per version, mirroring mcsrc's index-manager) ───
 
@@ -578,13 +580,75 @@ export async function analyzeMixin(source: string, mcVersion: string) {
 export async function searchEvents(
     version: string,
     query?: string,
-    modloader: "minecraft" | "neoforge" = "minecraft",
+    modloader: "minecraft" | "neoforge" | "fabric" | "fabric-api" = "minecraft",
 ): Promise<object> {
-    // Event base class patterns per loader
-    const eventBases = modloader === "neoforge"
-        ? ["net.neoforged.bus.api.Event", "net.minecraftforge.eventbus.api.Event"]
-        : ["net.minecraft.server.level.progress", "net.minecraft.world.level"];
+    // ── NeoForge / Fabric: search the ingested loader mod's decompiled source ─
+    const isFabric = modloader === "fabric" || modloader === "fabric-api";
+    if (modloader === "neoforge" || isFabric) {
+        // Fabric API may be ingested under modId "fabric-api" or "fabric"; try both
+        const candidateIds = isFabric ? ["fabric-api", "fabric"] : ["neoforge"];
+        let mod = null;
+        for (const id of candidateIds) {
+            mod = await findModByModIdLike(id);
+            if (mod) break;
+        }
+        if (!mod) {
+            throw new Error(
+                `${modloader === "neoforge" ? "NeoForge" : "Fabric API"} has not been ingested. ` +
+                `Run mc_versions ingest_${modloader === "neoforge" ? "neoforge" : "fabric"} first.`
+            );
+        }
 
+        // Pattern differs per loader:
+        //   NeoForge: classes extending Event (class-based event bus)
+        //   Fabric:   static Event<T> field declarations (callback-based)
+        const searchPattern = modloader === "neoforge"
+            ? (query ? `class\\s+\\w*${query}\\w*\\s+extends\\s+[\\w.]*Event\\b` : `extends\\s+[\\w.]*Event\\b`)
+            : (query ? `Event<.*${query}` : `public\\s+static\\s+final\\s+Event<`);
+
+        const raw = await searchSource(searchPattern, mod.id, true, 200);
+
+        // Fabric API is a Jar-in-Jar bundle — decompiled source may be empty.
+        // Fall back to class name search when no source results are found.
+        let events: Array<{ className: string; file: string; line: number }>;
+        if (raw.length === 0 && isFabric) {
+            const { listClasses: listJarClasses } = await import("../jar.js");
+            const allClasses = listJarClasses(mod.jarPath)
+                .map((c) => c.replace(/\.class$/, "").replace(/\//g, "."))
+                .filter((c) => !c.includes("$")); // hide inner classes
+            const q = query?.toLowerCase();
+            const matched = q
+                ? allClasses.filter((c) => c.toLowerCase().includes(q) && c.toLowerCase().includes("event"))
+                : allClasses.filter((c) => c.toLowerCase().includes("event"));
+            events = matched.map((c) => ({ className: c, file: c.replace(/\./g, "/") + ".class", line: 0 }));
+        } else {
+            const seen = new Set<string>();
+            events = [];
+            for (const r of raw) {
+                if (!seen.has(r.file)) {
+                    seen.add(r.file);
+                    const parts = r.file.replace(/\.java$/, "").split(/[\\/]/);
+                    events.push({ className: parts.join("."), file: r.file, line: r.line });
+                }
+            }
+        }
+
+        const note = modloader === "neoforge"
+            ? "extends net.neoforged.bus.api.Event"
+            : "public static final Event<T> (Fabric callback pattern)";
+        return {
+            version,
+            modloader,
+            modDbId: mod.id,
+            modVersion: mod.version,
+            query: query ?? "(all events)",
+            count: events.length,
+            note,
+            events,
+        };
+    }
+
+    // ── Vanilla Minecraft: search decompiled MC source ────────────────────────
     const outDir = mcPaths.decompiled(version);
     const status = await isDecompileDone(outDir);
     if (status !== "done") {
@@ -593,28 +657,21 @@ export async function searchEvents(
         );
     }
 
-    // Search for classes extending Event-like bases using content search
-    const eventPattern = modloader === "neoforge"
-        ? `extends\\s+(\\w+\\.)*Event\\b`
-        : `extends\\s+(\\w+\\.)*Event\\b`;
-
     const results = await searchMcCode(
         version,
         query
             ? `class ${query}[\\w]* extends [\\w.]*Event`
             : `extends [\\w.]*Event\\b`,
         "content",
-        true,  // isRegex
+        true,
         200,
     );
 
-    // Deduplicate by file
     const seen = new Set<string>();
     const events: Array<{ className: string; file: string; line: number }> = [];
     for (const r of results) {
         if (!seen.has(r.file)) {
             seen.add(r.file);
-            // Extract class name from file path (e.g. net/minecraft/something/FooEvent.java)
             const parts = r.file.replace(/\.java$/, "").split("/");
             events.push({ className: parts.join("."), file: r.file, line: r.line });
         }
@@ -625,7 +682,7 @@ export async function searchEvents(
         modloader,
         query: query ?? "(all events)",
         count: events.length,
-        note: eventBases.map(b => `extends ${b}`).join(" | "),
+        note: "extends net.minecraft.*Event",
         events,
     };
 }

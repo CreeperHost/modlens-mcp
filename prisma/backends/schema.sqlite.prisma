@@ -40,6 +40,7 @@ model Mod {
 
   classes       ModClass[]
   modTags       ModTag[]
+  sourceFiles   ModSourceFile[]
 
   @@unique([modId, version, mcVersion, loader])
   @@index([modId])
@@ -111,6 +112,20 @@ model McSourceFile {
   @@unique([mcVersionId, className])
   @@index([mcVersionId])
   @@map("mc_source_files")
+}
+
+model ModSourceFile {
+  id        Int      @id @default(autoincrement())
+  modId     Int      @map("mod_id")
+  className String   @map("class_name")
+  content   String
+  embedding Bytes?
+
+  mod       Mod      @relation(fields: [modId], references: [id], onDelete: Cascade)
+
+  @@unique([modId, className])
+  @@index([modId])
+  @@map("mod_source_files")
 }
 
 model DocEntry {

@@ -13,8 +13,9 @@ import { mcPaths, fetchMcVersionList } from "../minecraft.js";
 import { isDecompileDone } from "../java-tools.js";
 import { exists } from "../cache.js";
 import { ensureMcVersion, findMcVersionById, findMcVersionByVersionId, updateMcVersion, upsertMcSourceFile, searchMcSourceFiles } from "../repositories/mcVersion.js";
+import { findModById, upsertModSourceFile, findModSourceFilesUnembedded, countUnembeddedModSourceFiles } from "../repositories/mod.js";
 import { embed, isOllamaAvailable, chunkText } from "../embeddings.js";
-import { upsertSourceEmbedding, searchSourceByVector, countUnembedded } from "../repositories/embeddings.js";
+import { upsertSourceEmbedding, searchSourceByVector, countUnembedded, upsertModSourceEmbedding, searchModSourceByVector } from "../repositories/embeddings.js";
 
 async function ensureMcVersionRecord(version: string): Promise<number> {
     return ensureMcVersion(version);
@@ -192,4 +193,82 @@ export async function searchMcSourceSemantic(
     const vec = await embed(query);
     const rows = await searchSourceByVector(vec, row.id, limit);
     return rows.map(r => ({ className: r.class_name, similarity: Math.round(r.similarity * 1000) / 1000 }));
+}
+
+// ── Mod source semantic index / search ────────────────────────────────────────
+
+/**
+ * index_mod_source_semantic
+ * Walks the decompiled source tree of a mod (by dbId), upserts each .java file
+ * into mod_source_files, then embeds each file in batches using Ollama.
+ */
+export async function indexModSourceSemantic(
+    dbId: number,
+    batchSize = 50,
+): Promise<{ status: string; indexed: number; embedded: number; skipped: number; remaining: number }> {
+    if (!await isOllamaAvailable()) {
+        throw new Error("Ollama is not available. Set OLLAMA_URL and ensure Ollama is running with `ollama pull nomic-embed-text`.");
+    }
+    const mod = await findModById(dbId);
+    if (!mod) throw new Error(`Mod #${dbId} not found`);
+    if (!mod.decompPath) throw new Error(`Mod #${dbId} has no decompiled source. Run mod decompile first.`);
+
+    // Walk and upsert all .java files
+    const javaFiles = await collectJavaFiles(mod.decompPath);
+    let indexed = 0; let skipped = 0;
+    const BATCH = 50;
+    for (let i = 0; i < javaFiles.length; i += BATCH) {
+        for (const filePath of javaFiles.slice(i, i + BATCH)) {
+            const relPath = relative(mod.decompPath, filePath);
+            const className = relPath.replace(/\\/g, "/").replace(/\.java$/, "");
+            try {
+                const content = await readFile(filePath, "utf8");
+                await upsertModSourceFile(dbId, className, content);
+                indexed++;
+            } catch { skipped++; }
+        }
+    }
+
+    // Embed in batches
+    let embedded = 0; let offset = 0;
+    while (true) {
+        const batch = await findModSourceFilesUnembedded(dbId, batchSize, offset);
+        if (!batch.length) break;
+        for (const file of batch) {
+            try {
+                const chunk = chunkText(file.content, 1500)[0];
+                const vec = await embed(chunk);
+                await upsertModSourceEmbedding(file.id, vec);
+                embedded++;
+            } catch { skipped++; }
+        }
+        offset += batch.length;
+        await new Promise(r => setTimeout(r, 50));
+    }
+
+    const remaining = await countUnembeddedModSourceFiles(dbId);
+    return { status: "done", indexed, embedded, skipped, remaining };
+}
+
+/**
+ * search_mod_source_semantic
+ * Semantic (vector) search over embedded mod source files for a given dbId.
+ */
+export async function searchModSourceSemantic(
+    query: string,
+    dbId: number,
+    limit = 10,
+): Promise<Array<{ className: string; modId: string; similarity: number }>> {
+    if (!await isOllamaAvailable()) {
+        throw new Error("Ollama is not available. Set OLLAMA_URL and ensure Ollama is running with `ollama pull nomic-embed-text`.");
+    }
+    const mod = await findModById(dbId);
+    if (!mod) throw new Error(`Mod #${dbId} not found`);
+    const vec = await embed(query);
+    const rows = await searchModSourceByVector(vec, dbId, limit);
+    return rows.map(r => ({
+        className: r.class_name,
+        modId: mod.modId,
+        similarity: Math.round(r.similarity * 1000) / 1000,
+    }));
 }

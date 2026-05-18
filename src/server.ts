@@ -33,7 +33,7 @@ import {
     decompileMcVersion, decompileMcVersionStatus, searchMcCode,
     validateAccessWidener, analyzeMixin, searchEvents,
 } from "./tools/vanilla.js";
-import { indexMcVersion, searchMcIndexed, indexMcSourceSemantic, searchMcSourceSemantic } from "./tools/mc-fts.js";
+import { indexMcVersion, searchMcIndexed, indexMcSourceSemantic, searchMcSourceSemantic, indexModSourceSemantic, searchModSourceSemantic } from "./tools/mc-fts.js";
 import { findMapping, remapModJar, getParchment, listParchmentVersions, getParchmentSummary } from "./tools/mappings.js";
 import { ingestDocumentation, getDocumentation, searchDocumentation, listDocumentation, deleteDocumentation, seedDefaultDocumentation, semanticSearchDocumentation, backfillDocEmbeddings } from "./tools/docs.js";
 import {
@@ -106,13 +106,13 @@ function out(result: unknown): { content: Array<{ type: "text"; text: string }> 
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile. Omit dbId on search_source to grep all decompiled mods. batch_ingest replace=true removes old modId row first. batch_decompile decompiles all not-yet-decompiled mods with concurrency control.",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_semantic|search_semantic. Omit dbId on search_source to grep all decompiled mods. batch_ingest replace=true removes old modId row first. batch_decompile decompiles all not-yet-decompiled mods with concurrency control. index_semantic/search_semantic require Ollama running.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
             "version_conflicts","source_urls","decompile","decompile_status",
             "decompile_class","source","search_source","reindex","batch_ingest",
-            "batch_decompile",
+            "batch_decompile","index_semantic","search_semantic",
         ]),
         jarPath:      z.string().optional(),
         modId:        z.union([z.string(), z.number()]).optional().describe("mod ID or DB id"),
@@ -153,6 +153,8 @@ server.tool(
             case "reindex":          result = await reindexClasses(dbId); break;
             case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false, replace ?? false); break;
             case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2) }); break;
+            case "index_semantic":   result = await indexModSourceSemantic(dbId!, (limit as number | undefined) ?? 50); break;
+            case "search_semantic":  result = await searchModSourceSemantic(query!, dbId!, limit ?? 10); break;
         }
         return out(result);
     }
@@ -401,7 +403,7 @@ server.tool(
         searchType: z.enum(["class","method","field","content","all"]).optional(),
         isRegex:    z.boolean().optional(),
         force:      z.boolean().optional(),
-        modloader:  z.enum(["minecraft","neoforge"]).optional(),
+        modloader:  z.enum(["minecraft","neoforge","fabric","fabric-api"]).optional(),
         content:    z.string().optional().describe("Full .accesswidener file text (validate_aw)"),
         source:     z.string().optional().describe("Full mixin Java source code (analyze_mixin)"),
         startLine:  z.number().optional().describe("1-based start line"),
@@ -410,25 +412,26 @@ server.tool(
         limit:      z.number().optional(),
     },
     async ({ action, version, versionA, versionB, mcVersion, query, className, target, searchType, isRegex, force, modloader, content, source, startLine, endLine, maxLines, limit }) => {
+        const v = version ?? mcVersion;
         let result: unknown;
         switch (action) {
-            case "search_class":    result = await searchMinecraftClass(version!, query!); break;
-            case "get_source":      result = await getMinecraftSource(version!, className!, startLine, endLine, maxLines); break;
-            case "bytecode":        result = await getMcClassBytecode(version!, className!); break;
-            case "class_members":   result = await getMcClassMembers(version!, className!); break;
-            case "find_refs":       result = await findMcReferences(version!, target!); break;
-            case "inheritance":     result = await getMcInheritance(version!, className!); break;
+            case "search_class":    result = await searchMinecraftClass(v!, query!); break;
+            case "get_source":      result = await getMinecraftSource(v!, className!, startLine, endLine, maxLines); break;
+            case "bytecode":        result = await getMcClassBytecode(v!, className!); break;
+            case "class_members":   result = await getMcClassMembers(v!, className!); break;
+            case "find_refs":       result = await findMcReferences(v!, target!); break;
+            case "inheritance":     result = await getMcInheritance(v!, className!); break;
             case "diff":            result = await diffMcVersions(versionA!, versionB!); break;
-            case "decompile":       result = await decompileMcVersion(version!, force ?? false); break;
-            case "decompile_status":result = await decompileMcVersionStatus(version!); break;
-            case "search_code":     result = await searchMcCode(version!, query!, searchType ?? "content", isRegex ?? false, limit ?? 50); break;
-            case "index":           result = await indexMcVersion(version!, force ?? false); break;
-            case "search_indexed":  result = await searchMcIndexed(query!, version!, limit ?? 20); break;
-            case "search_events":   result = await searchEvents(version!, query, modloader as any); break;
-            case "validate_aw":     result = await validateAccessWidener(content!, mcVersion ?? version!); break;
-            case "analyze_mixin":   result = await analyzeMixin(source!, mcVersion ?? version!); break;
-            case "index_semantic":  result = await indexMcSourceSemantic(version!, (limit as number | undefined) ?? 50); break;
-            case "search_semantic": result = await searchMcSourceSemantic(query!, version!, limit ?? 10); break;
+            case "decompile":       result = await decompileMcVersion(v!, force ?? false); break;
+            case "decompile_status":result = await decompileMcVersionStatus(v!); break;
+            case "search_code":     result = await searchMcCode(v!, query!, searchType ?? "content", isRegex ?? false, limit ?? 50); break;
+            case "index":           result = await indexMcVersion(v!, force ?? false); break;
+            case "search_indexed":  result = await searchMcIndexed(query!, v!, limit ?? 20); break;
+            case "search_events":   result = await searchEvents(v!, query, modloader as any); break;
+            case "validate_aw":     result = await validateAccessWidener(content!, v!); break;
+            case "analyze_mixin":   result = await analyzeMixin(source!, v!); break;
+            case "index_semantic":  result = await indexMcSourceSemantic(v!, (limit as number | undefined) ?? 50); break;
+            case "search_semantic": result = await searchMcSourceSemantic(query!, v!, limit ?? 10); break;
         }
         return out(result);
     }
@@ -452,13 +455,15 @@ server.tool(
         mcVersion: z.string().optional(),
     },
     async ({ action, symbol, version, sourceNs, targetNs, inputJar, outputJar, toMapping, className, mcVersion }) => {
+        const v = version ?? mcVersion;
+        const mv = mcVersion ?? version;
         let result: unknown;
         switch (action) {
-            case "find":              result = await findMapping(symbol!, version!, sourceNs!, targetNs!); break;
-            case "remap":             result = await remapModJar(inputJar!, outputJar!, version!, toMapping!); break;
-            case "parchment":         result = await getParchment(className!, mcVersion!); break;
-            case "list_parchment":    result = await listParchmentVersions(mcVersion!); break;
-            case "parchment_summary": result = await getParchmentSummary(mcVersion!); break;
+            case "find":              result = await findMapping(symbol!, v!, sourceNs!, targetNs!); break;
+            case "remap":             result = await remapModJar(inputJar!, outputJar!, v!, toMapping!); break;
+            case "parchment":         result = await getParchment(className!, mv!); break;
+            case "list_parchment":    result = await listParchmentVersions(mv!); break;
+            case "parchment_summary": result = await getParchmentSummary(mv!); break;
         }
         return out(result);
     }

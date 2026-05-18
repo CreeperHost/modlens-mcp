@@ -393,3 +393,48 @@ export async function listModTagNamespaces() {
     });
     return rows;
 }
+
+// ── ModSourceFile queries ─────────────────────────────────────────────────────
+
+export async function upsertModSourceFile(
+    modId: number,
+    className: string,
+    content: string,
+): Promise<number> {
+    const db = await getDb();
+    const row = await db.modSourceFile.upsert({
+        where: { modId_className: { modId, className } },
+        create: { modId, className, content },
+        update: { content },
+        select: { id: true },
+    });
+    return row.id;
+}
+
+export async function countModSourceFiles(modId: number): Promise<number> {
+    const db = await getDb();
+    return db.modSourceFile.count({ where: { modId } });
+}
+
+export async function findModSourceFilesUnembedded(
+    modId: number,
+    limit: number,
+    offset: number,
+): Promise<Array<{ id: number; className: string; content: string }>> {
+    const db = await getDb();
+    return db.$queryRawUnsafe<Array<{ id: number; className: string; content: string }>>(
+        `SELECT id, class_name AS "className", content FROM mod_source_files
+         WHERE mod_id = $1 AND embedding IS NULL
+         ORDER BY id LIMIT $2 OFFSET $3`,
+        modId, limit, offset,
+    );
+}
+
+export async function countUnembeddedModSourceFiles(modId: number): Promise<number> {
+    const db = await getDb();
+    const rows = await db.$queryRawUnsafe<[{ count: string }]>(
+        `SELECT COUNT(*)::text AS count FROM mod_source_files WHERE mod_id = $1 AND embedding IS NULL`,
+        modId,
+    );
+    return parseInt(rows[0].count, 10);
+}

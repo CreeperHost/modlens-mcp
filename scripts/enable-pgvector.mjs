@@ -30,7 +30,7 @@ async function main() {
 
     // 2. Add or resize embedding columns
     const dim = parseInt(process.env.OLLAMA_EMBED_DIM ?? "768", 10);
-    for (const table of ["doc_entries", "primers", "mc_source_files"]) {
+    for (const table of ["doc_entries", "primers", "mc_source_files", "mod_source_files"]) {
         // Check existing column dimension (atttypmod = dimension for pgvector)
         const rows = await prisma.$queryRawUnsafe(
             `SELECT atttypmod AS dim FROM pg_attribute
@@ -60,9 +60,10 @@ async function main() {
 
     // 3. HNSW indexes for fast approximate nearest-neighbour
     const indexes = [
-        ["doc_entries_embedding_idx",    "doc_entries"],
-        ["primers_embedding_idx",        "primers"],
-        ["mc_source_files_embedding_idx","mc_source_files"],
+        ["doc_entries_embedding_idx",     "doc_entries"],
+        ["primers_embedding_idx",         "primers"],
+        ["mc_source_files_embedding_idx", "mc_source_files"],
+        ["mod_source_files_embedding_idx","mod_source_files"],
     ];
     for (const [idxName, table] of indexes) {
         const existing = await prisma.$queryRawUnsafe(
