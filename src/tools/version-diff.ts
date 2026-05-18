@@ -473,16 +473,51 @@ export interface ModVersionDiffResult extends VersionDiffResult {
     modB: { id: number; modId: string; version: string };
 }
 
+// ── Mod diff DB cache helpers ─────────────────────────────────────────────────
+
+async function readCachedModDiff(
+    dbIdA: number, dbIdB: number, pkgHash: string,
+): Promise<ModVersionDiffResult | null> {
+    try {
+        const db = await getDb();
+        const row = await (db as any).modVersionDiff.findUnique({
+            where: { modDbIdA_modDbIdB_packagesHash: { modDbIdA: dbIdA, modDbIdB: dbIdB, packagesHash: pkgHash } },
+        });
+        if (!row) return null;
+        const raw = detectBackend() === "sqlite" ? JSON.parse(row.result as string) : row.result;
+        return raw as ModVersionDiffResult;
+    } catch {
+        return null;
+    }
+}
+
+async function writeCachedModDiff(
+    dbIdA: number, dbIdB: number, pkgHash: string, result: ModVersionDiffResult,
+): Promise<void> {
+    try {
+        const db = await getDb();
+        const resultData = detectBackend() === "sqlite" ? JSON.stringify(result) : result;
+        await (db as any).modVersionDiff.upsert({
+            where: { modDbIdA_modDbIdB_packagesHash: { modDbIdA: dbIdA, modDbIdB: dbIdB, packagesHash: pkgHash } },
+            update: { result: resultData },
+            create: { modDbIdA: dbIdA, modDbIdB: dbIdB, packagesHash: pkgHash, result: resultData },
+        });
+    } catch {
+        // Non-fatal
+    }
+}
+
 /**
  * Produces a detailed AST-level diff between two ingested mod versions.
  * Uses the same ClassDiff / breaking-change logic as diffMcVersionsDetailed.
- * No DB caching — mod JARs index in seconds.
  *
- * @param dbIdA    DB id of the older mod version
- * @param dbIdB    DB id of the newer mod version
- * @param packages Optional slash-prefix filter (e.g. ["com/example/mymod"])
+ * @param dbIdA      DB id of the older mod version
+ * @param dbIdB      DB id of the newer mod version
+ * @param packages   Optional slash-prefix filter (e.g. ["com/example/mymod"])
  * @param maxClasses Cap on changed-class output (default 200)
- * @param semantic Enrich with Ollama embedding similarity (requires mod index_semantic)
+ * @param semantic   Enrich with Ollama embedding similarity (requires mod index_semantic)
+ * @param cache      When true: read from DB cache first, write result to DB after compute
+ * @param force      When true (implies cache=true): skip cache read, recompute, write to cache
  */
 export async function diffModVersionsDetailed(
     dbIdA: number,
@@ -490,11 +525,21 @@ export async function diffModVersionsDetailed(
     packages?: string[],
     maxClasses = 200,
     semantic = false,
+    cache = false,
+    force = false,
 ): Promise<ModVersionDiffResult> {
     const { findModById } = await import("../repositories/mod.js");
     const [modA, modB] = await Promise.all([findModById(dbIdA), findModById(dbIdB)]);
     if (!modA) throw new Error(`Mod #${dbIdA} not found`);
     if (!modB) throw new Error(`Mod #${dbIdB} not found`);
+
+    const useCache = cache || force;
+    const pkgHash = buildPackagesHash(packages);
+
+    if (useCache && !force) {
+        const cached = await readCachedModDiff(dbIdA, dbIdB, pkgHash);
+        if (cached) return cached;
+    }
 
     const [indexA, indexB] = await Promise.all([
         indexJar(modA.jarPath),
@@ -550,15 +595,21 @@ export async function diffModVersionsDetailed(
         changed: changed.slice(0, maxClasses),
     };
 
-    if (semantic && await isOllamaAvailable()) {
-        base.changed = await enrichModWithSemanticScores(base.changed, dbIdA, dbIdB);
-    }
-
-    return {
+    const result: ModVersionDiffResult = {
         ...base,
         modA: { id: dbIdA, modId: modA.modId, version: modA.version },
         modB: { id: dbIdB, modId: modB.modId, version: modB.version },
     };
+
+    if (useCache) {
+        await writeCachedModDiff(dbIdA, dbIdB, pkgHash, result);
+    }
+
+    if (semantic && await isOllamaAvailable()) {
+        result.changed = await enrichModWithSemanticScores(result.changed, dbIdA, dbIdB);
+    }
+
+    return result;
 }
 
 /**

@@ -104,6 +104,24 @@ model McVersionDiff {
   @@map("mc_version_diffs")
 }
 
+// ── Cached AST-level mod version diffs ────────────────────────────────────────
+// Keyed by (modDbIdA, modDbIdB, packagesHash). Integer IDs are stable per-JAR row.
+// Mirrors McVersionDiff but for mod-to-mod comparisons.
+
+model ModVersionDiff {
+  id           Int      @id @default(autoincrement())
+  modDbIdA     Int      @map("mod_db_id_a")
+  modDbIdB     Int      @map("mod_db_id_b")
+  /// SHA-1 prefix of sorted joined packages filter, or "all" when no filter
+  packagesHash String   @default("all") @map("packages_hash")
+  result       Json
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([modDbIdA, modDbIdB, packagesHash])
+  @@index([modDbIdA, modDbIdB])
+  @@map("mod_version_diffs")
+}
+
 // ── Mod-shipped tag files ──────────────────────────────────────────────────────
 // One row per data/<namespace>/tags/<registry>/<path>.json file found in a mod JAR.
 // tagPath  = "<namespace>:<subpath>"  e.g. "c:ores/iron", "forge:storage_blocks"
