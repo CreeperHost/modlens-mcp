@@ -699,7 +699,29 @@ node dist/cli.js check-updates 2
 
 ## Acknowledgements
 
-- **[CreeperHost](https://www.creeperhost.net)** — for providing the free [modpacks.ch](https://www.modpacks.ch) public API used for modpack search, sync, and mod downloads. No API key required thanks to them.
+### Services & APIs
+- **[CreeperHost](https://www.creeperhost.net)** — for the free [modpacks.ch](https://www.modpacks.ch) public API powering modpack search, sync, and mod downloads.
+- **[misode](https://github.com/misode)** — for [mcmeta](https://github.com/misode/mcmeta), the version-controlled Minecraft data repository that powers the `mc_data`, `mc_files`, and `mc_registry` tools, and for [mcsrc.dev](https://mcsrc.dev) whose source browsing and class analysis features inspired our `mc_source` tool.
+- **[Mojang](https://www.minecraft.net)** — for publishing official Mojmap mappings and the Piston Meta API used for version discovery and JAR downloads.
+
+### Modloader teams
+- **[NeoForged team](https://github.com/neoforged/NeoForge)** — for the [NeoForge documentation](https://docs.neoforged.net) seeded into the docs database out of the box.
+- **[FabricMC team](https://github.com/FabricMC)** — for the [Fabric Wiki](https://fabricmc.net/wiki) and [Yarn mappings](https://github.com/FabricMC/yarn) seeded into the docs database, and for Intermediary mappings used by the `mappings` tool.
+- **[MinecraftForge team](https://github.com/MinecraftForge)** — for the Forge migration changelogs seeded into the primers database.
+
+### Community contributors
+- **[ApexModder](https://github.com/ApexModder)** — for NeoForge update primers and migration guides included in the default primers database.
+- **[ParchmentMC](https://parchmentmc.org)** — for [Parchment](https://github.com/ParchmentMC/Parchment), the community-maintained parameter names and javadocs layered on top of Mojmap used by the `mappings` tool.
+
+### Tooling & libraries
 - **[Vineflower](https://github.com/Vineflower/vineflower)** — the decompiler powering all Java source reconstruction.
-- **[Mojang](https://www.minecraft.net)** — for publishing official mappings and the Piston Meta API used for version discovery.
+- **[Model Context Protocol SDK](https://github.com/modelcontextprotocol/typescript-sdk)** — the MCP server/client framework this tool is built on.
+- **[Prisma](https://www.prisma.io)** — ORM powering multi-backend database support (PostgreSQL, PGlite, SQLite).
+- **[pgvector](https://github.com/pgvector/pgvector)** — PostgreSQL vector extension enabling semantic search.
+- **[Ollama](https://ollama.com)** — local LLM runtime used for generating semantic embeddings.
+- **[Electric SQL / PGlite](https://github.com/electric-sql/pglite)** — embedded Postgres for zero-Docker deployments.
+- **[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)** / **[sqlite-vec](https://github.com/asg017/sqlite-vec)** — SQLite backend and vector search extension.
+- **[Zod](https://zod.dev)** — runtime schema validation for all MCP tool parameters.
+- **[clack](https://github.com/bombshell-dev/clack)** — the interactive setup wizard TUI.
+- **[adm-zip](https://github.com/cthackers/adm-zip)** — JAR/ZIP extraction used throughout the ingestion pipeline.
 
