@@ -1,10 +1,20 @@
 import { spawn } from "child_process";
-import { createWriteStream } from "fs";
+import { createWriteStream, mkdirSync } from "fs";
 import { pipeline } from "stream/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { tmpdir } from "os";
-import { paths, ensureDir, exists } from "./cache.js";
+import { paths, ensureDir, exists, CACHE_ROOT } from "./cache.js";
+
+/** Directory where JVM crash logs (hs_err_pid*.log) are written. */
+const JVM_LOG_DIR = join(CACHE_ROOT, "logs");
+
+/** JVM flags to redirect crash logs away from cwd into the cache dir. */
+function jvmErrorFlags(): string[] {
+    try { mkdirSync(JVM_LOG_DIR, { recursive: true }); } catch { /* ignore */ }
+    const pat = join(JVM_LOG_DIR, "hs_err_pid%p.log").replace(/\\/g, "/");
+    return [`-XX:ErrorFile=${pat}`];
+}
 
 const VINEFLOWER_URL =
     "https://repo1.maven.org/maven2/org/vineflower/vineflower/1.10.1/vineflower-1.10.1.jar";
@@ -85,7 +95,7 @@ async function findJava(): Promise<string> {
 
 async function runJava(args: string[]): Promise<string> {
     const java = await findJava();
-    return runProcess(java, args);
+    return runProcess(java, [...jvmErrorFlags(), ...args]);
 }
 
 export async function ensureIndexer(): Promise<string> {
@@ -195,7 +205,7 @@ export async function decompileJar(jarPath: string, outputDir: string): Promise<
     const { writeFile } = await import("fs/promises");
 
     // Spawn detached so the MCP process doesn't block waiting for it
-    const proc = spawn(java, ["-jar", vf, jarPath, outputDir], {
+    const proc = spawn(java, [...jvmErrorFlags(), "-jar", vf, jarPath, outputDir], {
         stdio: "ignore",
         detached: true,
     });
@@ -267,7 +277,7 @@ export async function decompileJarJiJ(jarPath: string, outputDir: string): Promi
 
                 // Run Vineflower synchronously per nested JAR
                 await new Promise<void>((resolve, reject) => {
-                    const proc = spawn(java, ["-jar", vf, nestedJarPath, outputDir], { stdio: "ignore" });
+                    const proc = spawn(java, [...jvmErrorFlags(), "-jar", vf, nestedJarPath, outputDir], { stdio: "ignore" });
                     proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`Vineflower exited ${code} for ${entry.entryName}`)));
                     proc.on("error", reject);
                 });
