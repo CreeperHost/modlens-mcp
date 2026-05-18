@@ -6,6 +6,7 @@ import { decompileJar, decompileJarJiJ, isDecompileDone } from "../java-tools.js
 import { indexJar } from "../java-tools.js";
 import { paths, ensureDir } from "../cache.js";
 import { join } from "path";
+import { normalizeJarPath } from "../security.js";
 import { isOllamaAvailable } from "../embeddings.js";
 import { enqueueModEmbed } from "../embed-queue.js";
 import {
@@ -49,6 +50,7 @@ async function lookupPlatforms(
 // ── Main ingest ───────────────────────────────────────────────────────────────
 
 export async function ingestMod(jarPath: string, skipSource = false, replace = false): Promise<IngestResult> {
+    jarPath = normalizeJarPath(jarPath);
     const existing = await findModByJarPath(jarPath);
     if (existing) return { status: "already_ingested", mod: existing };
 
@@ -171,7 +173,7 @@ export async function batchIngest(
     const { readdir } = await import("fs/promises");
     const { join, resolve } = await import("path");
 
-    const absDir = resolve(directory);
+    const absDir = resolve(normalizeJarPath(directory));
     let entries: string[];
     try {
         entries = await readdir(absDir);

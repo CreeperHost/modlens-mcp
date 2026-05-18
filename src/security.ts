@@ -1,6 +1,31 @@
 import { resolve, relative, isAbsolute, sep } from "path";
 import { createHash } from "crypto";
 import { readFile } from "fs/promises";
+import { platform } from "os";
+
+// ── WSL path normalization ────────────────────────────────────────────────────
+
+/**
+ * Normalizes a path that may have been typed from a WSL shell or a Windows
+ * shell so both work transparently.
+ *
+ * On Windows:
+ *   /mnt/c/foo/bar.jar  →  C:/foo/bar.jar
+ *   /mnt/wsl/foo.jar    →  left as-is (no drive letter, unlikely to be valid Win path)
+ *   C:\foo\bar.jar      →  left as-is (already Windows)
+ *
+ * On Linux/macOS: returned unchanged (WSL paths are native there).
+ */
+export function normalizeJarPath(p: string): string {
+    if (platform() !== "win32") return p;
+    const m = p.match(/^\/mnt\/([a-zA-Z])(\/.*)?$/);
+    if (m) {
+        const drive = m[1].toUpperCase();
+        const rest = (m[2] ?? "").replace(/\//g, "\\");
+        return `${drive}:${rest || "\\"}`;
+    }
+    return p;
+}
 
 // ── Path traversal guard ──────────────────────────────────────────────────────
 

@@ -6,7 +6,7 @@ vi.mock("../jar.js", () => ({ listEntries: vi.fn(), extractEntry: vi.fn() }));
 vi.mock("../repositories/mod.js", () => ({
     listModsSlim: vi.fn(),
 }));
-vi.mock("../security.js", () => ({ validatePath: vi.fn() }));
+vi.mock("../security.js", () => ({ validatePath: vi.fn(), normalizeJarPath: (p: string) => p }));
 vi.mock("../db.js", () => ({
     getDb: vi.fn().mockResolvedValue({
         $queryRawUnsafe: vi.fn().mockResolvedValue([]),

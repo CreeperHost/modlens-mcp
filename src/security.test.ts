@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validatePath, safeRegex, fileSha512, verifyFileHash, HashMismatchError } from "./security.js";
+import { validatePath, safeRegex, fileSha512, verifyFileHash, HashMismatchError, normalizeJarPath } from "./security.js";
 import { tmpdir } from "os";
 import { writeFile, unlink } from "fs/promises";
 import { join } from "path";
@@ -118,5 +118,40 @@ describe("verifyFileHash", () => {
         } finally {
             await unlink(tmpFile).catch(() => {});
         }
+    });
+});
+
+// ── normalizeJarPath ──────────────────────────────────────────────────────────
+
+describe("normalizeJarPath", () => {
+    const isWin = process.platform === "win32";
+
+    it("converts /mnt/c/ WSL path to C:\\ on Windows", () => {
+        const result = normalizeJarPath("/mnt/c/mods/create.jar");
+        if (isWin) expect(result).toBe("C:\\mods\\create.jar");
+        else expect(result).toBe("/mnt/c/mods/create.jar");
+    });
+
+    it("handles uppercase drive letter", () => {
+        const result = normalizeJarPath("/mnt/D/mods/sodium.jar");
+        if (isWin) expect(result).toBe("D:\\mods\\sodium.jar");
+        else expect(result).toBe("/mnt/D/mods/sodium.jar");
+    });
+
+    it("leaves native Windows paths unchanged", () => {
+        const result = normalizeJarPath("C:\\mods\\fabric.jar");
+        expect(result).toBe("C:\\mods\\fabric.jar");
+    });
+
+    it("leaves native Unix paths unchanged", () => {
+        const result = normalizeJarPath("/home/user/mods/forge.jar");
+        if (isWin) expect(result).toBe("/home/user/mods/forge.jar"); // no /mnt/ prefix — unchanged
+        else expect(result).toBe("/home/user/mods/forge.jar");
+    });
+
+    it("handles /mnt/c root (no trailing path)", () => {
+        const result = normalizeJarPath("/mnt/c");
+        if (isWin) expect(result).toBe("C:\\");
+        else expect(result).toBe("/mnt/c");
     });
 });
