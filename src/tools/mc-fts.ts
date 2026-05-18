@@ -145,30 +145,27 @@ export async function indexMcSourceSemantic(
         return { status: "already_embedded", embedded: 0, skipped: 0, remaining: 0 };
     }
 
-    // Fetch rows without embeddings in batches
+    // Fetch rows without embeddings in batches — always from offset 0
+    // so re-runs pick up any rows that failed in a previous pass
     let embedded = 0; let skipped = 0;
-    let offset = 0;
     while (true) {
         const { getDb } = await import("../db.js");
         const _db = await getDb();
         const batch = await _db.$queryRawUnsafe<Array<{ id: number; class_name: string; content: string }>>(
             `SELECT id, class_name, content FROM mc_source_files
              WHERE mc_version_id = $1 AND embedding IS NULL
-             ORDER BY id LIMIT $2 OFFSET $3`,
-            mcVersionId, batchSize, offset,
+             ORDER BY id LIMIT $2`,
+            mcVersionId, batchSize,
         );
         if (!batch.length) break;
         for (const file of batch) {
             try {
-                // Only embed the first chunk — enough for class-level semantic search
                 const chunk = chunkText(file.content, 1500)[0];
                 const vec = await embed(chunk);
                 await upsertSourceEmbedding(file.id, vec);
                 embedded++;
             } catch { skipped++; }
         }
-        offset += batch.length;
-        // Small pause to avoid overwhelming Ollama
         await new Promise(r => setTimeout(r, 50));
     }
 
@@ -229,10 +226,11 @@ export async function indexModSourceSemantic(
         }
     }
 
-    // Embed in batches
-    let embedded = 0; let offset = 0;
+    // Embed in batches — always fetch from offset 0 so we never skip
+    // unembedded rows that were inserted after a previous failed run
+    let embedded = 0;
     while (true) {
-        const batch = await findModSourceFilesUnembedded(dbId, batchSize, offset);
+        const batch = await findModSourceFilesUnembedded(dbId, batchSize, 0);
         if (!batch.length) break;
         for (const file of batch) {
             try {
@@ -242,7 +240,7 @@ export async function indexModSourceSemantic(
                 embedded++;
             } catch { skipped++; }
         }
-        offset += batch.length;
+        process.stdout.write(".");
         await new Promise(r => setTimeout(r, 50));
     }
 

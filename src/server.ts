@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { startupEmbedScan } from "./embed-queue.js";
 
 import { ingestMod, decompileMod, decompileModStatus, reindexClasses, batchIngest, batchDecompileMods } from "./tools/ingest.js";
 import { listMods, getModDetails, searchMods, getDbStats, getDependencies, findVersionConflicts, getDependencyGraph, listModSourceUrls, listModRegistryEntries } from "./tools/catalog.js";
@@ -969,3 +970,6 @@ process.on("SIGTERM", async () => { await disconnect(); process.exit(0); });
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// Background: re-queue any mods that were partially embedded before this start
+startupEmbedScan().catch(() => {});

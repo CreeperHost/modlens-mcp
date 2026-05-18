@@ -6,6 +6,8 @@ import { decompileJar, decompileJarJiJ, isDecompileDone } from "../java-tools.js
 import { indexJar } from "../java-tools.js";
 import { paths, ensureDir } from "../cache.js";
 import { join } from "path";
+import { isOllamaAvailable } from "../embeddings.js";
+import { enqueueModEmbed } from "../embed-queue.js";
 import {
     findModByJarPath, findModByDupKey, findModBySha512,
     createMod, updateMod, findModById, listAllMods,
@@ -273,9 +275,13 @@ export async function decompileModStatus(dbId: number): Promise<{ status: string
     const state = await isDecompileDone(outDir);
 
     if (state === "done") {
-        // Mark DB as done if not already
+        // Mark DB as done if not already, then auto-queue semantic embedding
         if (!mod.decompiled) {
-        await updateMod(dbId, { decompiled: true, decompPath: outDir });
+            await updateMod(dbId, { decompiled: true, decompPath: outDir });
+            // Fire-and-forget: enqueue for background semantic indexing if Ollama is available
+            isOllamaAvailable().then(available => {
+                if (available) enqueueModEmbed(dbId);
+            }).catch(() => {});
         }
         return { status: "done", outDir, message: "Decompile complete. Use get_mod_source to browse." };
     }
