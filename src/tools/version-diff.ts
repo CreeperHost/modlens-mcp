@@ -411,23 +411,25 @@ async function enrichWithSemanticScores(
         return diffs.map((d) => ({ ...d, semanticSimilarity: null }));
     }
 
+    // Pass 1: fire all 2×N vector lookups in parallel, then collect pairs
+    const lookups = await Promise.all(
+        embeddings.map((queryVec, i) => queryVec
+            ? Promise.all([
+                embRepo.searchSourceByVector(queryVec, idA, 1).catch(() => [] as any[]),
+                embRepo.searchSourceByVector(queryVec, idB, 1).catch(() => [] as any[]),
+            ])
+            : Promise.resolve([[] as any[], [] as any[]])
+        )
+    );
+
     const pairs: Array<{ diffIdx: number; aId: number; bId: number }> = [];
     for (let i = 0; i < diffs.length; i++) {
         const diff = diffs[i];
         const dotName = dotNames[i];
-        const queryVec = embeddings[i];
-        if (!queryVec) continue;
-        try {
-            const [rowsA, rowsB] = await Promise.all([
-                embRepo.searchSourceByVector(queryVec, idA, 1),
-                embRepo.searchSourceByVector(queryVec, idB, 1),
-            ]);
-            const hitA = rowsA.find((r) => (r as any).class_name === diff.className || (r as any).class_name === dotName);
-            const hitB = rowsB.find((r) => (r as any).class_name === diff.className || (r as any).class_name === dotName);
-            if (hitA && hitB) pairs.push({ diffIdx: i, aId: hitA.id, bId: hitB.id });
-        } catch {
-            // DB error — silently skip
-        }
+        const [rowsA, rowsB] = lookups[i] as [any[], any[]];
+        const hitA = rowsA.find((r) => r.class_name === diff.className || r.class_name === dotName);
+        const hitB = rowsB.find((r) => r.class_name === diff.className || r.class_name === dotName);
+        if (hitA && hitB) pairs.push({ diffIdx: i, aId: hitA.id, bId: hitB.id });
     }
 
     // Pass 2: batch all similarity computations in one DB round-trip
@@ -672,23 +674,25 @@ async function enrichModWithSemanticScores(
         return diffs.map((d) => ({ ...d, semanticSimilarity: null }));
     }
 
+    // Pass 1: fire all 2×N vector lookups in parallel, then collect pairs
+    const lookups = await Promise.all(
+        embeddings.map((queryVec, i) => queryVec
+            ? Promise.all([
+                embRepo.searchModSourceByVector(queryVec, dbIdA, 1).catch(() => [] as any[]),
+                embRepo.searchModSourceByVector(queryVec, dbIdB, 1).catch(() => [] as any[]),
+            ])
+            : Promise.resolve([[] as any[], [] as any[]])
+        )
+    );
+
     const pairs: Array<{ diffIdx: number; aId: number; bId: number }> = [];
     for (let i = 0; i < diffs.length; i++) {
         const diff = diffs[i];
         const dotName = dotNames[i];
-        const queryVec = embeddings[i];
-        if (!queryVec) continue;
-        try {
-            const [rowsA, rowsB] = await Promise.all([
-                embRepo.searchModSourceByVector(queryVec, dbIdA, 1),
-                embRepo.searchModSourceByVector(queryVec, dbIdB, 1),
-            ]);
-            const hitA = rowsA.find((r) => (r as any).class_name === diff.className || (r as any).class_name === dotName);
-            const hitB = rowsB.find((r) => (r as any).class_name === diff.className || (r as any).class_name === dotName);
-            if (hitA && hitB) pairs.push({ diffIdx: i, aId: hitA.id, bId: hitB.id });
-        } catch {
-            // DB error — silently skip
-        }
+        const [rowsA, rowsB] = lookups[i] as [any[], any[]];
+        const hitA = rowsA.find((r) => r.class_name === diff.className || r.class_name === dotName);
+        const hitB = rowsB.find((r) => r.class_name === diff.className || r.class_name === dotName);
+        if (hitA && hitB) pairs.push({ diffIdx: i, aId: hitA.id, bId: hitB.id });
     }
 
     // Pass 2: batch all similarity computations in one DB round-trip
