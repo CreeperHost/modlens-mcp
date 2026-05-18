@@ -23,6 +23,23 @@ export async function embed(text: string): Promise<number[]> {
     return body.embedding;
 }
 
+/**
+ * Generate embedding vectors for multiple texts in a single Ollama request.
+ * Uses POST /api/embed (the modern batch endpoint).
+ * Returns embeddings in the same order as the input array.
+ */
+export async function batchEmbed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const res = await fetch(`${OLLAMA_URL()}/api/embed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: EMBED_MODEL(), input: texts }),
+    });
+    if (!res.ok) throw new Error(`Ollama batch embed failed: ${res.status}`);
+    const body = await res.json() as { embeddings: number[][] };
+    return body.embeddings;
+}
+
 /** Returns false if Ollama is not reachable. Use to gate optional semantic features. */
 export async function isOllamaAvailable(): Promise<boolean> {
     try {

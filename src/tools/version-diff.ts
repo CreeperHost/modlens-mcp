@@ -14,7 +14,7 @@ import { exists, ensureDir } from "../cache.js";
 import { validateVersion } from "../validate.js";
 import { getDb } from "../db.js";
 import { detectBackend } from "../db-backend.js";
-import { isOllamaAvailable, embed } from "../embeddings.js";
+import { isOllamaAvailable, embed, batchEmbed } from "../embeddings.js";
 import { ensureMcVersion } from "../repositories/mcVersion.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -291,8 +291,9 @@ async function writeCachedDiff(
  * @param versionB    Later version (e.g. "1.21.1")
  * @param packages    Optional slash-prefix filter (e.g. ["net/minecraft/world/entity"])
  * @param maxClasses  Cap on changed-class output (default 200). Does not affect summary counts.
- * @param force       Skip cache and recompute.
+ * @param force       Skip cache read and recompute (still writes result to cache).
  * @param semantic    Enrich with Ollama embedding similarity (requires Ollama + index_semantic).
+ * @param cache       When false, skip both reading and writing the DB cache (default true).
  */
 export async function diffMcVersionsDetailed(
     versionA: string,
@@ -301,15 +302,18 @@ export async function diffMcVersionsDetailed(
     maxClasses = 200,
     force = false,
     semantic = false,
+    cache = true,
 ): Promise<VersionDiffResult> {
     validateVersion(versionA);
     validateVersion(versionB);
 
     const pkgHash = buildPackagesHash(packages);
 
-    if (!force) {
+    if (!force && cache) {
         const cached = await readCachedDiff(versionA, versionB, pkgHash);
-        if (cached) return cached;
+        if (cached) {
+            return { ...cached, changed: cached.changed.slice(0, maxClasses) };
+        }
     }
 
     const [indexA, indexB] = await Promise.all([
@@ -362,16 +366,18 @@ export async function diffMcVersionsDetailed(
         },
         added,
         removed,
-        changed: changed.slice(0, maxClasses),
+        changed,  // full array stored in cache; sliced at return
     };
-
-    await writeCachedDiff(versionA, versionB, pkgHash, result);
 
     if (semantic && await isOllamaAvailable()) {
         result.changed = await enrichWithSemanticScores(result.changed, versionA, versionB);
     }
 
-    return result;
+    if (cache) {
+        await writeCachedDiff(versionA, versionB, pkgHash, result);
+    }
+
+    return { ...result, changed: result.changed.slice(0, maxClasses) };
 }
 
 // ── Semantic similarity enrichment ───────────────────────────────────────────
@@ -395,61 +401,90 @@ async function enrichWithSemanticScores(
         ? await import("../repositories/embeddings-sqlite.js")
         : await import("../repositories/embeddings.js");
 
-    const enriched: ClassDiff[] = [];
+    // Pass 1: batch-embed all class names in one Ollama request, then find matching rows
+    const dotNames = diffs.map((d) => d.className.replace(/\//g, "."));
+    let embeddings: number[][] = [];
+    try {
+        embeddings = await batchEmbed(dotNames);
+    } catch {
+        // Ollama error — return diffs unchanged
+        return diffs.map((d) => ({ ...d, semanticSimilarity: null }));
+    }
 
-    for (const diff of diffs) {
-        const dotName = diff.className.replace(/\//g, ".");
-        let sim: number | null = null;
+    const pairs: Array<{ diffIdx: number; aId: number; bId: number }> = [];
+    for (let i = 0; i < diffs.length; i++) {
+        const diff = diffs[i];
+        const dotName = dotNames[i];
+        const queryVec = embeddings[i];
+        if (!queryVec) continue;
         try {
-            const queryVec = await embed(dotName);
             const [rowsA, rowsB] = await Promise.all([
                 embRepo.searchSourceByVector(queryVec, idA, 1),
                 embRepo.searchSourceByVector(queryVec, idB, 1),
             ]);
             const hitA = rowsA.find((r) => (r as any).class_name === diff.className || (r as any).class_name === dotName);
             const hitB = rowsB.find((r) => (r as any).class_name === diff.className || (r as any).class_name === dotName);
-            if (hitA && hitB) {
-                sim = await crossVersionSimilarity(hitA.id, hitB.id, backend);
-            }
+            if (hitA && hitB) pairs.push({ diffIdx: i, aId: hitA.id, bId: hitB.id });
         } catch {
-            // Ollama or DB error — silently skip
+            // DB error — silently skip
         }
-        enriched.push({ ...diff, semanticSimilarity: sim });
     }
 
+    // Pass 2: batch all similarity computations in one DB round-trip
+    const simMap = await batchSimilarities(pairs, backend, "mc_source_files");
+
+    // Pass 3: assign scores back
+    const enriched = diffs.map((d) => ({ ...d, semanticSimilarity: null as number | null }));
+    for (const { diffIdx, aId, bId } of pairs) {
+        enriched[diffIdx].semanticSimilarity = simMap.get(`${aId}:${bId}`) ?? null;
+    }
     return enriched;
 }
 
 /**
- * Compute cosine similarity between the stored embedding vectors of two McSourceFile rows.
- * Returns null if either row lacks an embedding.
+ * Batch-compute cosine similarities for multiple id pairs against a source table.
+ * SQLite: opens ONE connection and fetches all needed embeddings in a single query.
+ * PG: single unnest-based JOIN query.
+ * Returns a Map keyed by "aId:bId".
  */
-async function crossVersionSimilarity(
-    idA: number,
-    idB: number,
+async function batchSimilarities(
+    pairs: Array<{ aId: number; bId: number }>,
     backend: string,
-): Promise<number | null> {
+    table: string,
+): Promise<Map<string, number | null>> {
+    const out = new Map<string, number | null>();
+    if (pairs.length === 0) return out;
+
     if (backend !== "sqlite") {
         const db = await getDb();
-        const rows = await db.$queryRawUnsafe<Array<{ sim: number }>>(
-            `SELECT (1 - (a.embedding <=> b.embedding))::float AS sim
-             FROM mc_source_files a, mc_source_files b
-             WHERE a.id = $1 AND b.id = $2
-               AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL`,
-            idA, idB,
+        const aIds = pairs.map((p) => p.aId);
+        const bIds = pairs.map((p) => p.bId);
+        const rows = await db.$queryRawUnsafe<Array<{ a_id: number; b_id: number; sim: number }>>(
+            `SELECT p.a_id, p.b_id, (1 - (a.embedding <=> b.embedding))::float AS sim
+             FROM unnest($1::int[], $2::int[]) AS p(a_id, b_id)
+             JOIN ${table} a ON a.id = p.a_id AND a.embedding IS NOT NULL
+             JOIN ${table} b ON b.id = p.b_id AND b.embedding IS NOT NULL`,
+            aIds, bIds,
         );
-        return rows[0]?.sim ?? null;
+        for (const { a_id, b_id, sim } of rows) out.set(`${a_id}:${b_id}`, sim);
     } else {
         const Database = (await import("better-sqlite3")).default;
         const url = process.env.DATABASE_URL ?? "";
-        const path = url.replace(/^file:\/\//, "").replace(/^file:/, "");
-        const db = new Database(path);
-        const rowA = db.prepare(`SELECT embedding FROM mc_source_files WHERE id = ?`).get(idA) as { embedding: Buffer } | undefined;
-        const rowB = db.prepare(`SELECT embedding FROM mc_source_files WHERE id = ?`).get(idB) as { embedding: Buffer } | undefined;
+        const dbPath = url.replace(/^file:\/\//, "").replace(/^file:/, "");
+        const db = new Database(dbPath, { readonly: true });
+        const allIds = [...new Set(pairs.flatMap((p) => [p.aId, p.bId]))];
+        const placeholders = allIds.map(() => "?").join(",");
+        const rows = db.prepare(`SELECT id, embedding FROM ${table} WHERE id IN (${placeholders})`)
+            .all(...allIds) as Array<{ id: number; embedding: Buffer | null }>;
         db.close();
-        if (!rowA?.embedding || !rowB?.embedding) return null;
-        return cosineSimilarityBlob(rowA.embedding, rowB.embedding);
+        const embMap = new Map(rows.map((r) => [r.id, r.embedding]));
+        for (const { aId, bId } of pairs) {
+            const ea = embMap.get(aId);
+            const eb = embMap.get(bId);
+            out.set(`${aId}:${bId}`, ea && eb ? cosineSimilarityBlob(ea, eb) : null);
+        }
     }
+    return out;
 }
 
 function cosineSimilarityBlob(a: Buffer, b: Buffer): number {
@@ -538,7 +573,9 @@ export async function diffModVersionsDetailed(
 
     if (useCache && !force) {
         const cached = await readCachedModDiff(dbIdA, dbIdB, pkgHash);
-        if (cached) return cached;
+        if (cached) {
+            return { ...cached, changed: cached.changed.slice(0, maxClasses) };
+        }
     }
 
     const [indexA, indexB] = await Promise.all([
@@ -592,7 +629,7 @@ export async function diffModVersionsDetailed(
         },
         added,
         removed,
-        changed: changed.slice(0, maxClasses),
+        changed,  // full array stored in cache; sliced at return
     };
 
     const result: ModVersionDiffResult = {
@@ -601,15 +638,15 @@ export async function diffModVersionsDetailed(
         modB: { id: dbIdB, modId: modB.modId, version: modB.version },
     };
 
-    if (useCache) {
-        await writeCachedModDiff(dbIdA, dbIdB, pkgHash, result);
-    }
-
     if (semantic && await isOllamaAvailable()) {
         result.changed = await enrichModWithSemanticScores(result.changed, dbIdA, dbIdB);
     }
 
-    return result;
+    if (useCache) {
+        await writeCachedModDiff(dbIdA, dbIdB, pkgHash, result);
+    }
+
+    return { ...result, changed: result.changed.slice(0, maxClasses) };
 }
 
 /**
@@ -626,58 +663,41 @@ async function enrichModWithSemanticScores(
         ? await import("../repositories/embeddings-sqlite.js")
         : await import("../repositories/embeddings.js");
 
-    const enriched: ClassDiff[] = [];
+    // Pass 1: batch-embed all class names in one Ollama request, then find matching rows
+    const dotNames = diffs.map((d) => d.className.replace(/\//g, "."));
+    let embeddings: number[][] = [];
+    try {
+        embeddings = await batchEmbed(dotNames);
+    } catch {
+        return diffs.map((d) => ({ ...d, semanticSimilarity: null }));
+    }
 
-    for (const diff of diffs) {
-        const dotName = diff.className.replace(/\//g, ".");
-        let sim: number | null = null;
+    const pairs: Array<{ diffIdx: number; aId: number; bId: number }> = [];
+    for (let i = 0; i < diffs.length; i++) {
+        const diff = diffs[i];
+        const dotName = dotNames[i];
+        const queryVec = embeddings[i];
+        if (!queryVec) continue;
         try {
-            const queryVec = await embed(dotName);
             const [rowsA, rowsB] = await Promise.all([
                 embRepo.searchModSourceByVector(queryVec, dbIdA, 1),
                 embRepo.searchModSourceByVector(queryVec, dbIdB, 1),
             ]);
             const hitA = rowsA.find((r) => (r as any).class_name === diff.className || (r as any).class_name === dotName);
             const hitB = rowsB.find((r) => (r as any).class_name === diff.className || (r as any).class_name === dotName);
-            if (hitA && hitB) {
-                sim = await crossModVersionSimilarity(hitA.id, hitB.id, backend);
-            }
+            if (hitA && hitB) pairs.push({ diffIdx: i, aId: hitA.id, bId: hitB.id });
         } catch {
-            // Ollama or DB error — silently skip
+            // DB error — silently skip
         }
-        enriched.push({ ...diff, semanticSimilarity: sim });
     }
 
+    // Pass 2: batch all similarity computations in one DB round-trip
+    const simMap = await batchSimilarities(pairs, backend, "mod_source_files");
+
+    // Pass 3: assign scores back
+    const enriched = diffs.map((d) => ({ ...d, semanticSimilarity: null as number | null }));
+    for (const { diffIdx, aId, bId } of pairs) {
+        enriched[diffIdx].semanticSimilarity = simMap.get(`${aId}:${bId}`) ?? null;
+    }
     return enriched;
-}
-
-/**
- * Compute cosine similarity between two mod_source_files rows' embeddings.
- */
-async function crossModVersionSimilarity(
-    idA: number,
-    idB: number,
-    backend: string,
-): Promise<number | null> {
-    if (backend !== "sqlite") {
-        const db = await getDb();
-        const rows = await db.$queryRawUnsafe<Array<{ sim: number }>>(
-            `SELECT (1 - (a.embedding <=> b.embedding))::float AS sim
-             FROM mod_source_files a, mod_source_files b
-             WHERE a.id = $1 AND b.id = $2
-               AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL`,
-            idA, idB,
-        );
-        return rows[0]?.sim ?? null;
-    } else {
-        const Database = (await import("better-sqlite3")).default;
-        const url = process.env.DATABASE_URL ?? "";
-        const path = url.replace(/^file:\/\//, "").replace(/^file:/, "");
-        const db = new Database(path);
-        const rowA = db.prepare(`SELECT embedding FROM mod_source_files WHERE id = ?`).get(idA) as { embedding: Buffer } | undefined;
-        const rowB = db.prepare(`SELECT embedding FROM mod_source_files WHERE id = ?`).get(idB) as { embedding: Buffer } | undefined;
-        db.close();
-        if (!rowA?.embedding || !rowB?.embedding) return null;
-        return cosineSimilarityBlob(rowA.embedding, rowB.embedding);
-    }
 }

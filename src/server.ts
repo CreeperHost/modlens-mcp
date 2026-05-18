@@ -420,6 +420,7 @@ server.tool(
         force:      z.boolean().optional(),
         packages:   z.array(z.string()).optional().describe("Slash-prefix filter for diff_detailed, e.g. ['net/minecraft/world/entity']"),
         semantic:   z.boolean().optional().describe("Enrich diff_detailed with Ollama cosine similarity (requires Ollama + index_semantic)"),
+        cache:      z.boolean().optional().describe("Read/write DB cache for diff_detailed (default true; set false to skip cache)"),
         modloader:  z.enum(["minecraft","neoforge","fabric","fabric-api"]).optional(),
         content:    z.string().optional().describe("Full .accesswidener file text (validate_aw)"),
         source:     z.string().optional().describe("Full mixin Java source code (analyze_mixin)"),
@@ -428,7 +429,7 @@ server.tool(
         maxLines:   z.number().optional(),
         limit:      z.number().optional(),
     },
-    async ({ action, version, versionA, versionB, mcVersion, query, className, target, searchType, isRegex, force, packages, semantic, modloader, content, source, startLine, endLine, maxLines, limit }) => {
+    async ({ action, version, versionA, versionB, mcVersion, query, className, target, searchType, isRegex, force, packages, semantic, cache, modloader, content, source, startLine, endLine, maxLines, limit }) => {
         const v = version ?? mcVersion;
         let result: unknown;
         switch (action) {
@@ -439,7 +440,7 @@ server.tool(
             case "find_refs":       result = await findMcReferences(v!, target!); break;
             case "inheritance":     result = await getMcInheritance(v!, className!); break;
             case "diff":            result = await diffMcVersions(versionA!, versionB!); break;
-            case "diff_detailed":   result = await diffMcVersionsDetailed(versionA!, versionB!, packages, limit ?? 200, force ?? false, semantic ?? false); break;
+            case "diff_detailed":   result = await diffMcVersionsDetailed(versionA!, versionB!, packages, limit ?? 200, force ?? false, semantic ?? false, cache ?? true); break;
             case "decompile":       result = await decompileMcVersion(v!, force ?? false); break;
             case "decompile_status":result = await decompileMcVersionStatus(v!); break;
             case "search_code":     result = await searchMcCode(v!, query!, searchType ?? "content", isRegex ?? false, limit ?? 50); break;
