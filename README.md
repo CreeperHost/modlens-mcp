@@ -705,9 +705,8 @@ node dist/cli.js check-updates 2
 - **[Mojang](https://www.minecraft.net)** — for publishing official Mojmap mappings and the Piston Meta API used for version discovery and JAR downloads.
 
 ### Modloader teams
-- **[NeoForged team](https://github.com/neoforged/NeoForge)** — for the [NeoForge documentation](https://docs.neoforged.net) seeded into the docs database out of the box.
+- **[NeoForged team](https://github.com/neoforged/NeoForge)** — for NeoForge, the [NeoForge documentation](https://docs.neoforged.net) seeded into the docs database, and the migration changelogs seeded into the primers database.
 - **[FabricMC team](https://github.com/FabricMC)** — for the [Fabric Wiki](https://fabricmc.net/wiki) and [Yarn mappings](https://github.com/FabricMC/yarn) seeded into the docs database, Intermediary mappings used by the `mappings` tool, and [mcsrc.dev](https://mcsrc.dev) whose source browsing and class analysis features inspired our `mc_source` tool.
-- **[MinecraftForge team](https://github.com/MinecraftForge)** — for the Forge migration changelogs seeded into the primers database.
 
 ### Community contributors
 - **[ApexModder](https://github.com/ApexModder)** — for NeoForge update primers and migration guides included in the default primers database.
