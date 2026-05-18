@@ -22,7 +22,8 @@
     "db:vector:sqlite": "node scripts/enable-sqlite-vec.mjs",
     "db:push:pglite": "prisma db push",
     "db:vector:pglite": "node scripts/enable-pgvector.mjs",
-    "db:backup": "node scripts/backup.mjs"
+    "db:backup": "node scripts/backup.mjs",
+    "update": "git pull && npm install && npm run build && npm run db:setup && npm run db:vector"
   },
   "dependencies": {
     "@clack/prompts": "^1.4.0",

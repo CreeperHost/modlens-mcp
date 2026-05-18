@@ -163,6 +163,18 @@ Or manually edit `~/.claude/mcp.json` (same format as VS Code above).
 
 > **Important:** Replace `/path/to/modlens-mcp` with the actual absolute path where you cloned the repo. On Windows use forward slashes or escaped backslashes, e.g. `C:/Users/you/modlens-mcp/dist/server.js`.
 
+---
+
+## Updating
+
+```bash
+npm run update
+```
+
+This runs `git pull`, reinstalls dependencies, rebuilds, and applies any new DB migrations — all in one command. After it finishes, **restart your MCP client** (reload VS Code window, restart Claude Desktop, etc.) to pick up the new server build.
+
+---
+
 ### 💡 Token overhead — disable tools you don't need
 
 ModLens ships **22 tools**. Every tool's name, description, and parameter schema is sent to the model on **every request**, whether you use that tool or not. This adds a fixed overhead of ~3,400 tokens per turn.
