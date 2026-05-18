@@ -21,7 +21,7 @@ import { readdir } from "fs/promises";
 import { join, resolve } from "path";
 import { backfillDocEmbeddings } from "./tools/docs.js";
 import { backfillPrimerEmbeddings } from "./tools/primers.js";
-import { indexMcSourceSemantic, indexModSourceSemantic } from "./tools/mc-fts.js";
+import { indexMcSourceSemantic, indexModSourceSemantic, indexModSourceFts, searchModSourceIndexed } from "./tools/mc-fts.js";
 
 // ── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -133,6 +133,11 @@ VERSIONS
 
 BATCH
   batch-resolve-mixins               Resolve @Mixin targets for all mixin mods
+
+FTS / INDEXED SEARCH (no Ollama required)
+  index-fts <dbId>                   Index decompiled mod source for BM25/FTS search
+                                     Works for all loaders: NeoForge, Fabric, Forge, Quilt
+  search-indexed <dbId> <query>      BM25-ranked FTS search over indexed mod source  [--limit=20]
 
 SEMANTIC SEARCH (optional — requires Ollama)
   backfill-embeddings                Embed all docs/primers/mc-source for semantic search
@@ -449,6 +454,21 @@ try {
                 }
             }
             console.log(`\n✓ resolved: ${ok}  no targets found: ${none}  failed: ${fail}`);
+            break;
+        }
+
+        case "index-fts": {
+            const dbId = numArg(positional[0], "dbId");
+            console.error(`Indexing mod source (FTS) for dbId=${dbId}...`);
+            out(await indexModSourceFts(dbId));
+            break;
+        }
+
+        case "search-indexed": {
+            const dbId = numArg(positional[0], "dbId");
+            const query = requireArg(positional[1], "query");
+            const limit = (flags.limit as number | undefined) ?? 20;
+            out(await searchModSourceIndexed(dbId, query, limit));
             break;
         }
 
