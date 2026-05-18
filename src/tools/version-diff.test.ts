@@ -26,7 +26,6 @@ describe("diffClassIndex", () => {
         name: "com/example/Foo",
         superName: "java/lang/Object",
         interfaces: [],
-        accessFlags: 0x0001,
         methods: [],
         fields: [],
         ...overrides,

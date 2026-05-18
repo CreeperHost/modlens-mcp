@@ -83,6 +83,22 @@ model McVersion {
   @@map("mc_versions")
 }
 
+// ── Cached AST-level version diffs ──────────────────────────────────────────
+// SQLite: result stored as TEXT (JSON string) instead of Json type.
+
+model McVersionDiff {
+  id           Int      @id @default(autoincrement())
+  versionA     String   @map("version_a")
+  versionB     String   @map("version_b")
+  packagesHash String   @default("all") @map("packages_hash")
+  result       String   // SQLite: JSON stored as TEXT
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([versionA, versionB, packagesHash])
+  @@index([versionA, versionB])
+  @@map("mc_version_diffs")
+}
+
 model ModTag {
   id        Int      @id @default(autoincrement())
   modId     Int      @map("mod_id")
