@@ -1,7 +1,8 @@
 /**
  * Resilient fetch with automatic retry, exponential backoff, and timeout.
  * - Retries transient failures (5xx, network errors) up to `retries` times.
- * - Never retries 4xx responses (caller decides how to handle them).
+ * - Retries 429 (rate-limited) with exponential backoff, honouring Retry-After.
+ * - Never retries other 4xx responses (caller decides how to handle them).
  * - Aborts the request if `timeoutMs` elapses without a response.
  */
 
@@ -46,7 +47,20 @@ export async function fetchWithRetry(
             const res = await fetch(url, { ...init, signal: controller.signal });
             clearTimeout(timer);
 
-            // 4xx = client error — caller handles, no retry
+            // 429 = rate-limited — honour Retry-After then retry with backoff
+            if (res.status === 429 && attempt < retries) {
+                const retryAfter = res.headers.get("Retry-After");
+                const waitMs = retryAfter
+                    ? (isNaN(Number(retryAfter))
+                        ? Math.max(0, new Date(retryAfter).getTime() - Date.now())
+                        : Number(retryAfter) * 1000)
+                    : backoffMs * 2 ** attempt;
+                lastError = new Error(`HTTP 429 from ${url}`);
+                await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+                continue;
+            }
+
+            // Other 4xx = client error — caller handles, no retry
             if (res.status >= 400 && res.status < 500) return res;
 
             // 5xx = transient server error — retry if we have attempts left

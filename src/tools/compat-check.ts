@@ -13,9 +13,9 @@
 
 import { parseJar } from "../processor.js";
 import { listEntries, extractEntry } from "../jar.js";
-import { validatePath } from "../security.js";
 import { getDb } from "../db.js";
 import { listModsSlim } from "../repositories/mod.js";
+import { isAbsolute } from "path";
 
 export type IssueSeverity = "error" | "warn" | "info";
 export type IssueType =
@@ -84,8 +84,10 @@ export async function checkModCompat(
     mcVersion?: string,
     loader?: string,
 ): Promise<object> {
-    // Path traversal guard
-    validatePath(jarPath, "/");
+    // Validate: must be an absolute path to a .jar file
+    if (!isAbsolute(jarPath) || !jarPath.toLowerCase().endsWith(".jar")) {
+        throw new Error(`jarPath must be an absolute path to a .jar file: '${jarPath}'`);
+    }
 
     const manifest = await parseJar(jarPath);
     const issues: CompatIssue[] = [];
