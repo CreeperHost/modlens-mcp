@@ -701,12 +701,12 @@ node dist/cli.js check-updates 2
 
 ### Services & APIs
 - **[CreeperHost](https://www.creeperhost.net)** — for the free [modpacks.ch](https://www.modpacks.ch) public API powering modpack search, sync, and mod downloads.
-- **[misode](https://github.com/misode)** — for [mcmeta](https://github.com/misode/mcmeta), the version-controlled Minecraft data repository that powers the `mc_data`, `mc_files`, and `mc_registry` tools, and for [mcsrc.dev](https://mcsrc.dev) whose source browsing and class analysis features inspired our `mc_source` tool.
+- **[misode](https://github.com/misode)** — for [mcmeta](https://github.com/misode/mcmeta), the version-controlled Minecraft data repository that powers the `mc_data`, `mc_files`, and `mc_registry` tools.
 - **[Mojang](https://www.minecraft.net)** — for publishing official Mojmap mappings and the Piston Meta API used for version discovery and JAR downloads.
 
 ### Modloader teams
 - **[NeoForged team](https://github.com/neoforged/NeoForge)** — for the [NeoForge documentation](https://docs.neoforged.net) seeded into the docs database out of the box.
-- **[FabricMC team](https://github.com/FabricMC)** — for the [Fabric Wiki](https://fabricmc.net/wiki) and [Yarn mappings](https://github.com/FabricMC/yarn) seeded into the docs database, and for Intermediary mappings used by the `mappings` tool.
+- **[FabricMC team](https://github.com/FabricMC)** — for the [Fabric Wiki](https://fabricmc.net/wiki) and [Yarn mappings](https://github.com/FabricMC/yarn) seeded into the docs database, Intermediary mappings used by the `mappings` tool, and [mcsrc.dev](https://mcsrc.dev) whose source browsing and class analysis features inspired our `mc_source` tool.
 - **[MinecraftForge team](https://github.com/MinecraftForge)** — for the Forge migration changelogs seeded into the primers database.
 
 ### Community contributors
