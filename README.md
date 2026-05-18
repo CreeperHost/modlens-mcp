@@ -173,6 +173,12 @@ npm run update
 
 This runs `git pull`, reinstalls dependencies, rebuilds, and applies any new DB migrations — all in one command. After it finishes, **restart your MCP client** (reload VS Code window, restart Claude Desktop, etc.) to pick up the new server build.
 
+> **First-time update (before `npm run update` existed)?** Run the steps manually once:
+> ```bash
+> git pull && npm install && npm run build && node scripts/post-update.mjs
+> ```
+> After this you'll have `npm run update` available for all future updates.
+
 ---
 
 ### 💡 Token overhead — disable tools you don't need
