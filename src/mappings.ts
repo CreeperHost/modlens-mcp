@@ -25,6 +25,10 @@ const TINY_REMAPPER_VERSION = "0.10.3";
 export const TINY_REMAPPER_PATH = join(TOOLS_DIR, "tiny-remapper.jar");
 const TINY_REMAPPER_URL = `https://maven.fabricmc.net/net/fabricmc/tiny-remapper/${TINY_REMAPPER_VERSION}/tiny-remapper-${TINY_REMAPPER_VERSION}-fat.jar`;
 
+const SPECIAL_SOURCE_VERSION = "1.11.4";
+export const SPECIAL_SOURCE_PATH = join(TOOLS_DIR, "SpecialSource.jar");
+const SPECIAL_SOURCE_URL = `https://maven.minecraftforge.net/net/md-5/SpecialSource/${SPECIAL_SOURCE_VERSION}/SpecialSource-${SPECIAL_SOURCE_VERSION}-shaded.jar`;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 export type MappingNs = "official" | "intermediary" | "yarn" | "mojmap" | "srg" | "mcp";
 
@@ -781,4 +785,162 @@ export async function listAvailableParchmentVersions(mcVersion: string): Promise
         const matches = [...xml.matchAll(/<version>([^<]+)<\/version>/g)];
         return matches.map(m => m[1]).filter(v => !v.includes("SNAPSHOT"));
     } catch { return []; }
+}
+
+// ── SpecialSource (legacy Forge remapping tool) ───────────────────────────────
+
+export async function ensureSpecialSource(): Promise<string> {
+    if (await exists(SPECIAL_SOURCE_PATH)) return SPECIAL_SOURCE_PATH;
+    await downloadToFile(SPECIAL_SOURCE_URL, SPECIAL_SOURCE_PATH);
+    return SPECIAL_SOURCE_PATH;
+}
+
+/**
+ * Generate a combined SRG mapping (notch→mcp) for a given MC version.
+ * Classes use SRG names (already human-readable: net/minecraft/...).
+ * Methods/fields use MCP names where available, SRG names as fallback.
+ * Returns the path to the generated .srg file.
+ */
+export async function generateCombinedSrg(version: string): Promise<string | null> {
+    const combined = join(MAPPINGS_DIR, `combined-${version}.srg`);
+    if (await exists(combined)) return combined;
+
+    const srgIdx = await getSrgIndex(version);
+    if (!srgIdx) return null;
+
+    const mcpNames = await getMcpNames(version);
+
+    const lines: string[] = [];
+
+    // Class mappings: CL: notch srg
+    for (const [notch, srg] of srgIdx.classes) {
+        lines.push(`CL: ${notch} ${srg}`);
+    }
+
+    // Field mappings: FD: notchClass/notchField srgClass/mcpField
+    for (const [notchQualified, srgQualified] of srgIdx.fields) {
+        if (mcpNames) {
+            const srgFieldName = srgQualified.split("/").pop()!;
+            const mcpField = mcpNames.fields.get(srgFieldName);
+            if (mcpField) {
+                const srgClassPath = srgQualified.substring(0, srgQualified.lastIndexOf("/"));
+                lines.push(`FD: ${notchQualified} ${srgClassPath}/${mcpField}`);
+                continue;
+            }
+        }
+        lines.push(`FD: ${notchQualified} ${srgQualified}`);
+    }
+
+    // Method mappings: MD: notchClass/notchMethod notchDesc srgClass/mcpMethod srgDesc
+    for (const [notchKey, srgQualified] of srgIdx.methods) {
+        // notchKey = "notchClass/notchMethod notchDesc"
+        // srgQualified = "srgClass/srgMethod" (no desc stored — reuse notchDesc)
+        const spaceIdx = notchKey.indexOf(" ");
+        const notchDesc = notchKey.substring(spaceIdx + 1);
+
+        if (mcpNames) {
+            const srgMethodName = srgQualified.split("/").pop()!;
+            const mcpMethod = mcpNames.methods.get(srgMethodName);
+            if (mcpMethod) {
+                const srgClassPath = srgQualified.substring(0, srgQualified.lastIndexOf("/"));
+                // Remap desc class references too
+                const remappedDesc = remapDescriptor(notchDesc, srgIdx.classes);
+                lines.push(`MD: ${notchKey} ${srgClassPath}/${mcpMethod} ${remappedDesc}`);
+                continue;
+            }
+        }
+
+        // Fallback: SRG name, remap desc
+        const remappedDesc = remapDescriptor(notchDesc, srgIdx.classes);
+        lines.push(`MD: ${notchKey} ${srgQualified} ${remappedDesc}`);
+    }
+
+    await ensureDir(combined);
+    await writeFile(combined, lines.join("\n"));
+    return combined;
+}
+
+/**
+ * Remap class references in a method descriptor using the class mapping.
+ * e.g. (La;Lb;)Lc; → (Lnet/minecraft/Foo;Lnet/minecraft/Bar;)Lnet/minecraft/Baz;
+ */
+function remapDescriptor(desc: string, classMap: Map<string, string>): string {
+    return desc.replace(/L([^;]+);/g, (_m, cls) => {
+        const mapped = classMap.get(cls);
+        return mapped ? `L${mapped};` : `L${cls};`;
+    });
+}
+
+/**
+ * Versions that have SRG+MCP mappings available (legacy Forge era).
+ */
+export function hasSrgMappings(version: string): boolean {
+    return /^1\.(7\.10|8(\.[89])?|9(\.4)?|10\.2|11(\.2)?|12(\.[12])?)$/.test(version);
+}
+
+/**
+ * Remap a vanilla MC JAR from obfuscated → SRG+MCP names using SpecialSource.
+ * Returns the path to the remapped JAR.
+ */
+export async function remapMcJar(jarPath: string, version: string): Promise<string | null> {
+    const remappedPath = jarPath.replace(/\.jar$/, "-mapped.jar");
+    if (await exists(remappedPath)) return remappedPath;
+
+    const srgPath = await generateCombinedSrg(version);
+    if (!srgPath) return null;
+
+    const ssJar = await ensureSpecialSource();
+    await runJava(["-jar", ssJar, "--in-jar", jarPath, "--out-jar", remappedPath, "--srg-in", srgPath]);
+    return remappedPath;
+}
+
+/**
+ * Post-decompile: replace SRG method/field names (func_12345/field_12345) with MCP names.
+ * Modifies .java files in-place in the given directory.
+ */
+export async function applyMcpNamesToSource(sourceDir: string, version: string): Promise<{ replaced: number; files: number }> {
+    const mcpNames = await getMcpNames(version);
+    if (!mcpNames) return { replaced: 0, files: 0 };
+
+    // Build a combined replacement map (srg→mcp for both methods and fields)
+    const replacements = new Map<string, string>();
+    for (const [srg, mcp] of mcpNames.methods) replacements.set(srg, mcp);
+    for (const [srg, mcp] of mcpNames.fields) replacements.set(srg, mcp);
+
+    if (replacements.size === 0) return { replaced: 0, files: 0 };
+
+    // Build a regex that matches any SRG identifier in one pass
+    const srgPattern = /\b(func_\d+_[a-zA-Z_]+|field_\d+_[a-zA-Z_]+)\b/g;
+
+    const { readdir, readFile: rf, writeFile: wf } = await import("fs/promises");
+    const { join: pjoin } = await import("path");
+
+    let totalReplaced = 0;
+    let totalFiles = 0;
+
+    async function walkAndReplace(dir: string): Promise<void> {
+        const entries = await readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+            const fullPath = pjoin(dir, entry.name);
+            if (entry.isDirectory()) {
+                await walkAndReplace(fullPath);
+            } else if (entry.name.endsWith(".java")) {
+                const content = await rf(fullPath, "utf8");
+                let count = 0;
+                const replaced = content.replace(srgPattern, (match) => {
+                    const mcp = replacements.get(match);
+                    if (mcp) { count++; return mcp; }
+                    return match;
+                });
+                if (count > 0) {
+                    await wf(fullPath, replaced);
+                    totalReplaced += count;
+                    totalFiles++;
+                }
+            }
+        }
+    }
+
+    await walkAndReplace(sourceDir);
+    return { replaced: totalReplaced, files: totalFiles };
 }

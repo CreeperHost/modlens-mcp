@@ -8,7 +8,15 @@ import { join } from "path";
 import { CACHE_ROOT, ensureDir, exists } from "./cache.js";
 import { fetchWithRetry, DOWNLOAD_OPTS } from "./fetch-utils.js";
 
+import { hasSrgMappings } from "./mappings.js";
+
 const VERSIONS_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+
+/** Versions with SRG/MCP mappings that we explicitly support even before 1.14 */
+const LEGACY_SRG_VERSIONS = new Set([
+    "1.7.10", "1.8", "1.8.8", "1.8.9", "1.9", "1.9.4",
+    "1.10.2", "1.11", "1.11.2", "1.12", "1.12.1", "1.12.2",
+]);
 
 export interface McVersionEntry {
     id: string;
@@ -24,10 +32,10 @@ export async function fetchMcVersionList(includeSnapshots = false): Promise<McVe
         const res = await fetchWithRetry(VERSIONS_URL);
         if (!res.ok) throw new Error(`Failed to fetch MC version manifest: ${res.status}`);
         const data = await res.json() as { versions: McVersionEntry[] };
-        // Filter to 1.14+ (first release with Mojang mappings, 2019-04-23)
+        // Filter to 1.14+ (mojmap era) plus legacy SRG versions (1.7.10–1.12.2)
         manifestCache = data.versions.filter(
             (v) => v.type !== "old_beta" && v.type !== "old_alpha" &&
-                new Date(v.releaseTime) >= new Date("2019-04-23")
+                (new Date(v.releaseTime) >= new Date("2019-04-23") || LEGACY_SRG_VERSIONS.has(v.id))
         );
     }
     return includeSnapshots

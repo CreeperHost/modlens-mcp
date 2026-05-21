@@ -19,6 +19,7 @@ import { formatClassMembers } from "../access-flags.js";
 import { ensureMcVersion, updateMcVersion } from "../repositories/mcVersion.js";
 import { findModByModIdLike } from "../repositories/mod.js";
 import { searchSource } from "./source.js";
+import { hasSrgMappings, remapMcJar, applyMcpNamesToSource } from "../mappings.js";
 
 // ── Index cache (disk-backed per version, mirroring mcsrc's index-manager) ───
 
@@ -199,9 +200,40 @@ export async function decompileMcVersion(version: string, force = false) {
         if (status === "running") return { status: "running", outDir };
     }
 
-    await decompileJar(jarPath, outDir);
+    // For legacy versions with SRG mappings, remap the JAR before decompiling
+    let decompileJarPath = jarPath;
+    let remapped = false;
+    if (hasSrgMappings(version)) {
+        const mapped = await remapMcJar(jarPath, version);
+        if (mapped) {
+            decompileJarPath = mapped;
+            remapped = true;
+        }
+    }
+
+    await decompileJar(decompileJarPath, outDir);
     await updateMcVersion(dbId, { decompPath: outDir, jarPath });
-    return { status: "started", outDir };
+
+    // For SRG versions, apply MCP human-readable names post-decompile
+    if (remapped) {
+        // Wait for decompile to finish before applying MCP names
+        // We schedule a background watcher that applies names when decompile completes
+        (async () => {
+            // Poll until done (max 30 min)
+            for (let i = 0; i < 360; i++) {
+                await new Promise(r => setTimeout(r, 5000));
+                const s = await isDecompileDone(outDir);
+                if (s === "done") {
+                    const result = await applyMcpNamesToSource(outDir, version);
+                    console.error(`[modlens] Applied MCP names to ${version}: ${result.replaced} replacements in ${result.files} files`);
+                    return;
+                }
+                if (s === "error") return;
+            }
+        })();
+    }
+
+    return { status: "started", outDir, remapped };
 }
 
 /** Poll decompile status; marks DB record when done. */

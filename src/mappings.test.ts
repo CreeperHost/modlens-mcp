@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { parseTinyV2, lookupInIndex } from "./mappings.js";
+import { parseTinyV2, lookupInIndex, hasSrgMappings } from "./mappings.js";
 
 const FIXTURE_TINY = [
     "tiny\t2\t0\tofficial\tintermediary",
@@ -119,5 +119,29 @@ describe("lookupInIndex — reverse (intermediary → official)", () => {
     it("returns found=false for unknown reverse symbol", () => {
         const r = lookupInIndex(idx, "class_9999_unknown", true);
         expect(r.found).toBe(false);
+    });
+});
+
+// ── hasSrgMappings ─────────────────────────────────────────────────────────
+
+describe("hasSrgMappings", () => {
+    it("returns true for known SRG versions", () => {
+        expect(hasSrgMappings("1.7.10")).toBe(true);
+        expect(hasSrgMappings("1.8")).toBe(true);
+        expect(hasSrgMappings("1.8.9")).toBe(true);
+        expect(hasSrgMappings("1.12.2")).toBe(true);
+        expect(hasSrgMappings("1.10.2")).toBe(true);
+    });
+
+    it("returns false for mojmap-era and newer versions", () => {
+        expect(hasSrgMappings("1.14")).toBe(false);
+        expect(hasSrgMappings("1.16.5")).toBe(false);
+        expect(hasSrgMappings("1.20.1")).toBe(false);
+        expect(hasSrgMappings("26.1.2")).toBe(false);
+    });
+
+    it("returns false for versions without SRG", () => {
+        expect(hasSrgMappings("1.6.4")).toBe(false);
+        expect(hasSrgMappings("1.13")).toBe(false);
     });
 });

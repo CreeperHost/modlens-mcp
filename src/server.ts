@@ -102,7 +102,7 @@ for (const ep of [ENV_PATH, localEnvPath]) {
     }
 }
 
-const server = new McpServer({ name: "modlens", version: "1.2.0" });
+const server = new McpServer({ name: "modlens", version: "1.3.0" });
 
 /** Serialize any result to MCP text content. */
 function out(result: unknown): { content: Array<{ type: "text"; text: string }> } {
