@@ -912,12 +912,15 @@ node dist/cli.js check-updates 2
 - **[MinecraftForge team](https://github.com/MinecraftForge)** — for the pre-fork Forge migration changelogs (1.18.2 → 1.20.1) seeded into the primers database.
 
 ### Community contributors
+- **[MCPHackers](https://mcphackers.org/)** — for [RetroMCP](https://github.com/MCPHackers/RetroMCP-Java), providing the Tiny v2 mappings that enable decompilation of legacy Minecraft versions (Alpha, Beta, and pre-1.7.10 releases).
 - **[ApexModder](https://github.com/ApexModder)** — for NeoForge update primers and migration guides included in the default primers database.
 - **[TheIllusiveC4](https://github.com/TheIllusiveC4)** — for [Curios API](https://github.com/TheIllusiveC4/Curios), whose wiki is seeded into the docs database as a default mod API reference.
 - **[ParchmentMC](https://parchmentmc.org)** — for [Parchment](https://github.com/ParchmentMC/Parchment), the community-maintained parameter names and javadocs layered on top of Mojmap used by the `mappings` tool.
 
 ### Tooling & libraries
 - **[Vineflower](https://github.com/Vineflower/vineflower)** — the decompiler powering all Java source reconstruction.
+- **[SpecialSource](https://github.com/md-5/SpecialSource)** — the bytecode remapper used to apply legacy SRG mappings for Minecraft 1.7.10 through 1.13.2.
+- **[tiny-remapper](https://github.com/FabricMC/tiny-remapper)** — the highly optimized JAR remapping tool used to apply RetroMCP and modern mappings.
 - **[SpongePowered Mixin](https://github.com/SpongePowered/Mixin)** — the Mixin framework whose annotation format the mixin-scan tool parses and analyses across mods.
 - **[Model Context Protocol SDK](https://github.com/modelcontextprotocol/typescript-sdk)** — the MCP server/client framework this tool is built on.
 - **[Prisma](https://www.prisma.io)** — ORM powering multi-backend database support (PostgreSQL, PGlite, SQLite).
