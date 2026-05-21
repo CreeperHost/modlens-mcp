@@ -498,6 +498,10 @@ const MODEL_DIMS: Record<string, string> = {
     "nomic-embed-text":  "768",
     "mxbai-embed-large": "1024",
 };
+const MODEL_CHUNK: Record<string, string> = {
+    "nomic-embed-text":  "1500",
+    "mxbai-embed-large": "500",
+};
 
 if (sections.has("semantic")) {
     const answer = await p.confirm({
@@ -644,6 +648,7 @@ if (sections.has("semantic") || sections.has("containers") || !isReconfigure) {
             OLLAMA_URL:         ollamaUrl,
             OLLAMA_EMBED_MODEL: embedModel,
             OLLAMA_EMBED_DIM:   MODEL_DIMS[embedModel] ?? existingEnv.OLLAMA_EMBED_DIM ?? "768",
+            OLLAMA_EMBED_CHUNK: MODEL_CHUNK[embedModel] ?? existingEnv.OLLAMA_EMBED_CHUNK ?? "500",
         } : {}),
     };
     if (existingEnv.CURSEFORGE_API_KEY) env.CURSEFORGE_API_KEY = existingEnv.CURSEFORGE_API_KEY;
@@ -778,6 +783,7 @@ if (sections.has("mcp")) {
             OLLAMA_URL:         ollamaUrl,
             OLLAMA_EMBED_MODEL: embedModel,
             OLLAMA_EMBED_DIM:   MODEL_DIMS[embedModel] ?? existingEnv.OLLAMA_EMBED_DIM ?? "768",
+            OLLAMA_EMBED_CHUNK: MODEL_CHUNK[embedModel] ?? existingEnv.OLLAMA_EMBED_CHUNK ?? "500",
         } : {}),
     };
 

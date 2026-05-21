@@ -160,7 +160,8 @@ export async function indexMcSourceSemantic(
         if (!batch.length) break;
         for (const file of batch) {
             try {
-                const chunk = chunkText(file.content, 1500)[0];
+                const chunkSize = parseInt(process.env.OLLAMA_EMBED_CHUNK ?? "500", 10);
+                const chunk = chunkText(file.content, chunkSize)[0];
                 const vec = await embed(chunk);
                 await upsertSourceEmbedding(file.id, vec);
                 embedded++;
@@ -250,7 +251,8 @@ export async function searchModSourceIndexed(
 export async function indexModSourceSemantic(
     dbId: number,
     batchSize = 50,
-): Promise<{ status: string; indexed: number; embedded: number; skipped: number; remaining: number }> {
+    maxFiles?: number,
+): Promise<{ status: string; indexed: number; embedded: number; skipped: number; remaining: number; error?: string }> {
     if (!await isOllamaAvailable()) {
         throw new Error("Ollama is not available. Set OLLAMA_URL and ensure Ollama is running with `ollama pull nomic-embed-text`.");
     }
@@ -260,24 +262,32 @@ export async function indexModSourceSemantic(
 
     // Embed in batches — always fetch from offset 0 so we never skip
     // unembedded rows that were inserted after a previous failed run
-    let embedded = 0; let embedSkipped = 0;
-    while (true) {
-        const batch = await findModSourceFilesUnembedded(dbId, batchSize, 0);
+    let embedded = 0; let embedSkipped = 0; let firstError = "";
+    const cap = maxFiles ?? Infinity;
+    while (embedded + embedSkipped < cap) {
+        const batch = await findModSourceFilesUnembedded(dbId, Math.min(batchSize, cap - embedded - embedSkipped), 0);
         if (!batch.length) break;
         for (const file of batch) {
+            if (embedded + embedSkipped >= cap) break;
             try {
-                const chunk = chunkText(file.content, 1500)[0];
+                const chunkSize = parseInt(process.env.OLLAMA_EMBED_CHUNK ?? "500", 10);
+                const chunk = chunkText(file.content, chunkSize)[0];
                 const vec = await embed(chunk);
                 await upsertModSourceEmbedding(file.id, vec);
                 embedded++;
-            } catch { embedSkipped++; }
+            } catch (err) {
+                embedSkipped++;
+                if (!firstError) firstError = err instanceof Error ? err.message : String(err);
+                if (embedded + embedSkipped <= 3) {
+                    console.error(`[embed] skip ${file.id}: ${err instanceof Error ? err.message : err}`);
+                }
+            }
         }
-        process.stdout.write(".");
         await new Promise(r => setTimeout(r, 50));
     }
 
     const remaining = await countUnembeddedModSourceFiles(dbId);
-    return { status: "done", indexed, embedded, skipped: walkSkipped + embedSkipped, remaining };
+    return { status: "done", indexed, embedded, skipped: walkSkipped + embedSkipped, remaining, ...(firstError ? { error: firstError } : {}) };
 }
 
 /**

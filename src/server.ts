@@ -102,7 +102,7 @@ for (const ep of [ENV_PATH, localEnvPath]) {
     }
 }
 
-const server = new McpServer({ name: "modlens", version: "1.1.0" });
+const server = new McpServer({ name: "modlens", version: "1.2.0" });
 
 /** Serialize any result to MCP text content. */
 function out(result: unknown): { content: Array<{ type: "text"; text: string }> } {
@@ -111,6 +111,14 @@ function out(result: unknown): { content: Array<{ type: "text"; text: string }> 
         : Array.isArray(result) && result.every(x => typeof x === "string") ? (result as string[]).join("\n")
         : JSON.stringify(result, null, 2);
     return { content: [{ type: "text", text }] };
+}
+
+/** Coerce modId to dbId when dbId wasn't explicitly provided. */
+function resolveDbId(dbId: number | undefined, modId: string | number | undefined): number | undefined {
+    if (dbId != null) return dbId;
+    if (modId == null) return undefined;
+    const n = typeof modId === "number" ? modId : Number(modId);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 /** Wrap tool handler so thrown errors return an MCP error response instead of hanging. */
@@ -156,7 +164,8 @@ server.tool(
         indexClasses: z.boolean().optional(),
         replace:      z.boolean().optional().describe("Replace existing mod with same modId (batch_ingest, ingest)"),
     },
-    safe(async ({ action, jarPath, modId, dbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace }) => {
+    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace }) => {
+        const dbId = resolveDbId(rawDbId, modId);
         let result: unknown;
         switch (action) {
             case "ingest":           result = await ingestMod(jarPath!, skipSource ?? false, replace ?? false); break;
@@ -176,7 +185,7 @@ server.tool(
             case "reindex":          result = await reindexClasses(dbId); break;
             case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false, replace ?? false); break;
             case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2) }); break;
-            case "index_semantic":   result = await indexModSourceSemantic(dbId!, (limit as number | undefined) ?? 50); break;
+            case "index_semantic":   result = await indexModSourceSemantic(dbId!, 50, limit); break;
             case "search_semantic":  result = await searchModSourceSemantic(query!, dbId!, limit ?? 10); break;
             case "index_fts":        result = await indexModSourceFts(dbId!); break;
             case "search_indexed":   result = await searchModSourceIndexed(dbId!, query!, limit ?? 20); break;
@@ -224,7 +233,8 @@ server.tool(
         cache:     z.boolean().optional().describe("Read from / write to DB cache for diff_detailed"),
         force:     z.boolean().optional().describe("Recompute and overwrite DB cache (implies cache=true) for diff_detailed / cache_diff"),
     },
-    safe(async ({ action, dbId, dbIdA, dbIdB, query, className, target, annotation, event, modId, transitive, mcVersion, loader, limit, packages, semantic, cache, force }) => {
+    safe(async ({ action, dbId: rawDbId, dbIdA, dbIdB, query, className, target, annotation, event, modId, transitive, mcVersion, loader, limit, packages, semantic, cache, force }) => {
+        const dbId = resolveDbId(rawDbId, modId);
         let result: unknown;
         const autoCache = !!(process.env.AUTO_CACHE_MOD_DIFFS);
         switch (action) {
@@ -263,7 +273,8 @@ server.tool(
         mcVersion:     z.string().optional(),
         loader:        z.string().optional(),
     },
-    safe(async ({ action, modId, dbId, targetClass, packagePrefix, mcVersion, loader }) => {
+    safe(async ({ action, modId, dbId: rawDbId, targetClass, packagePrefix, mcVersion, loader }) => {
+        const dbId = resolveDbId(rawDbId, modId);
         let result: unknown;
         switch (action) {
             case "targets":            result = await getMixinTargets(modId!); break;
@@ -292,7 +303,8 @@ server.tool(
         modIdFilter:     z.string().optional(),
         limit:           z.number().optional(),
     },
-    safe(async ({ action, dbId, syncModrinth: sm, syncCurseforge: sc, downloadSources, modIdFilter, limit }) => {
+    safe(async ({ action, dbId: rawDbId, syncModrinth: sm, syncCurseforge: sc, downloadSources, modIdFilter, limit }) => {
+        const dbId = resolveDbId(rawDbId, undefined);
         let result: unknown;
         switch (action) {
             case "sync_modrinth":   result = await syncModrinth(dbId!); break;
@@ -1032,4 +1044,7 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 
 // Background: re-queue any mods that were partially embedded before this start
-startupEmbedScan().catch(() => {});
+// Set MODLENS_AUTO_EMBED=0 to disable.
+if (process.env.MODLENS_AUTO_EMBED !== "0") {
+    startupEmbedScan().catch(() => {});
+}
