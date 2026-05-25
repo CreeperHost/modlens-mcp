@@ -79,7 +79,7 @@ import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
 import { checkModCompat } from "./tools/compat-check.js";
 import { disconnect } from "./db.js";
 import { mcPaths } from "./minecraft.js";
-import { findModById } from "./repositories/mod.js";
+import { findModById, resolveModRefSlim } from "./repositories/mod.js";
 import { CACHE_ROOT } from "./cache.js";
 
 // Load .env — try ~/.modlens/.env first (npx/installed users), then local .env (git-clone users)
@@ -119,6 +119,23 @@ function resolveDbId(dbId: number | undefined, modId: string | number | undefine
     if (modId == null) return undefined;
     const n = typeof modId === "number" ? modId : Number(modId);
     return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * Like resolveDbId, but for actions that need a valid DB id — will look up
+ * string modIds via the database so agents can pass e.g. modId:"polylib".
+ */
+async function resolveDbIdAsync(dbId: number | undefined, modId: string | number | undefined): Promise<number | undefined> {
+    if (dbId != null) return dbId;
+    if (modId == null) return undefined;
+    const n = typeof modId === "number" ? modId : Number(modId);
+    if (Number.isFinite(n) && n > 0) return n;
+    // String modId — resolve via DB lookup
+    if (typeof modId === "string") {
+        const mod = await resolveModRefSlim(modId);
+        if (mod) return mod.id;
+    }
+    return undefined;
 }
 
 /** Wrap tool handler so thrown errors return an MCP error response instead of hanging. */
@@ -165,7 +182,7 @@ server.tool(
         replace:      z.boolean().optional().describe("Replace existing mod with same modId (batch_ingest, ingest)"),
     },
     safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace }) => {
-        const dbId = resolveDbId(rawDbId, modId);
+        const dbId = await resolveDbIdAsync(rawDbId, modId);
         let result: unknown;
         switch (action) {
             case "ingest":           result = await ingestMod(jarPath!, skipSource ?? false, replace ?? false); break;
@@ -212,7 +229,7 @@ server.tool(
 
 server.tool(
     "mod_bytecode",
-    "Mod JAR bytecode and class analysis. action=search_class|class_members|bytecode|find_refs|cross_refs|inheritance|diff|diff_detailed|cache_diff|find_implementors|scan_registrations|annotated_by|event_listeners|optional_integrations|network_payloads|config_schema. diff_detailed gives AST-level method/field changes with breaking-change flags (add semantic=true for cosine similarity, requires mod index_semantic). cache_diff forces a (re)compute and writes to DB. Set env AUTO_CACHE_MOD_DIFFS=1 to auto-cache all diff_detailed calls.",
+    "Mod JAR bytecode and class analysis — for INGESTED MODS only (requires dbId or modId of an ingested mod). For vanilla Minecraft classes use mc_source instead. action=search_class|class_members|bytecode|find_refs|cross_refs|inheritance|diff|diff_detailed|cache_diff|find_implementors|scan_registrations|annotated_by|event_listeners|optional_integrations|network_payloads|config_schema. Most actions require dbId or modId. cross_refs/find_implementors/annotated_by/event_listeners can omit modId to search all mods. diff/diff_detailed/cache_diff require dbIdA+dbIdB. diff_detailed gives AST-level method/field changes with breaking-change flags (add semantic=true for cosine similarity, requires mod index_semantic). cache_diff forces a (re)compute and writes to DB. Set env AUTO_CACHE_MOD_DIFFS=1 to auto-cache all diff_detailed calls.",
     {
         action:     z.enum(["search_class","class_members","bytecode","find_refs","cross_refs","inheritance","diff","diff_detailed","cache_diff","find_implementors","scan_registrations","annotated_by","event_listeners","optional_integrations","network_payloads","config_schema"]),
         dbId:      z.number().optional().describe("DB id"),
@@ -223,7 +240,7 @@ server.tool(
         target:    z.string().optional().describe("slash/dot class/method/field, e.g. 'Cls:meth:(I)V'"),
         annotation:z.string().optional().describe("slash/dot annotation class"),
         event:     z.string().optional().describe("slash/dot event class"),
-        modId:     z.union([z.string(), z.number()]).optional(),
+        modId:     z.union([z.string(), z.number()]).optional().describe("Mod ID string (e.g. 'polylib') or numeric DB id. Resolved via DB lookup."),
         transitive:z.boolean().optional(),
         mcVersion: z.string().optional(),
         loader:    z.string().optional(),
@@ -234,7 +251,7 @@ server.tool(
         force:     z.boolean().optional().describe("Recompute and overwrite DB cache (implies cache=true) for diff_detailed / cache_diff"),
     },
     safe(async ({ action, dbId: rawDbId, dbIdA, dbIdB, query, className, target, annotation, event, modId, transitive, mcVersion, loader, limit, packages, semantic, cache, force }) => {
-        const dbId = resolveDbId(rawDbId, modId);
+        const dbId = await resolveDbIdAsync(rawDbId, modId);
         let result: unknown;
         const autoCache = !!(process.env.AUTO_CACHE_MOD_DIFFS);
         switch (action) {
@@ -274,7 +291,7 @@ server.tool(
         loader:        z.string().optional(),
     },
     safe(async ({ action, modId, dbId: rawDbId, targetClass, packagePrefix, mcVersion, loader }) => {
-        const dbId = resolveDbId(rawDbId, modId);
+        const dbId = await resolveDbIdAsync(rawDbId, modId);
         let result: unknown;
         switch (action) {
             case "targets":            result = await getMixinTargets(modId!); break;
@@ -304,7 +321,7 @@ server.tool(
         limit:           z.number().optional(),
     },
     safe(async ({ action, dbId: rawDbId, syncModrinth: sm, syncCurseforge: sc, downloadSources, modIdFilter, limit }) => {
-        const dbId = resolveDbId(rawDbId, undefined);
+        const dbId = await resolveDbIdAsync(rawDbId, undefined);
         let result: unknown;
         switch (action) {
             case "sync_modrinth":   result = await syncModrinth(dbId!); break;
@@ -448,7 +465,7 @@ server.tool(
 
 server.tool(
     "mc_source",
-    "Vanilla Minecraft source code, decompilation, and validation. action=search_class|get_source|bytecode|class_members|find_refs|inheritance|diff|diff_detailed|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin|index_semantic|search_semantic|get_paths. get_paths returns the on-disk jar, decompiled source directory, and index paths so the agent can grep/search files natively. diff_detailed gives AST-level method/field changes with breaking-change flags per class; add semantic=true for cosine similarity scoring (requires Ollama + index_semantic run first). index_semantic/search_semantic require Ollama running.",
+    "Vanilla Minecraft source code, decompilation, and validation — use this for vanilla MC classes (net/minecraft/...), NOT mod_bytecode. Requires version param. action=search_class|get_source|bytecode|class_members|find_refs|inheritance|diff|diff_detailed|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin|index_semantic|search_semantic|get_paths. get_paths returns the on-disk jar, decompiled source directory, and index paths so the agent can grep/search files natively. diff_detailed gives AST-level method/field changes with breaking-change flags per class; add semantic=true for cosine similarity scoring (requires Ollama + index_semantic run first). index_semantic/search_semantic require Ollama running.",
     {
         action:     z.enum(["search_class","get_source","bytecode","class_members","find_refs","inheritance","diff","diff_detailed","decompile","decompile_status","search_code","index","search_indexed","search_events","validate_aw","analyze_mixin","index_semantic","search_semantic","get_paths"]),
         version:    z.string().optional(),
@@ -720,7 +737,7 @@ server.tool(
 
 server.tool(
     "mc_files",
-    "Vanilla MC file access via misode/mcmeta (data packs, assets, atlases, diffs, changelogs). action=get_data|get_asset|list_files|diff|atlas|raw|compare|changelog.",
+    "Vanilla MC file access via misode/mcmeta (data packs, assets, atlases, diffs, changelogs). action=get_data|get_asset|list_files|diff|atlas|raw|compare|changelog. list_files requires dirPath+version+branch. diff requires filePath+versionA+versionB. get_data/get_asset require filePath.",
     {
         action:   z.enum(["get_data","get_asset","list_files","diff","atlas","raw","compare","changelog"]),
         filePath: z.string().optional().describe("relative path in branch"),

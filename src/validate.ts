@@ -5,7 +5,9 @@
 
 const VERSION_MAX_LEN = 64;
 const CLASS_MAX_LEN = 200;
-const SHELL_META = /[;&|`$<>\\'"*?{}[\]!#~]/;
+const SHELL_META = /[;&|`<>\\'"*?{}[\]!#~]/;
+/** Class names may contain $ (inner classes) but must not have shell-dangerous chars. */
+const CLASS_ILLEGAL = /[;&|`<>\\'"*?{}[\]!#~]/;
 
 /**
  * Validate a database record ID: must be a positive integer.
@@ -48,7 +50,7 @@ export function validateClassName(className: string): string {
     if (className.includes("..")) {
         throw new Error(`Invalid className: path traversal sequence detected`);
     }
-    if (SHELL_META.test(className)) {
+    if (CLASS_ILLEGAL.test(className)) {
         throw new Error(`Invalid className: contains illegal characters`);
     }
     return className;

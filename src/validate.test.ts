@@ -63,6 +63,12 @@ describe("validateClassName", () => {
         expect(() => validateClassName("net.minecraft.world.World")).not.toThrow();
     });
 
+    it("accepts Java inner class names with $", () => {
+        expect(() => validateClassName("net/minecraft/client/gui/components/Button$Builder")).not.toThrow();
+        expect(() => validateClassName("net.minecraft.client.gui.components.Button$Builder")).not.toThrow();
+        expect(() => validateClassName("com/example/Outer$Inner$Deeper")).not.toThrow();
+    });
+
     it("throws for empty string", () => {
         expect(() => validateClassName("")).toThrow("className");
     });
