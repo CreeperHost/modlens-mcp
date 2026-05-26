@@ -12,6 +12,9 @@
 
 import { extractEntry, listEntries } from "../jar.js";
 import { resolveModRef, findModById, listModsSlim } from "../repositories/mod.js";
+import { writeFile, mkdir } from "fs/promises";
+import { join, extname, dirname } from "path";
+import { CACHE_ROOT } from "../cache.js";
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -165,9 +168,11 @@ export async function listModJarFiles(modId: string | number, prefix = ""): Prom
     return { mod: mod.modId, prefix: prefix || "(root)", count: entries.length, entries };
 }
 
+const BINARY_EXTS = new Set([".png", ".ogg", ".gif", ".wav", ".nbt", ".dat", ".mca", ".jar", ".class", ".ttf", ".otf", ".ico", ".webp", ".jpg", ".jpeg", ".bmp"]);
+
 /**
  * Read any file from a mod JAR by its internal path.
- * Returns parsed JSON for .json files, raw text for others.
+ * Returns parsed JSON for .json files, cached file path for binary files, raw text for others.
  * path: e.g. "data/mymod/recipe/iron_sword.json", "assets/mymod/sounds.json"
  */
 export async function getModJarFile(modId: string | number, path: string): Promise<object> {
@@ -176,6 +181,14 @@ export async function getModJarFile(modId: string | number, path: string): Promi
 
     const buf = extractEntry(mod.jarPath, path);
     if (!buf) return { mod: mod.modId, path, found: false };
+
+    const ext = extname(path).toLowerCase();
+    if (BINARY_EXTS.has(ext)) {
+        const cachePath = join(CACHE_ROOT, "jar-extract", mod.modId, path);
+        await mkdir(dirname(cachePath), { recursive: true });
+        await writeFile(cachePath, buf);
+        return { mod: mod.modId, path, cachedAt: cachePath, encoding: "binary", sizeBytes: buf.length };
+    }
 
     if (path.endsWith(".json")) {
         try {

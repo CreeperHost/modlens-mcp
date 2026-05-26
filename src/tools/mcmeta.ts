@@ -259,8 +259,15 @@ export async function getMcmetaRaw(
     ref: string,
     filePath: string,
 ): Promise<object> {
+    const ext = extname(filePath).toLowerCase();
+    const isBinary = [".png", ".ogg", ".gif", ".wav", ".nbt", ".dat", ".mca", ".jar"].includes(ext);
     try {
-        const buf = await fetchMcmeta(ref, filePath, false);
+        const buf = await fetchMcmeta(ref, filePath, isBinary);
+        if (isBinary) {
+            const [ver, br] = ref.includes("-") ? ref.split(/-(.+)/) as [string, string] : ["_latest", ref];
+            const cachePath = mcmetaCachePath(ver, br, filePath);
+            return { ref, path: filePath, cachedAt: cachePath, encoding: "binary", sizeBytes: buf.length };
+        }
         const isJson = filePath.endsWith(".json");
         return {
             ref,
