@@ -25,6 +25,8 @@ import { PKG_ROOT, MODLENS_HOME, ENV_PATH, IS_INSTALLED, ensureModlensHome } fro
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = PKG_ROOT;
+const DEFAULT_GRAPH_REGISTRY_URL = "https://raw.githubusercontent.com/Mattabase/modlens-graphs/main/index.json";
+const DEFAULT_EMBED_REGISTRY_URL = "https://raw.githubusercontent.com/Mattabase/modlens-embeddings/main/index.json";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -775,12 +777,14 @@ if (sections.has("backfill")) {
 // ── Graph extraction (Graphify) ───────────────────────────────────────────────
 if (sections.has("graphs")) {
     const wantGraphs = await p.confirm({
-        message: "Set up graph extraction for mod analysis? (Graphify converts source to knowledge graphs)",
+        message: "Set up graph extraction + optional distribution registry URLs?",
         initialValue: true,
     });
     checkCancel(wantGraphs);
 
     if (wantGraphs) {
+        p.log.message("This step configures graph extraction. Graph/embed downloads only work after you publish registry index URLs.");
+
         // Check if graphify CLI is installed
         const graphifyCheck = run("graphify --version", { silent: true });
         if (!graphifyCheck.ok) {
@@ -875,6 +879,39 @@ if (sections.has("graphs")) {
             const model = await p.text({ message: "Custom endpoint model name:", initialValue: existingEnv.GRAPHIFY_CUSTOM_MODEL ?? "" });
             checkCancel(model);
             if (model) graphEnv.GRAPHIFY_CUSTOM_MODEL = model as string;
+        }
+
+        const currentGraphRegistry = (existingEnv.MODLENS_GRAPH_REGISTRY_URL ?? "").trim() || DEFAULT_GRAPH_REGISTRY_URL;
+        const currentEmbedRegistry = (existingEnv.MODLENS_EMBED_REGISTRY_URL ?? "").trim() || DEFAULT_EMBED_REGISTRY_URL;
+
+        const useDefaultRegistryUrls = await p.confirm({
+            message: "Use default registry URLs for graph_download/embed_download?",
+            initialValue: true,
+        });
+        checkCancel(useDefaultRegistryUrls);
+
+        if (useDefaultRegistryUrls) {
+            graphEnv.MODLENS_GRAPH_REGISTRY_URL = DEFAULT_GRAPH_REGISTRY_URL;
+            graphEnv.MODLENS_EMBED_REGISTRY_URL = DEFAULT_EMBED_REGISTRY_URL;
+            p.log.message(`Graph registry: ${DEFAULT_GRAPH_REGISTRY_URL}`);
+            p.log.message(`Embed registry: ${DEFAULT_EMBED_REGISTRY_URL}`);
+        } else {
+            const graphRegistryUrl = await p.text({
+                message: "Graph registry index URL",
+                initialValue: currentGraphRegistry,
+                placeholder: "https://.../index.json",
+            });
+            checkCancel(graphRegistryUrl);
+
+            const embedRegistryUrl = await p.text({
+                message: "Embedding registry index URL",
+                initialValue: currentEmbedRegistry,
+                placeholder: "https://.../index.json",
+            });
+            checkCancel(embedRegistryUrl);
+
+            graphEnv.MODLENS_GRAPH_REGISTRY_URL = (graphRegistryUrl as string).trim() || DEFAULT_GRAPH_REGISTRY_URL;
+            graphEnv.MODLENS_EMBED_REGISTRY_URL = (embedRegistryUrl as string).trim() || DEFAULT_EMBED_REGISTRY_URL;
         }
 
         // Save graph-related env vars

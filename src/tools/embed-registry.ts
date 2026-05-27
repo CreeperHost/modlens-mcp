@@ -256,14 +256,13 @@ export async function importModEmbeddings(
 
 // ── Download from registry ────────────────────────────────────────────────────
 
-const EMBED_REGISTRY_URL = process.env.MODLENS_EMBED_REGISTRY_URL ?? "";
+const EMBED_REGISTRY_URL = process.env.MODLENS_EMBED_REGISTRY_URL ??
+    "https://raw.githubusercontent.com/Mattabase/modlens-embeddings/main/index.json";
 
 let cachedEmbedRegistry: { data: EmbedRegistry; fetchedAt: number } | null = null;
 const REGISTRY_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 async function fetchEmbedRegistry(): Promise<EmbedRegistry> {
-    if (!EMBED_REGISTRY_URL) throw new Error("No embedding registry URL configured (MODLENS_EMBED_REGISTRY_URL)");
-
     if (cachedEmbedRegistry && Date.now() - cachedEmbedRegistry.fetchedAt < REGISTRY_CACHE_TTL) {
         return cachedEmbedRegistry.data;
     }
@@ -286,14 +285,14 @@ async function fetchEmbedRegistry(): Promise<EmbedRegistry> {
 export async function downloadEmbeddings(
     modId: string,
     modVersion: string,
-): Promise<{ status: string; imported?: number; skipped?: number; availableModels?: string[] }> {
+): Promise<{ status: string; source?: string; imported?: number; skipped?: number; availableModels?: string[] }> {
     const localModel = process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
 
     let registry: EmbedRegistry;
     try {
         registry = await fetchEmbedRegistry();
     } catch (e) {
-        return { status: "registry_unavailable" };
+        return { status: "registry_unavailable", source: (e as Error).message };
     }
 
     // Find matching bundle for user's model
