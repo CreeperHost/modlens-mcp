@@ -268,6 +268,11 @@ async function fetchEmbedRegistry(): Promise<EmbedRegistry> {
     }
 
     const res = await fetch(EMBED_REGISTRY_URL, { signal: AbortSignal.timeout(10_000) });
+    if (res.status === 404) {
+        const empty: EmbedRegistry = { version: 1, models: [], bundles: [] };
+        cachedEmbedRegistry = { data: empty, fetchedAt: Date.now() };
+        return empty;
+    }
     if (!res.ok) throw new Error(`Failed to fetch embedding registry: ${res.status}`);
 
     const data = await res.json() as EmbedRegistry;

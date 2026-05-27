@@ -662,6 +662,9 @@ interface GraphRegistryEntry {
     version: string;
     loader: string;
     mcVersion: string;
+    targetType?: "mod" | "vanilla" | "modloader";
+    backend?: string;
+    model?: string;
     graphUrl: string;
     sha256: string;
     nodeCount: number;
@@ -684,6 +687,11 @@ async function fetchGraphRegistry(): Promise<GraphRegistry> {
     }
 
     const res = await fetch(GRAPH_REGISTRY_URL, { signal: AbortSignal.timeout(10_000) });
+    if (res.status === 404) {
+        const empty: GraphRegistry = { version: 1, graphs: [] };
+        cachedRegistry = { data: empty, fetchedAt: Date.now() };
+        return empty;
+    }
     if (!res.ok) throw new Error(`Failed to fetch graph registry: ${res.status}`);
 
     const data = await res.json() as GraphRegistry;
@@ -700,7 +708,16 @@ async function fetchGraphRegistry(): Promise<GraphRegistry> {
  */
 export async function downloadGraph(
     dbId: number,
-): Promise<{ status: string; source?: string; nodeCount?: number; edgeCount?: number; enriched?: boolean }> {
+): Promise<{
+    status: string;
+    source?: string;
+    nodeCount?: number;
+    edgeCount?: number;
+    enriched?: boolean;
+    backend?: string;
+    model?: string;
+    targetType?: "mod" | "vanilla" | "modloader";
+}> {
     validateDbId(dbId);
     const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
@@ -774,5 +791,8 @@ export async function downloadGraph(
         nodeCount: entry.nodeCount,
         edgeCount: entry.edgeCount,
         enriched: entry.enriched,
+        backend: entry.backend,
+        model: entry.model,
+        targetType: entry.targetType ?? "mod",
     };
 }
