@@ -371,7 +371,7 @@ export interface AutoBehaviorOpts {
 }
 
 /** Resolve an auto-behavior flag: explicit param > env var > default (true). */
-function resolveAuto(explicit: boolean | undefined, envKey: string): boolean {
+export function resolveAuto(explicit: boolean | undefined, envKey: string): boolean {
     if (explicit !== undefined) return explicit;
     const envVal = process.env[envKey];
     if (envVal === "0" || envVal === "false") return false;

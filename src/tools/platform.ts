@@ -6,15 +6,7 @@ import { ensureDir } from "../cache.js";
 import { findModById, updateMod, listModsForSync, getModMetadata } from "../repositories/mod.js";
 import { fileSha512, verifyFileHash, HashMismatchError, validatePath } from "../security.js";
 import { buildModGraph, ensureGraphify } from "./graphify.js";
-import type { AutoBehaviorOpts } from "./ingest.js";
-
-/** Resolve an auto-behavior flag: explicit param > env var > default (true). */
-function resolveAuto(explicit: boolean | undefined, envKey: string): boolean {
-    if (explicit !== undefined) return explicit;
-    const envVal = process.env[envKey];
-    if (envVal === "0" || envVal === "false") return false;
-    return true;
-}
+import { resolveAuto, type AutoBehaviorOpts } from "./ingest.js";
 
 export async function syncModrinth(dbId: number) {
     const mod = await findModById(dbId);
