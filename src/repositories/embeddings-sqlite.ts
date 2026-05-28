@@ -98,17 +98,24 @@ export async function upsertSourceEmbedding(id: number, vec: number[], source: s
 }
 
 export async function searchSourceByVector(
-    vec: number[], mcVersionId: number, limit = 10,
-): Promise<Array<{ id: number; class_name: string; similarity: number }>> {
+    vec: number[], mcVersionId: number, limit = 10, provenance?: string,
+): Promise<Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>> {
     const db = await getVecDb();
     try {
-        const rows = db.prepare(
-            `SELECT v.rowid AS id, s.class_name, v.distance FROM vec_mc_source v
-             JOIN mc_source_files s ON s.id = v.rowid
-             WHERE v.embedding MATCH ? AND v.k = ? AND s.mc_version_id = ?
-             ORDER BY v.distance`,
-        ).all(float32Blob(vec), limit, mcVersionId) as Array<{ id: number; class_name: string; distance: number }>;
-        return rows.map((r) => ({ id: r.id, class_name: r.class_name, similarity: 1 - r.distance }));
+        const sql = provenance
+            ? `SELECT v.rowid AS id, s.class_name, s.embed_source, v.distance FROM vec_mc_source v
+               JOIN mc_source_files s ON s.id = v.rowid
+               WHERE v.embedding MATCH ? AND v.k = ? AND s.mc_version_id = ? AND s.embed_source = ?
+               ORDER BY v.distance`
+            : `SELECT v.rowid AS id, s.class_name, s.embed_source, v.distance FROM vec_mc_source v
+               JOIN mc_source_files s ON s.id = v.rowid
+               WHERE v.embedding MATCH ? AND v.k = ? AND s.mc_version_id = ?
+               ORDER BY v.distance`;
+        const args = provenance
+            ? [float32Blob(vec), limit, mcVersionId, provenance]
+            : [float32Blob(vec), limit, mcVersionId];
+        const rows = db.prepare(sql).all(...args) as Array<{ id: number; class_name: string; embed_source: string | null; distance: number }>;
+        return rows.map((r) => ({ id: r.id, class_name: r.class_name, embed_source: r.embed_source, similarity: 1 - r.distance }));
     } catch {
         return [];
     }
@@ -126,17 +133,24 @@ export async function upsertModSourceEmbedding(id: number, vec: number[], source
 }
 
 export async function searchModSourceByVector(
-    vec: number[], modId: number, limit = 10,
-): Promise<Array<{ id: number; class_name: string; similarity: number }>> {
+    vec: number[], modId: number, limit = 10, provenance?: string,
+): Promise<Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>> {
     const db = await getVecDb();
     try {
-        const rows = db.prepare(
-            `SELECT v.rowid AS id, s.class_name, v.distance FROM vec_mod_source v
-             JOIN mod_source_files s ON s.id = v.rowid
-             WHERE v.embedding MATCH ? AND v.k = ? AND s.mod_id = ?
-             ORDER BY v.distance`,
-        ).all(float32Blob(vec), limit, modId) as Array<{ id: number; class_name: string; distance: number }>;
-        return rows.map((r) => ({ id: r.id, class_name: r.class_name, similarity: 1 - r.distance }));
+        const sql = provenance
+            ? `SELECT v.rowid AS id, s.class_name, s.embed_source, v.distance FROM vec_mod_source v
+               JOIN mod_source_files s ON s.id = v.rowid
+               WHERE v.embedding MATCH ? AND v.k = ? AND s.mod_id = ? AND s.embed_source = ?
+               ORDER BY v.distance`
+            : `SELECT v.rowid AS id, s.class_name, s.embed_source, v.distance FROM vec_mod_source v
+               JOIN mod_source_files s ON s.id = v.rowid
+               WHERE v.embedding MATCH ? AND v.k = ? AND s.mod_id = ?
+               ORDER BY v.distance`;
+        const args = provenance
+            ? [float32Blob(vec), limit, modId, provenance]
+            : [float32Blob(vec), limit, modId];
+        const rows = db.prepare(sql).all(...args) as Array<{ id: number; class_name: string; embed_source: string | null; distance: number }>;
+        return rows.map((r) => ({ id: r.id, class_name: r.class_name, embed_source: r.embed_source, similarity: 1 - r.distance }));
     } catch {
         return [];
     }

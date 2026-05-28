@@ -200,8 +200,9 @@ server.tool(
         model:        z.string().optional().describe("Embedding model override for embed_download"),
         autoEmbed:    z.boolean().optional().describe("Override auto-embed on decompile completion (default: env MODLENS_AUTO_EMBED, true)"),
         autoGraph:    z.boolean().optional().describe("Override auto-graph-build on decompile/source-download (default: env MODLENS_AUTO_GRAPH, true)"),
+        provenance:   z.enum(["local", "registry", "community"]).optional().describe("Filter search_semantic results by embedding source (default: all sources)"),
     },
-    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model, autoEmbed, autoGraph }) => {
+    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model, autoEmbed, autoGraph, provenance }) => {
         const dbId = await resolveDbIdAsync(rawDbId, modId);
         const resolvedTargetType = targetType ?? "mod";
         const resolvedTargetId = targetId ?? (typeof modId === "string" ? modId : undefined) ?? (resolvedTargetType === "vanilla" ? "minecraft" : undefined);
@@ -226,7 +227,7 @@ server.tool(
             case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false, replace ?? false); break;
             case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2) }); break;
             case "index_semantic":   result = await indexModSourceSemantic(dbId!, 50, limit); break;
-            case "search_semantic":  result = await searchModSourceSemantic(query!, dbId!, limit ?? 10); break;
+            case "search_semantic":  result = await searchModSourceSemantic(query!, dbId!, limit ?? 10, provenance); break;
             case "index_fts":        result = await indexModSourceFts(dbId!); break;
             case "search_indexed":   result = await searchModSourceIndexed(dbId!, query!, limit ?? 20); break;
             case "get_paths": {
@@ -554,8 +555,9 @@ server.tool(
         endLine:    z.number().optional().describe("1-based end line"),
         maxLines:   z.number().optional(),
         limit:      z.number().optional(),
+        provenance: z.enum(["local", "registry", "community"]).optional().describe("Filter search_semantic results by embedding source (default: all sources)"),
     },
-    safe(async ({ action, version, versionA, versionB, mcVersion, query, className, target, searchType, isRegex, force, packages, semantic, cache, modloader, content, source, startLine, endLine, maxLines, limit }) => {
+    safe(async ({ action, version, versionA, versionB, mcVersion, query, className, target, searchType, isRegex, force, packages, semantic, cache, modloader, content, source, startLine, endLine, maxLines, limit, provenance }) => {
         const v = version ?? mcVersion;
         let result: unknown;
         switch (action) {
@@ -576,7 +578,7 @@ server.tool(
             case "validate_aw":     result = await validateAccessWidener(content!, v!); break;
             case "analyze_mixin":   result = await analyzeMixin(source!, v!); break;
             case "index_semantic":  result = await indexMcSourceSemantic(v!, (limit as number | undefined) ?? 50); break;
-            case "search_semantic": result = await searchMcSourceSemantic(query!, v!, limit ?? 10); break;
+            case "search_semantic": result = await searchMcSourceSemantic(query!, v!, limit ?? 10, provenance); break;
             case "get_paths": {
                 const ver = v!;
                 result = {

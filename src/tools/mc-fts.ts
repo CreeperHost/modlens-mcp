@@ -183,14 +183,15 @@ export async function searchMcSourceSemantic(
     query: string,
     version: string,
     limit = 10,
-): Promise<Array<{ className: string; similarity: number }>> {
+    provenance?: string,
+): Promise<Array<{ className: string; similarity: number; source: string }>> {
     const row = await findMcVersionByVersionId(version);
     if (!row) {
         throw new Error(`Version "${version}" is not in the database. Run index_minecraft_version("${version}") first.`);
     }
     const vec = await embed(query);
-    const rows = await searchSourceByVector(vec, row.id, limit);
-    return rows.map(r => ({ className: r.class_name, similarity: Math.round(r.similarity * 1000) / 1000 }));
+    const rows = await searchSourceByVector(vec, row.id, limit, provenance);
+    return rows.map(r => ({ className: r.class_name, similarity: Math.round(r.similarity * 1000) / 1000, source: r.embed_source ?? "local" }));
 }
 
 // ── Mod source semantic index / search ────────────────────────────────────────
@@ -298,17 +299,19 @@ export async function searchModSourceSemantic(
     query: string,
     dbId: number,
     limit = 10,
-): Promise<Array<{ className: string; modId: string; similarity: number }>> {
+    provenance?: string,
+): Promise<Array<{ className: string; modId: string; similarity: number; source: string }>> {
     if (!await isOllamaAvailable()) {
         throw new Error("Ollama is not available. Set OLLAMA_URL and ensure Ollama is running with `ollama pull nomic-embed-text`.");
     }
     const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     const vec = await embed(query);
-    const rows = await searchModSourceByVector(vec, dbId, limit);
+    const rows = await searchModSourceByVector(vec, dbId, limit, provenance);
     return rows.map(r => ({
         className: r.class_name,
         modId: mod.modId,
         similarity: Math.round(r.similarity * 1000) / 1000,
+        source: r.embed_source ?? "local",
     }));
 }

@@ -69,11 +69,21 @@ export async function upsertSourceEmbedding(id: number, vec: number[], source: s
 }
 
 export async function searchSourceByVector(
-    vec: number[], mcVersionId: number, limit = 10,
-): Promise<Array<{ id: number; class_name: string; similarity: number }>> {
+    vec: number[], mcVersionId: number, limit = 10, provenance?: string,
+): Promise<Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>> {
     const db = await getDb();
-    return db.$queryRawUnsafe<Array<{ id: number; class_name: string; similarity: number }>>(
-        `SELECT id, class_name, (1 - (embedding <=> $1::vector))::float AS similarity
+    if (provenance) {
+        return db.$queryRawUnsafe(
+            `SELECT id, class_name, embed_source, (1 - (embedding <=> $1::vector))::float AS similarity
+             FROM mc_source_files
+             WHERE mc_version_id = $3 AND embedding IS NOT NULL AND embed_source = $4
+             ORDER BY embedding <=> $1::vector
+             LIMIT $2`,
+            vecLiteral(vec), limit, mcVersionId, provenance,
+        );
+    }
+    return db.$queryRawUnsafe(
+        `SELECT id, class_name, embed_source, (1 - (embedding <=> $1::vector))::float AS similarity
          FROM mc_source_files
          WHERE mc_version_id = $3 AND embedding IS NOT NULL
          ORDER BY embedding <=> $1::vector
@@ -109,11 +119,21 @@ export async function upsertModSourceEmbedding(id: number, vec: number[], source
 }
 
 export async function searchModSourceByVector(
-    vec: number[], modId: number, limit = 10,
-): Promise<Array<{ id: number; class_name: string; similarity: number }>> {
+    vec: number[], modId: number, limit = 10, provenance?: string,
+): Promise<Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>> {
     const db = await getDb();
-    return db.$queryRawUnsafe<Array<{ id: number; class_name: string; similarity: number }>>(
-        `SELECT id, class_name, (1 - (embedding <=> $1::vector))::float AS similarity
+    if (provenance) {
+        return db.$queryRawUnsafe(
+            `SELECT id, class_name, embed_source, (1 - (embedding <=> $1::vector))::float AS similarity
+             FROM mod_source_files
+             WHERE mod_id = $3 AND embedding IS NOT NULL AND embed_source = $4
+             ORDER BY embedding <=> $1::vector
+             LIMIT $2`,
+            vecLiteral(vec), limit, modId, provenance,
+        );
+    }
+    return db.$queryRawUnsafe(
+        `SELECT id, class_name, embed_source, (1 - (embedding <=> $1::vector))::float AS similarity
          FROM mod_source_files
          WHERE mod_id = $3 AND embedding IS NOT NULL
          ORDER BY embedding <=> $1::vector
