@@ -8,6 +8,8 @@
  *   list_parchment_versions - List available Parchment builds for a MC version
  */
 import { translateSymbol, remapJar, getParchmentClass, listAvailableParchmentVersions, getParchmentData, type MappingNs } from "../mappings.js";
+import { assertJarPath } from "../security.js";
+import { extname } from "path";
 
 // ── find_mapping ──────────────────────────────────────────────────────────────
 export async function findMapping(
@@ -27,6 +29,10 @@ export async function remapModJar(
     version: string,
     toMapping: "yarn" | "mojmap",
 ): Promise<object> {
+    assertJarPath(inputJar);
+    if (extname(outputJar).toLowerCase() !== ".jar") {
+        throw new Error("outputJar must have a .jar extension");
+    }
     const result = await remapJar(inputJar, outputJar, version, toMapping);
     return {
         success: true,

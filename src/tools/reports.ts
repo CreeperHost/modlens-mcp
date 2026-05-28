@@ -14,7 +14,7 @@
  *   - gradle_deps            — cross-mod gradle dependency comparison
  */
 import { writeFile, mkdir } from "fs/promises";
-import { join, dirname } from "path";
+import { join, dirname, resolve, extname } from "path";
 import { resolveModRef, findModTagsByMod } from "../repositories/mod.js";
 import { getDb } from "../db.js";
 import { getMixinConflictMatrix, getMixinHotspots, listModsWithMixins } from "./mixin-scan.js";
@@ -25,6 +25,57 @@ import { getMixinConflicts } from "./mixin-scan.js";
 import { findAtAwConflicts } from "./mixin-scan.js";
 import { findTagConflicts as _ftc } from "./mod-tags.js";
 import { analyzePackSidedness, computeModComplexity, computePackChangelog } from "./packtools.js";
+
+// ── Save-path security ───────────────────────────────────────────────────────
+
+const DEFAULT_BLOCKED_PREFIXES_WIN = [
+    "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+    "C:\\ProgramData",
+];
+const DEFAULT_BLOCKED_PREFIXES_UNIX = [
+    "/etc", "/usr", "/bin", "/sbin", "/lib", "/var", "/boot", "/sys", "/proc",
+];
+const DEFAULT_ALLOWED_EXTENSIONS = [".md", ".markdown", ".txt"];
+
+function getBlockedPrefixes(): string[] {
+    const envExtra = process.env.MODLENS_REPORT_BLOCKED_PATHS;
+    const defaults = process.platform === "win32" ? DEFAULT_BLOCKED_PREFIXES_WIN : DEFAULT_BLOCKED_PREFIXES_UNIX;
+    if (envExtra) return [...defaults, ...envExtra.split(",").map(p => p.trim()).filter(Boolean)];
+    return defaults;
+}
+
+function getAllowedExtensions(): Set<string> {
+    const envExtra = process.env.MODLENS_REPORT_ALLOWED_EXTENSIONS;
+    const exts = [...DEFAULT_ALLOWED_EXTENSIONS];
+    if (envExtra) exts.push(...envExtra.split(",").map(e => e.trim().toLowerCase()).filter(Boolean));
+    return new Set(exts);
+}
+
+function validateSavePath(savePath: string): void {
+    // Env override: skip all validation
+    if (process.env.MODLENS_REPORT_ALLOW_ANY_PATH === "1") return;
+
+    const resolved = resolve(savePath);
+    const ext = extname(resolved).toLowerCase();
+    const allowedExts = getAllowedExtensions();
+    if (!allowedExts.has(ext)) {
+        throw new Error(
+            `Report savePath must use an allowed extension (${[...allowedExts].join(", ")}), got "${ext}". ` +
+            `Add extensions via MODLENS_REPORT_ALLOWED_EXTENSIONS env var, or set MODLENS_REPORT_ALLOW_ANY_PATH=1 to disable.`
+        );
+    }
+
+    const blocked = getBlockedPrefixes();
+    const resolvedLower = resolved.toLowerCase();
+    for (const prefix of blocked) {
+        if (resolvedLower.startsWith(prefix.toLowerCase() + require("path").sep) || resolvedLower === prefix.toLowerCase()) {
+            throw new Error(
+                `Report savePath blocked: "${resolved}" is under system path "${prefix}". ` +
+                `Add override paths via MODLENS_REPORT_BLOCKED_PATHS env var, or set MODLENS_REPORT_ALLOW_ANY_PATH=1 to disable.`
+            );
+        }
+    }
+}
 
 // ── Markdown helpers ──────────────────────────────────────────────────────────
 
@@ -635,6 +686,7 @@ export async function generateReport(opts: {
 
     let savedTo: string | undefined;
     if (opts.savePath) {
+        validateSavePath(opts.savePath);
         await mkdir(dirname(opts.savePath), { recursive: true });
         await writeFile(opts.savePath, markdown, "utf8");
         savedTo = opts.savePath;

@@ -41,12 +41,15 @@ export async function getModClassBytecode(dbId: number, className: string): Prom
 }
 
 export async function findModReferences(dbId: number, target: string): Promise<string[]> {
+    validateDbId(dbId);
     const jarPath = await getModJar(dbId);
     const index = await indexJar(jarPath);
     return index.references[target] ?? [];
 }
 
 export async function getModInheritance(dbId: number, className: string) {
+    validateDbId(dbId);
+    validateClassName(className);
     const jarPath = await getModJar(dbId);
     const internal = className.replace(/\./g, "/");
     const index = await indexJar(jarPath);
@@ -71,6 +74,12 @@ export async function getModInheritance(dbId: number, className: string) {
 }
 
 export async function diffModVersions(dbIdA: number, dbIdB: number) {
+    validateDbId(dbIdA);
+    validateDbId(dbIdB);
+    const [jarA, jarB] = await Promise.all([
+        getModJar(dbIdA),
+        getModJar(dbIdB),
+    ]);
     const [a, b] = await Promise.all([
         findModById(dbIdA),
         findModById(dbIdB),
@@ -79,10 +88,10 @@ export async function diffModVersions(dbIdA: number, dbIdB: number) {
     if (!b) throw new Error(`Mod #${dbIdB} not found`);
 
     const classesA = new Set(
-        listClasses(a.jarPath).map((c) => c.replace(/\.class$/, ""))
+        listClasses(jarA).map((c) => c.replace(/\.class$/, ""))
     );
     const classesB = new Set(
-        listClasses(b.jarPath).map((c) => c.replace(/\.class$/, ""))
+        listClasses(jarB).map((c) => c.replace(/\.class$/, ""))
     );
 
     const added = [...classesB].filter((c) => !classesA.has(c));
