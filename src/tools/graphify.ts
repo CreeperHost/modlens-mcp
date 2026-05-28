@@ -53,20 +53,27 @@ export interface DetectedBackend {
 }
 
 let cachedOllamaModel: { model: string; contextLength: number; params: string } | null | undefined;
+let cachedOllamaModelAt = 0;
+const OLLAMA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+type OllamaModelResult = { model: string; contextLength: number; params: string } | null;
+
+function cacheOllamaResult(v: OllamaModelResult): OllamaModelResult { cachedOllamaModel = v; cachedOllamaModelAt = Date.now(); return v; }
 
 /**
  * Detect the best available Ollama generation model.
  * Returns null if no suitable model found or Ollama unreachable.
+ * Results are cached for 5 minutes.
  */
 export async function detectOllamaModel(): Promise<{ model: string; contextLength: number; params: string } | null> {
-    if (cachedOllamaModel !== undefined) return cachedOllamaModel;
+    if (cachedOllamaModel !== undefined && Date.now() - cachedOllamaModelAt < OLLAMA_CACHE_TTL_MS) return cachedOllamaModel;
 
     const ollamaUrl = process.env.OLLAMA_URL ?? "http://localhost:11434";
     try {
         const res = await fetch(`${ollamaUrl}/api/tags`, {
             signal: AbortSignal.timeout(3000),
         });
-        if (!res.ok) { cachedOllamaModel = null; return null; }
+        if (!res.ok) { cacheOllamaResult(null); return null; }
 
         const data = await res.json() as { models?: Array<{ name: string; details?: { parameter_size?: string; family?: string }; size?: number }> };
         const models = data.models ?? [];
@@ -77,24 +84,22 @@ export async function detectOllamaModel(): Promise<{ model: string; contextLengt
             const match = modelNames.find(n => n === pref || n.startsWith(pref));
             if (match) {
                 const m = models.find(mod => mod.name === match)!;
-                cachedOllamaModel = {
+                return cacheOllamaResult({
                     model: match,
                     contextLength: 32768,
                     params: m.details?.parameter_size ?? "unknown",
-                };
-                return cachedOllamaModel;
+                });
             }
         }
 
         // Fallback: any model with "coder" in name
         const coderModel = models.find(m => m.name.toLowerCase().includes("coder"));
         if (coderModel) {
-            cachedOllamaModel = {
+            return cacheOllamaResult({
                 model: coderModel.name,
                 contextLength: 32768,
                 params: coderModel.details?.parameter_size ?? "unknown",
-            };
-            return cachedOllamaModel;
+            });
         }
 
         // Fallback: any model >= 7B (by name heuristic — look for :7b, :8b, :14b etc.)
@@ -103,18 +108,17 @@ export async function detectOllamaModel(): Promise<{ model: string; contextLengt
             return sizeMatch && parseInt(sizeMatch[1]) >= 7;
         });
         if (largeModel) {
-            cachedOllamaModel = {
+            return cacheOllamaResult({
                 model: largeModel.name,
                 contextLength: 32768,
                 params: largeModel.details?.parameter_size ?? "unknown",
-            };
-            return cachedOllamaModel;
+            });
         }
 
-        cachedOllamaModel = null;
+        cacheOllamaResult(null);
         return null;
     } catch {
-        cachedOllamaModel = null;
+        cacheOllamaResult(null);
         return null;
     }
 }
