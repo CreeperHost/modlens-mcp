@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { startupEmbedScan } from "./embed-queue.js";
 
-import { ingestMod, decompileMod, decompileModStatus, reindexClasses, batchIngest, batchDecompileMods, deleteModFull } from "./tools/ingest.js";
+import { ingestMod, decompileMod, decompileModStatus, reindexClasses, batchIngest, batchDecompileMods, deleteModFull, refreshDegradedMetadata } from "./tools/ingest.js";
 import { listMods, getModDetails, searchMods, getDbStats, getDependencies, findVersionConflicts, getDependencyGraph, listModSourceUrls, listModRegistryEntries } from "./tools/catalog.js";
 import {
     listModJarFiles, getModJarFile,
@@ -156,13 +156,13 @@ function safe<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeof
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: (stub) community graph submission — not yet functional. embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: (stub) community embedding submission — not yet functional. Auto-behaviors: decompile_status auto-queues embedding (MODLENS_AUTO_EMBED) and graph build (MODLENS_AUTO_GRAPH). Pass autoEmbed/autoGraph to override per-call.",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|refresh_metadata|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). refresh_metadata: re-parse all mods with degraded metadata (filename/@Mod annotation) and upgrade if a higher-quality manifest is found. graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: (stub) community graph submission — not yet functional. embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: (stub) community embedding submission — not yet functional. Auto-behaviors: decompile_status auto-queues embedding (MODLENS_AUTO_EMBED) and graph build (MODLENS_AUTO_GRAPH). Pass autoEmbed/autoGraph to override per-call.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
             "version_conflicts","source_urls","decompile","decompile_status",
             "decompile_class","source","search_source","reindex","batch_ingest",
-            "batch_decompile","index_fts","search_indexed","index_semantic","search_semantic","get_paths","delete",
+            "batch_decompile","refresh_metadata","index_fts","search_indexed","index_semantic","search_semantic","get_paths","delete",
             "graph_build","graph_status","graph_query","graph_report",
             "graph_enrich_next","graph_enrich_submit","graph_download","graph_export","graph_submit",
             "embed_export","embed_download","embed_download_all","embed_status","embed_submit",
@@ -226,6 +226,7 @@ server.tool(
             case "reindex":          result = await reindexClasses(dbId); break;
             case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false, replace ?? false); break;
             case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2) }); break;
+            case "refresh_metadata": result = await refreshDegradedMetadata({ loader: loader as any, mcVersion }); break;
             case "index_semantic":   result = await indexModSourceSemantic(dbId!, 50, limit); break;
             case "search_semantic":  result = await searchModSourceSemantic(query!, dbId!, limit ?? 10, provenance); break;
             case "index_fts":        result = await indexModSourceFts(dbId!); break;

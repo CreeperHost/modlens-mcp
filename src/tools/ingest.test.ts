@@ -48,16 +48,21 @@ vi.mock("../cache.js", () => ({
     ensureDir: vi.fn(),
 }));
 
+vi.mock("../db.js", () => ({
+    getDb: vi.fn(),
+}));
+
 vi.mock("fs/promises", async (importOriginal) => {
     const actual = await importOriginal<typeof import("fs/promises")>();
     return { ...actual, readdir: vi.fn().mockResolvedValue([]) };
 });
 
 // ── Import SUT after mocks ─────────────────────────────────────────────────
-const { ingestMod, reindexClasses, batchIngest } = await import("./ingest.js");
+const { ingestMod, reindexClasses, batchIngest, refreshDegradedMetadata } = await import("./ingest.js");
 const fsPromises = await import("fs/promises");
 const repo = await import("../repositories/mod.js");
 const proc = await import("../processor.js");
+const dbMod = await import("../db.js");
 const mr   = await import("../modrinth.js");
 const cf   = await import("../curseforge.js");
 const jt   = await import("../java-tools.js");
@@ -383,6 +388,43 @@ describe("batchIngest — with JARs", () => {
                 expect(r.version).toBe(FAKE_DB_MOD.version);
             }
         }
+    });
+});
+
+// ── refreshDegradedMetadata ───────────────────────────────────────────────
+
+describe("refreshDegradedMetadata", () => {
+    it("upgrades filename-sourced mods when re-parse finds a manifest", async () => {
+        const degradedMod = { ...FAKE_DB_MOD, metadataSource: "filename", modId: "mystery" };
+        vi.mocked(dbMod.getDb).mockResolvedValue({
+            mod: { findMany: vi.fn().mockResolvedValue([degradedMod]) },
+        } as any);
+        vi.mocked(proc.parseJar).mockResolvedValue({ ...FAKE_MANIFEST, metadataSource: "fabric.mod.json" } as any);
+        vi.mocked(repo.updateMod).mockResolvedValue({ ...degradedMod, metadataSource: "fabric.mod.json" } as any);
+
+        const result = await refreshDegradedMetadata();
+
+        expect(result.total).toBe(1);
+        expect(result.refreshed).toBe(1);
+        expect(result.unchanged).toBe(0);
+        expect(result.results[0].status).toBe("refreshed");
+        expect(result.results[0].previousSource).toBe("filename");
+        expect(result.results[0].newSource).toBe("fabric.mod.json");
+        expect(repo.updateMod).toHaveBeenCalledWith(degradedMod.id, expect.objectContaining({ metadataSource: "fabric.mod.json" }));
+    });
+
+    it("leaves mods unchanged when re-parse yields same quality", async () => {
+        const annotationMod = { ...FAKE_DB_MOD, metadataSource: "@Mod annotation" };
+        vi.mocked(dbMod.getDb).mockResolvedValue({
+            mod: { findMany: vi.fn().mockResolvedValue([annotationMod]) },
+        } as any);
+        vi.mocked(proc.parseJar).mockResolvedValue({ ...FAKE_MANIFEST, metadataSource: "filename" } as any);
+
+        const result = await refreshDegradedMetadata();
+
+        expect(result.unchanged).toBe(1);
+        expect(result.refreshed).toBe(0);
+        expect(repo.updateMod).not.toHaveBeenCalled();
     });
 });
 

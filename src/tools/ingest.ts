@@ -18,6 +18,7 @@ import {
     countModClasses, createModClasses, findModByModId, deleteModById,
     listModsSlim,
 } from "../repositories/mod.js";
+import { getDb } from "../db.js";
 import { validateDbId } from "../validate.js";
 
 // ── IngestResult discriminated union ─────────────────────────────────────────
@@ -245,6 +246,62 @@ export async function batchIngest(
     }
 
     return { directory: absDir, total: jars.length, ingested, skipped, failed, results };
+}
+
+// ── Batch refresh degraded metadata ───────────────────────────────────────────
+
+export async function refreshDegradedMetadata(opts?: { loader?: string; mcVersion?: string }): Promise<{
+    total: number; refreshed: number; unchanged: number; failed: number;
+    results: Array<{ modId: string; dbId: number; status: string; previousSource?: string; newSource?: string }>;
+}> {
+    const db = await getDb();
+    const where: Record<string, unknown> = {
+        metadataSource: { in: ["filename", "@Mod annotation"] },
+    };
+    if (opts?.loader) where.loader = opts.loader;
+    if (opts?.mcVersion) where.mcVersion = { contains: opts.mcVersion };
+
+    const mods = await db.mod.findMany({ where, orderBy: { modId: "asc" } });
+    let refreshed = 0, unchanged = 0, failed = 0;
+    const results: Array<{ modId: string; dbId: number; status: string; previousSource?: string; newSource?: string }> = [];
+
+    for (const mod of mods) {
+        try {
+            const oldSource = (mod.metadataSource ?? "filename") as MetadataSource;
+            const oldQuality = METADATA_QUALITY[oldSource] ?? 0;
+            const manifest = await parseJar(mod.jarPath);
+            const newQuality = METADATA_QUALITY[manifest.metadataSource] ?? 0;
+            if (newQuality > oldQuality) {
+                await updateMod(mod.id, {
+                    modId:        manifest.modId,
+                    displayName:  manifest.displayName,
+                    version:      manifest.version,
+                    mcVersion:    manifest.mcVersion,
+                    loader:       manifest.loader,
+                    hasMixins:    manifest.hasMixins,
+                    hasAt:        manifest.hasAt,
+                    hasAw:        manifest.hasAw,
+                    mixinConfigs: manifest.mixinConfigs,
+                    mixinTargets: manifest.mixinTargets,
+                    atEntries:    manifest.atEntries,
+                    awEntries:    manifest.awEntries,
+                    dependencies: manifest.dependencies,
+                    metadata:     { description: manifest.description, sourceUrl: manifest.sourceUrl },
+                    metadataSource: manifest.metadataSource,
+                });
+                refreshed++;
+                results.push({ modId: mod.modId, dbId: mod.id, status: "refreshed", previousSource: oldSource, newSource: manifest.metadataSource });
+            } else {
+                unchanged++;
+                results.push({ modId: mod.modId, dbId: mod.id, status: "unchanged" });
+            }
+        } catch (e) {
+            failed++;
+            results.push({ modId: mod.modId, dbId: mod.id, status: `error: ${(e instanceof Error ? e.message : String(e)).slice(0, 120)}` });
+        }
+    }
+
+    return { total: mods.length, refreshed, unchanged, failed, results };
 }
 
 export async function reindexClasses(dbId?: number): Promise<{ indexed: number; failed: number; skipped: number; }> {
