@@ -882,6 +882,23 @@ if (sections.has("graphs")) {
             if (model) graphEnv.GRAPHIFY_CUSTOM_MODEL = model as string;
         }
 
+        // Warn if a cloud backend was chosen but no API key is configured
+        const cloudKeyMap: Record<string, string[]> = {
+            gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            deepseek: ["DEEPSEEK_API_KEY"],
+            openai: ["OPENAI_API_KEY"],
+            claude: ["ANTHROPIC_API_KEY"],
+            kimi: ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+            custom: ["GRAPHIFY_CUSTOM_API_KEY"],
+        };
+        const requiredKeys = cloudKeyMap[back];
+        if (requiredKeys) {
+            const hasKey = requiredKeys.some(k => graphEnv[k] || existingEnv[k]);
+            if (!hasKey) {
+                p.log.warn(`⚠ No API key set for ${back} — graph extraction will fall back to AST-only until a key is provided.`);
+            }
+        }
+
         const currentGraphRegistry = (existingEnv.MODLENS_GRAPH_REGISTRY_URL ?? "").trim() || DEFAULT_GRAPH_REGISTRY_URL;
         const currentEmbedRegistry = (existingEnv.MODLENS_EMBED_REGISTRY_URL ?? "").trim() || DEFAULT_EMBED_REGISTRY_URL;
 

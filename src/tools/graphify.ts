@@ -52,6 +52,23 @@ export interface DetectedBackend {
     pricing: { input: number; output: number };
 }
 
+/** Map backend name → env var(s) that must hold an API key */
+const BACKEND_KEY_ENVS: Record<string, string[]> = {
+    gemini:   ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    deepseek: ["DEEPSEEK_API_KEY"],
+    openai:   ["OPENAI_API_KEY"],
+    claude:   ["ANTHROPIC_API_KEY"],
+    kimi:     ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+    custom:   ["GRAPHIFY_CUSTOM_API_KEY"],
+};
+
+/** Returns true if at least one of the required API key env vars is set for this backend. */
+export function hasBackendKey(backend: string): boolean {
+    const envKeys = BACKEND_KEY_ENVS[backend];
+    if (!envKeys) return true; // ollama, ast-only, unknown — no key needed
+    return envKeys.some(k => !!process.env[k]);
+}
+
 let cachedOllamaModel: { model: string; contextLength: number; params: string } | null | undefined;
 let cachedOllamaModelAt = 0;
 const OLLAMA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -143,6 +160,8 @@ export async function detectBackend(): Promise<DetectedBackend | null> {
                 pricing: { input: 0, output: 0 },
             };
         }
+        // Verify cloud backends have their API key set
+        if (!hasBackendKey(explicit)) return null;
         return {
             backend: explicit,
             model: explicitModel ?? BACKEND_DEFAULT_MODELS[explicit] ?? "unknown",
@@ -317,11 +336,14 @@ export async function buildModGraph(
     if (backendOverride === "ast-only") {
         // Force AST-only
     } else if (backendOverride) {
-        resolved = {
-            backend: backendOverride,
-            model: process.env.GRAPHIFY_MODEL ?? BACKEND_DEFAULT_MODELS[backendOverride] ?? "unknown",
-            pricing: BACKEND_PRICING[backendOverride] ?? { input: 0, output: 0 },
-        };
+        if (hasBackendKey(backendOverride)) {
+            resolved = {
+                backend: backendOverride,
+                model: process.env.GRAPHIFY_MODEL ?? BACKEND_DEFAULT_MODELS[backendOverride] ?? "unknown",
+                pricing: BACKEND_PRICING[backendOverride] ?? { input: 0, output: 0 },
+            };
+        }
+        // else: key missing — fall through to resolved=null → AST-only
     } else {
         resolved = await detectBackend();
     }
