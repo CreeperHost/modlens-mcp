@@ -236,13 +236,19 @@ export async function batchSyncSources(opts: {
     } = opts;
 
     const mods = await listModsForSync({ modIdFilter, limit });
+    const total = mods.length;
+    process.stderr.write(`[batch_sync] Starting batch sync for ${total} mods\n`);
 
     let mrMatched = 0, mrSkipped = 0, mrFailed = 0;
     let cfMatched = 0, cfSkipped = 0, cfFailed = 0;
     let ghDownloaded = 0, ghFailed = 0;
     const results: Array<{ modId: string; version: string; modrinth?: string; curseforge?: string; source?: string; error?: string }> = [];
 
-    for (const mod of mods) {
+    for (let i = 0; i < mods.length; i++) {
+        const mod = mods[i];
+        if ((i + 1) % 10 === 0 || i === 0) {
+            process.stderr.write(`[batch_sync] Processing ${i + 1}/${total}: ${mod.modId}\n`);
+        }
         const row: (typeof results)[0] = { modId: mod.modId, version: mod.version };
 
         // ── Modrinth ──────────────────────────────────────────────────────────
@@ -297,6 +303,7 @@ export async function batchSyncSources(opts: {
         }
     }
 
+    process.stderr.write(`[batch_sync] Done: MR ${mrMatched} matched/${mrFailed} failed, CF ${cfMatched} matched/${cfFailed} failed, GH ${ghDownloaded} downloaded/${ghFailed} failed\n`);
     return {
         total: mods.length,
         modrinth:   doMR ? { matched: mrMatched, skipped: mrSkipped, failed: mrFailed } : "skipped",

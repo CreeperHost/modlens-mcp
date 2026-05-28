@@ -613,11 +613,18 @@ export async function downloadPackEmbeddings(): Promise<{
     let downloaded = 0;
     let alreadyEmbedded = 0;
     let notAvailable = 0;
+    const total = allMods.length;
+    process.stderr.write(`[embed_download_all] Starting embedding download for ${total} mods (${embeddedSet.size} already embedded)\n`);
 
-    for (const mod of allMods) {
+    for (let i = 0; i < allMods.length; i++) {
+        const mod = allMods[i];
         if (embeddedSet.has(mod.id)) {
             alreadyEmbedded++;
             continue;
+        }
+
+        if ((i + 1) % 10 === 0 || i === 0) {
+            process.stderr.write(`[embed_download_all] Processing ${i + 1}/${total}: ${mod.mod_id} (downloaded: ${downloaded}, skipped: ${notAvailable})\n`);
         }
 
         try {
@@ -636,6 +643,7 @@ export async function downloadPackEmbeddings(): Promise<{
         }
     }
 
+    process.stderr.write(`[embed_download_all] Done: ${downloaded} downloaded, ${alreadyEmbedded} already embedded, ${notAvailable} not available\n`);
     return { downloaded, alreadyEmbedded, notAvailable };
 }
 
