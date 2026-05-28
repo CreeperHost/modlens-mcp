@@ -35,6 +35,7 @@ model Mod {
   awEntries     String   @default("[]") @map("aw_entries")
   dependencies  String   @default("[]")
   metadata      String   @default("{}")
+  metadataSource String?  @map("metadata_source")
   tags          String   @default("[]")
   ingestedAt    DateTime @default(now()) @map("ingested_at")
   updatedAt     DateTime @updatedAt @map("updated_at")

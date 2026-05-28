@@ -113,6 +113,7 @@ export async function ingestMod(jarPath: string, skipSource = false, replace = f
         awEntries: manifest.awEntries,
         dependencies: manifest.dependencies,
         metadata: { description: manifest.description, sourceUrl: manifest.sourceUrl },
+        metadataSource: manifest.metadataSource,
     });
 
     if (!skipSource) {

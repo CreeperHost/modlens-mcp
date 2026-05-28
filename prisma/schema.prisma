@@ -34,6 +34,7 @@ model Mod {
   awEntries     Json     @default("[]") @map("aw_entries")
   dependencies  Json     @default("[]")
   metadata      Json     @default("{}")
+  metadataSource String?  @map("metadata_source")
   /// User-defined labels for filtering/grouping, e.g. ["combat", "storage", "compat"]
   tags          String[] @default([])
   ingestedAt    DateTime @default(now()) @map("ingested_at")
