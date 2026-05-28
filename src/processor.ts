@@ -53,7 +53,12 @@ export async function parseJar(jarPath: string): Promise<ParsedManifest> {
             manifest = parseMcModInfo(mcmodInfoRaw, entries);
         } else {
             // Pre-mcmod.info era (1.2.5–1.6) — try @Mod annotation from bytecode
-            const modAnnotation = extractForgeModAnnotation(zip);
+            let modAnnotation: ForgeModAnnotationResult | null = null;
+            try {
+                modAnnotation = extractForgeModAnnotation(zip);
+            } catch {
+                // Malformed class files (obfuscators, Kotlin metadata, etc.) — degrade gracefully
+            }
             if (modAnnotation) {
                 const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
                 manifest = {
@@ -337,10 +342,20 @@ export function extractForgeModAnnotation(zip: AdmZip): ForgeModAnnotationResult
         if (!entry.entryName.endsWith(".class")) continue;
         // Skip inner classes — main mod class is almost never an inner class
         if (entry.entryName.includes("$")) continue;
+        // Depth heuristic: @Mod entry points live in the first few package levels.
+        // Skip classes nested more than 3 directories deep to avoid scanning
+        // hundreds of utility/mixin classes in large mods.
+        const slashes = entry.entryName.split("/").length - 1;
+        if (slashes > 4) continue;
         const buf = zip.readFile(entry);
         if (!buf || buf.length < 10) continue;
-        const result = parseClassForModAnnotation(buf);
-        if (result) return result;
+        try {
+            const result = parseClassForModAnnotation(buf);
+            if (result) return result;
+        } catch {
+            // Malformed class file (obfuscator artifacts, Kotlin metadata, etc.) — skip it
+            continue;
+        }
     }
     return null;
 }
