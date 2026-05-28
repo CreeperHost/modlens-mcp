@@ -134,11 +134,13 @@ model ModTag {
 }
 
 model McSourceFile {
-  id          Int      @id @default(autoincrement())
-  mcVersionId Int      @map("mc_version_id")
-  className   String   @map("class_name")
-  content     String
-  embedding   Bytes?
+  id              Int      @id @default(autoincrement())
+  mcVersionId     Int      @map("mc_version_id")
+  className       String   @map("class_name")
+  content         String
+  embedding       Bytes?
+  embedSource     String?  @map("embed_source")
+  embedUpdatedAt  DateTime? @map("embed_updated_at")
 
   mcVersion   McVersion @relation(fields: [mcVersionId], references: [id], onDelete: Cascade)
 
@@ -148,11 +150,13 @@ model McSourceFile {
 }
 
 model ModSourceFile {
-  id        Int      @id @default(autoincrement())
-  modId     Int      @map("mod_id")
-  className String   @map("class_name")
-  content   String
-  embedding Bytes?
+  id              Int      @id @default(autoincrement())
+  modId           Int      @map("mod_id")
+  className       String   @map("class_name")
+  content         String
+  embedding       Bytes?
+  embedSource     String?  @map("embed_source")
+  embedUpdatedAt  DateTime? @map("embed_updated_at")
 
   mod       Mod      @relation(fields: [modId], references: [id], onDelete: Cascade)
 

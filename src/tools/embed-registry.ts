@@ -17,6 +17,8 @@ import {
     findModSourceIdsByClassNames,
     upsertSourceEmbedding,
     findSourceIdsByClassNames,
+    getEmbedSources,
+    countEmbedsBySource,
 } from "../repositories/embeddings.js";
 import { findMcVersionByVersionId } from "../repositories/mcVersion.js";
 import { validateDbId } from "../validate.js";
@@ -302,10 +304,13 @@ export async function exportAllEmbeddings(
 
 /**
  * Import embeddings from a local bundle file into the database.
+ * By default, protects user-generated ("local") embeddings from being overwritten.
+ * Pass force=true to overwrite all embeddings regardless of source.
  */
 export async function importEmbeddingsBundle(
     bundlePath: string,
-): Promise<{ status: string; imported: number; skipped: number; total: number; bundleModel?: string; localModel?: string }> {
+    opts: { force?: boolean } = {},
+): Promise<{ status: string; imported: number; skipped: number; skippedLocal: number; total: number; bundleModel?: string; localModel?: string }> {
     // Read and decompress
     const compressed = await readFile(bundlePath);
 
@@ -347,6 +352,7 @@ export async function importEmbeddingsBundle(
             status: "model_mismatch",
             imported: 0,
             skipped: bundle.entries.length,
+            skippedLocal: 0,
             total: bundle.entries.length,
             bundleModel: `${bundle.model} (${bundle.dimensions}d)`,
             localModel: `${localModel} (${localDims}d)`,
@@ -355,8 +361,11 @@ export async function importEmbeddingsBundle(
 
     const target = normalizeBundleTarget(bundle);
     const classNames = bundle.entries.map(e => e.className);
+    const bundleDate = bundle.generatedAt ? new Date(bundle.generatedAt) : null;
+    const forceAll = opts.force ?? false;
 
     let idMap: Map<string, number>;
+    let sourceTable: "mod_source_files" | "mc_source_files" = "mod_source_files";
     if (target.targetType === "mod") {
         const db = await getDb();
         const mod = await db.$queryRawUnsafe<Array<{ id: number }>>(
@@ -365,15 +374,16 @@ export async function importEmbeddingsBundle(
             target.targetVersion,
         );
         if (!mod.length) {
-            return { status: "mod_not_found", imported: 0, skipped: bundle.entries.length, total: bundle.entries.length };
+            return { status: "mod_not_found", imported: 0, skipped: bundle.entries.length, skippedLocal: 0, total: bundle.entries.length };
         }
-        idMap = await findModSourceIdsByClassNames(classNames, mod[0].id);
+        idMap = await findModSourceIdsByClassNames(classNames, mod[0].id, false);
     } else if (target.targetType === "vanilla") {
+        sourceTable = "mc_source_files";
         const versionRow = await findMcVersionByVersionId(target.targetVersion);
         if (!versionRow) {
-            return { status: "mc_version_not_found", imported: 0, skipped: bundle.entries.length, total: bundle.entries.length };
+            return { status: "mc_version_not_found", imported: 0, skipped: bundle.entries.length, skippedLocal: 0, total: bundle.entries.length };
         }
-        idMap = await findSourceIdsByClassNames(classNames, versionRow.id);
+        idMap = await findSourceIdsByClassNames(classNames, versionRow.id, false);
     } else {
         // modloader — stored in mod_source_files, same as mods
         const db = await getDb();
@@ -385,16 +395,26 @@ export async function importEmbeddingsBundle(
             // Try fuzzy match (e.g., "neoforge" matches modId containing "neoforge")
             const fuzzy = await findModByModIdLike(target.targetId);
             if (!fuzzy) {
-                return { status: "modloader_not_found", imported: 0, skipped: bundle.entries.length, total: bundle.entries.length };
+                return { status: "modloader_not_found", imported: 0, skipped: bundle.entries.length, skippedLocal: 0, total: bundle.entries.length };
             }
-            idMap = await findModSourceIdsByClassNames(classNames, fuzzy.id);
+            idMap = await findModSourceIdsByClassNames(classNames, fuzzy.id, false);
         } else {
-            idMap = await findModSourceIdsByClassNames(classNames, loaderMod[0].id);
+            idMap = await findModSourceIdsByClassNames(classNames, loaderMod[0].id, false);
         }
+    }
+
+    // Build provenance map for existing embeddings so we can protect local ones
+    const allIds = [...idMap.values()];
+    let existingSources: Map<number, { source: string | null; updatedAt: Date | null }> = new Map();
+    if (!forceAll && allIds.length > 0) {
+        try {
+            existingSources = await getEmbedSources(sourceTable, allIds);
+        } catch { /* columns may not exist yet — treat all as overwritable */ }
     }
 
     let imported = 0;
     let skipped = 0;
+    let skippedLocal = 0;
 
     for (const entry of bundle.entries) {
         const sourceFileId = idMap.get(entry.className);
@@ -402,21 +422,39 @@ export async function importEmbeddingsBundle(
             skipped++;
             continue;
         }
+
+        // Protection: don't overwrite user-generated local embeddings unless force=true
+        if (!forceAll) {
+            const existing = existingSources.get(sourceFileId);
+            if (existing) {
+                if (existing.source === "local") {
+                    skippedLocal++;
+                    continue;
+                }
+                // Freshness: skip if existing registry embedding is newer than the bundle
+                if (existing.source === "registry" && existing.updatedAt && bundleDate && existing.updatedAt >= bundleDate) {
+                    skipped++;
+                    continue;
+                }
+            }
+        }
+
         if (target.targetType === "mod" || target.targetType === "modloader") {
-            await upsertModSourceEmbedding(sourceFileId, entry.embedding);
+            await upsertModSourceEmbedding(sourceFileId, entry.embedding, "registry");
         } else if (target.targetType === "vanilla") {
-            await upsertSourceEmbedding(sourceFileId, entry.embedding);
+            await upsertSourceEmbedding(sourceFileId, entry.embedding, "registry");
         }
         imported++;
     }
 
-    return { status: "ok", imported, skipped, total: bundle.entries.length };
+    return { status: "ok", imported, skipped, skippedLocal, total: bundle.entries.length };
 }
 
 export async function importModEmbeddings(
     bundlePath: string,
-): Promise<{ status: string; imported: number; skipped: number; total: number; bundleModel?: string; localModel?: string }> {
-    return importEmbeddingsBundle(bundlePath);
+    opts: { force?: boolean } = {},
+): Promise<{ status: string; imported: number; skipped: number; skippedLocal: number; total: number; bundleModel?: string; localModel?: string }> {
+    return importEmbeddingsBundle(bundlePath, opts);
 }
 
 // ── Download from registry ────────────────────────────────────────────────────
@@ -459,8 +497,9 @@ export async function downloadEmbeddings(
         targetVersion?: string;
         dbId?: number;
         model?: string;
+        force?: boolean;
     },
-): Promise<{ status: string; source?: string; imported?: number; skipped?: number; availableModels?: string[] }> {
+): Promise<{ status: string; source?: string; imported?: number; skipped?: number; skippedLocal?: number; availableModels?: string[] }> {
     const localModel = target.model ?? process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
 
     let resolvedTargetId = target.targetId;
@@ -540,11 +579,12 @@ export async function downloadEmbeddings(
     const localPath = join(bundleDir, `${target.targetType}-${safeId}-${safeVer}.emb.json.gz`);
     await writeFile(localPath, data);
 
-    const result = await importEmbeddingsBundle(localPath);
+    const result = await importEmbeddingsBundle(localPath, { force: target.force });
     return {
         status: result.status,
         imported: result.imported,
         skipped: result.skipped,
+        skippedLocal: result.skippedLocal,
     };
 }
 
@@ -603,15 +643,19 @@ export async function downloadPackEmbeddings(): Promise<{
  */
 export async function getEmbedStatus(
     target: { targetType: TargetType; dbId?: number; mcVersion?: string },
-): Promise<{ totalFiles: number; embeddedCount: number; model: string; coverage: string }> {
+): Promise<{ totalFiles: number; embeddedCount: number; model: string; coverage: string; sources: { local: number; registry: number; community: number; unknown: number } }> {
     const db = await getDb();
     let stats: [{ total: string; embedded: string }];
+    let sourceTable: "mod_source_files" | "mc_source_files" = "mod_source_files";
+    let scopeColumn = "mod_id";
+    let scopeId: number;
 
     if (target.targetType === "mod") {
         if (target.dbId == null) throw new Error("embed_status targetType=mod requires dbId");
         validateDbId(target.dbId);
         const mod = await findModById(target.dbId);
         if (!mod) throw new Error(`Mod #${target.dbId} not found`);
+        scopeId = target.dbId;
         stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
             `SELECT COUNT(*)::text AS total,
                     COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
@@ -622,6 +666,9 @@ export async function getEmbedStatus(
         if (!target.mcVersion) throw new Error("embed_status targetType=vanilla requires mcVersion");
         const versionRow = await findMcVersionByVersionId(target.mcVersion);
         if (!versionRow) throw new Error(`MC version ${target.mcVersion} not found`);
+        sourceTable = "mc_source_files";
+        scopeColumn = "mc_version_id";
+        scopeId = versionRow.id;
         stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
             `SELECT COUNT(*)::text AS total,
                     COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
@@ -632,7 +679,6 @@ export async function getEmbedStatus(
         // modloader — stored as a Mod row in mod_source_files
         let modDbId = target.dbId;
         if (modDbId == null) {
-            // Resolve by loader name — repurpose mcVersion as loader hint if no dbId
             const loaderName = target.mcVersion ?? "neoforge";
             const loaderMod = await findModByModIdLike(loaderName);
             if (!loaderMod) throw new Error(`No ingested modloader "${loaderName}". Ingest the modloader JAR first.`);
@@ -641,6 +687,7 @@ export async function getEmbedStatus(
         validateDbId(modDbId);
         const mod = await findModById(modDbId);
         if (!mod) throw new Error(`Mod #${modDbId} not found`);
+        scopeId = modDbId;
         stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
             `SELECT COUNT(*)::text AS total,
                     COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
@@ -654,5 +701,38 @@ export async function getEmbedStatus(
     const model = process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
     const coverage = total > 0 ? `${Math.round((embedded / total) * 100)}%` : "0%";
 
-    return { totalFiles: total, embeddedCount: embedded, model, coverage };
+    // Source provenance breakdown
+    let sources = { local: 0, registry: 0, community: 0, unknown: 0 };
+    try {
+        sources = await countEmbedsBySource(sourceTable, scopeColumn, scopeId);
+    } catch { /* columns may not exist pre-migration */ }
+
+    return { totalFiles: total, embeddedCount: embedded, model, coverage, sources };
+}
+
+// ── Community submission (groundwork — not yet functional) ────────────────────
+
+/** Payload shape for future community embedding submissions. */
+export interface EmbedSubmission {
+    /** The exported bundle file path */
+    bundlePath: string;
+    /** Optional contributor alias (not required) */
+    contributor?: string;
+    /** Free-text note about what was embedded and why */
+    note?: string;
+}
+
+/**
+ * Submit locally-generated embeddings for inclusion in the public registry.
+ * NOT YET IMPLEMENTED — returns a stub response with groundwork details.
+ */
+export async function submitEmbeddings(
+    _submission: EmbedSubmission,
+): Promise<{ status: string; message: string }> {
+    return {
+        status: "not_implemented",
+        message: "Community embedding submission is planned but not yet available. "
+            + "For now, export your embeddings with embed_export and share the bundle file manually. "
+            + "Future versions will support direct submission to the public registry.",
+    };
 }

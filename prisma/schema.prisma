@@ -150,12 +150,15 @@ model ModTag {
 // Stores decompiled vanilla source per class — enables PostgreSQL FTS search.
 // GIN index is created automatically by `npm run db:setup` (scripts/create-fts-index.mjs).
 model McSourceFile {
-  id          Int                      @id @default(autoincrement())
-  mcVersionId Int                      @map("mc_version_id")
-  className   String                   @map("class_name")
-  content     String
+  id              Int                      @id @default(autoincrement())
+  mcVersionId     Int                      @map("mc_version_id")
+  className       String                   @map("class_name")
+  content         String
   /// pgvector embedding — populated by `npm run db:vector` + backfill-embeddings
-  embedding   Unsupported("vector")?   @map("embedding")
+  embedding       Unsupported("vector")?   @map("embedding")
+  /// Provenance: "local" (user Ollama), "registry" (public download), "community" (user contribution)
+  embedSource     String?                  @map("embed_source")
+  embedUpdatedAt  DateTime?                @map("embed_updated_at")
 
   mcVersion   McVersion @relation(fields: [mcVersionId], references: [id], onDelete: Cascade)
 
@@ -194,12 +197,15 @@ model DocEntry {
 // One row per .java file from a decompiled mod JAR.
 // Mirrors mc_source_files but scoped to ingested mods instead of vanilla MC.
 model ModSourceFile {
-  id        Int                      @id @default(autoincrement())
-  modId     Int                      @map("mod_id")
-  className String                   @map("class_name")
-  content   String
+  id              Int                      @id @default(autoincrement())
+  modId           Int                      @map("mod_id")
+  className       String                   @map("class_name")
+  content         String
   /// pgvector embedding — populated by mod index_semantic action
-  embedding Unsupported("vector")?   @map("embedding")
+  embedding       Unsupported("vector")?   @map("embedding")
+  /// Provenance: "local" (user Ollama), "registry" (public download), "community" (user contribution)
+  embedSource     String?                  @map("embed_source")
+  embedUpdatedAt  DateTime?                @map("embed_updated_at")
 
   mod       Mod                      @relation(fields: [modId], references: [id], onDelete: Cascade)
 

@@ -88,10 +88,10 @@ export async function searchPrimersByVector(vec: number[], limit = 5): Promise<V
 
 // ── mc_source_files ───────────────────────────────────────────────────────────
 
-export async function upsertSourceEmbedding(id: number, vec: number[]): Promise<void> {
+export async function upsertSourceEmbedding(id: number, vec: number[], source: string = "local"): Promise<void> {
     const db = await getVecDb();
     const prisma = await import("../db.js").then((m) => m.getDb());
-    await (prisma as any).mcSourceFile.update({ where: { id }, data: { embedding: float32Blob(vec) } });
+    await (prisma as any).mcSourceFile.update({ where: { id }, data: { embedding: float32Blob(vec), embedSource: source, embedUpdatedAt: new Date() } });
     try {
         db.prepare(`INSERT OR REPLACE INTO vec_mc_source(rowid, embedding) VALUES (?, ?)`).run(id, float32Blob(vec));
     } catch { /* vec0 unavailable */ }
@@ -116,10 +116,10 @@ export async function searchSourceByVector(
 
 // ── mod_source_files ──────────────────────────────────────────────────────────
 
-export async function upsertModSourceEmbedding(id: number, vec: number[]): Promise<void> {
+export async function upsertModSourceEmbedding(id: number, vec: number[], source: string = "local"): Promise<void> {
     const db = await getVecDb();
     const prisma = await import("../db.js").then((m) => m.getDb());
-    await (prisma as any).modSourceFile.update({ where: { id }, data: { embedding: float32Blob(vec) } });
+    await (prisma as any).modSourceFile.update({ where: { id }, data: { embedding: float32Blob(vec), embedSource: source, embedUpdatedAt: new Date() } });
     try {
         db.prepare(`INSERT OR REPLACE INTO vec_mod_source(rowid, embedding) VALUES (?, ?)`).run(id, float32Blob(vec));
     } catch { /* vec0 unavailable */ }
@@ -145,15 +145,16 @@ export async function searchModSourceByVector(
 // ── Class-name → ID lookups (for diff semantic enrichment) ───────────────────
 
 export async function findSourceIdsByClassNames(
-    classNames: string[], mcVersionId: number,
+    classNames: string[], mcVersionId: number, requireEmbedding = true,
 ): Promise<Map<string, number>> {
     if (classNames.length === 0) return new Map();
     const db = await getVecDb();
     const placeholders = classNames.map(() => "?").join(",");
+    const embFilter = requireEmbedding ? " AND embedding IS NOT NULL" : "";
     try {
         const rows = db.prepare(
             `SELECT id, class_name FROM mc_source_files
-             WHERE mc_version_id = ? AND class_name IN (${placeholders}) AND embedding IS NOT NULL`,
+             WHERE mc_version_id = ? AND class_name IN (${placeholders})${embFilter}`,
         ).all(mcVersionId, ...classNames) as Array<{ id: number; class_name: string }>;
         return new Map(rows.map((r) => [r.class_name, r.id]));
     } catch {
@@ -162,18 +163,62 @@ export async function findSourceIdsByClassNames(
 }
 
 export async function findModSourceIdsByClassNames(
-    classNames: string[], modId: number,
+    classNames: string[], modId: number, requireEmbedding = true,
 ): Promise<Map<string, number>> {
     if (classNames.length === 0) return new Map();
     const db = await getVecDb();
     const placeholders = classNames.map(() => "?").join(",");
+    const embFilter = requireEmbedding ? " AND embedding IS NOT NULL" : "";
     try {
         const rows = db.prepare(
             `SELECT id, class_name FROM mod_source_files
-             WHERE mod_id = ? AND class_name IN (${placeholders}) AND embedding IS NOT NULL`,
+             WHERE mod_id = ? AND class_name IN (${placeholders})${embFilter}`,
         ).all(modId, ...classNames) as Array<{ id: number; class_name: string }>;
         return new Map(rows.map((r) => [r.class_name, r.id]));
     } catch {
         return new Map();
     }
+}
+
+/** Get embed_source values for a set of source file IDs. */
+export async function getEmbedSources(
+    table: "mod_source_files" | "mc_source_files", ids: number[],
+): Promise<Map<number, { source: string | null; updatedAt: Date | null }>> {
+    if (ids.length === 0) return new Map();
+    const db = await getVecDb();
+    const placeholders = ids.map(() => "?").join(",");
+    try {
+        const rows = db.prepare(
+            `SELECT id, embed_source, embed_updated_at FROM ${table}
+             WHERE id IN (${placeholders}) AND embedding IS NOT NULL`,
+        ).all(...ids) as Array<{ id: number; embed_source: string | null; embed_updated_at: string | null }>;
+        return new Map(rows.map((r) => [r.id, {
+            source: r.embed_source,
+            updatedAt: r.embed_updated_at ? new Date(r.embed_updated_at) : null,
+        }]));
+    } catch {
+        return new Map();
+    }
+}
+
+/** Count embeddings by source provenance. */
+export async function countEmbedsBySource(
+    table: "mod_source_files" | "mc_source_files", scopeColumn: string, scopeId: number,
+): Promise<{ local: number; registry: number; community: number; unknown: number }> {
+    const db = await getVecDb();
+    const result = { local: 0, registry: 0, community: 0, unknown: 0 };
+    try {
+        const rows = db.prepare(
+            `SELECT embed_source, COUNT(*) AS count FROM ${table}
+             WHERE ${scopeColumn} = ? AND embedding IS NOT NULL
+             GROUP BY embed_source`,
+        ).all(scopeId) as Array<{ embed_source: string | null; count: number }>;
+        for (const r of rows) {
+            if (r.embed_source === "local") result.local += r.count;
+            else if (r.embed_source === "registry") result.registry += r.count;
+            else if (r.embed_source === "community") result.community += r.count;
+            else result.unknown += r.count;
+        }
+    } catch { /* columns may not exist yet */ }
+    return result;
 }
