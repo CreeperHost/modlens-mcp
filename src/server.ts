@@ -19,7 +19,7 @@ import {
 import { traceRecipeChain } from "./tools/mod-data.js";
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
 import { buildModGraph, graphBuildStatus, queryModGraph, getGraphReport, enrichNextChunk, submitEnrichment, downloadGraph } from "./tools/graphify.js";
-import { exportModEmbeddings, importModEmbeddings, downloadEmbeddings, downloadPackEmbeddings, getEmbedStatus } from "./tools/embed-registry.js";
+import { exportEmbeddings, downloadEmbeddings, downloadPackEmbeddings, getEmbedStatus } from "./tools/embed-registry.js";
 import {
     searchModClass, getModClassMembers, getModClassBytecode,
     findModReferences, getModInheritance, diffModVersions, findImplementors,
@@ -156,7 +156,7 @@ function safe<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeof
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|embed_export|embed_download|embed_download_all|embed_status. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry. embed_export: export mod embeddings to portable bundle (outputDir). embed_download: download pre-computed embeddings (modId, modVersion). embed_download_all: download embeddings for all mods. embed_status: embedding coverage.",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|embed_export|embed_download|embed_download_all|embed_status. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla (modloader returns not_supported). embed_download_all: download embeddings for all mods.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
@@ -192,9 +192,18 @@ server.tool(
         edges:        z.array(z.record(z.unknown())).optional().describe("Enriched edges for graph_enrich_submit"),
         outputDir:    z.string().optional().describe("Output directory for embed_export"),
         modVersion:   z.string().optional().describe("Mod version for embed_download"),
+        targetType:   z.enum(["mod", "vanilla", "modloader"]).optional().describe("Target scope for graph/embed actions"),
+        targetId:     z.string().optional().describe("Target identifier (mod id, minecraft, loader id)"),
+        targetVersion:z.string().optional().describe("Target version (mod version, MC version, loader version)"),
+        targetLoader: z.string().optional().describe("Optional loader hint for registry matching"),
+        targetMcVersion: z.string().optional().describe("Optional MC version hint for registry matching"),
+        model:        z.string().optional().describe("Embedding model override for embed_download"),
     },
-    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion }) => {
+    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model }) => {
         const dbId = await resolveDbIdAsync(rawDbId, modId);
+        const resolvedTargetType = targetType ?? "mod";
+        const resolvedTargetId = targetId ?? (typeof modId === "string" ? modId : undefined) ?? (resolvedTargetType === "vanilla" ? "minecraft" : undefined);
+        const resolvedTargetVersion = targetVersion ?? modVersion ?? (resolvedTargetType === "vanilla" ? mcVersion : undefined);
         let result: unknown;
         switch (action) {
             case "ingest":           result = await ingestMod(jarPath!, skipSource ?? false, replace ?? false); break;
@@ -239,11 +248,28 @@ server.tool(
             case "graph_report":    result = await getGraphReport(dbId!); break;
             case "graph_enrich_next":   result = await enrichNextChunk(dbId!); break;
             case "graph_enrich_submit":  result = await submitEnrichment(dbId!, chunkIndex!, nodes as any, edges as any); break;
-            case "graph_download":       result = await downloadGraph(dbId!); break;
-            case "embed_export":    result = await exportModEmbeddings(dbId!, outputDir!); break;
-            case "embed_download":  result = await downloadEmbeddings(modId as string, modVersion!); break;
+            case "graph_download":       result = await downloadGraph({
+                targetType: resolvedTargetType,
+                dbId,
+                targetId: resolvedTargetId,
+                targetVersion: resolvedTargetVersion,
+                loader: targetLoader ?? loader,
+                mcVersion: targetMcVersion ?? mcVersion,
+            }); break;
+            case "embed_export":    result = await exportEmbeddings(resolvedTargetType, outputDir!, { dbId, mcVersion: resolvedTargetVersion ?? mcVersion }); break;
+            case "embed_download":  result = await downloadEmbeddings({
+                targetType: resolvedTargetType,
+                targetId: resolvedTargetId,
+                targetVersion: resolvedTargetVersion,
+                dbId,
+                model,
+            }); break;
             case "embed_download_all": result = await downloadPackEmbeddings(); break;
-            case "embed_status":    result = await getEmbedStatus(dbId!); break;
+            case "embed_status":    result = await getEmbedStatus({
+                targetType: resolvedTargetType,
+                dbId,
+                mcVersion: resolvedTargetVersion ?? mcVersion,
+            }); break;
         }
         return out(result);
     })

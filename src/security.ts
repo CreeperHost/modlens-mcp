@@ -236,8 +236,11 @@ interface EmbeddingBundleHeader {
     version: number;
     model: string;
     dimensions: number;
-    modId: string;
-    modVersion: string;
+    targetType?: "mod" | "vanilla" | "modloader";
+    targetId?: string;
+    targetVersion?: string;
+    modId?: string;
+    modVersion?: string;
     entries: Array<{ className: string; embedding: number[] }>;
 }
 
@@ -263,7 +266,23 @@ export function validateEmbeddingBundle(bundle: unknown): ValidationResult {
     if (typeof b.dimensions !== "number" || b.dimensions < 1 || b.dimensions > 4096) {
         return { valid: false, reason: "dimensions out of range (1-4096)" };
     }
-    if (typeof b.modId !== "string" || b.modId.length > 200) return { valid: false, reason: "invalid modId" };
+    const targetType = typeof b.targetType === "string" ? b.targetType : "mod";
+    if (!["mod", "vanilla", "modloader"].includes(targetType)) {
+        return { valid: false, reason: "invalid targetType" };
+    }
+
+    const targetId = typeof b.targetId === "string"
+        ? b.targetId
+        : typeof b.modId === "string"
+            ? b.modId
+            : null;
+    const targetVersion = typeof b.targetVersion === "string"
+        ? b.targetVersion
+        : typeof b.modVersion === "string"
+            ? b.modVersion
+            : null;
+    if (!targetId || targetId.length > 200) return { valid: false, reason: "invalid targetId" };
+    if (!targetVersion || targetVersion.length > 200) return { valid: false, reason: "invalid targetVersion" };
 
     const entries = b.entries;
     if (!Array.isArray(entries)) return { valid: false, reason: "entries must be an array" };

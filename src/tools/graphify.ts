@@ -658,11 +658,13 @@ const GRAPH_REGISTRY_URL = process.env.MODLENS_GRAPH_REGISTRY_URL ??
     "https://raw.githubusercontent.com/Mattabase/modlens-graphs/main/index.json";
 
 interface GraphRegistryEntry {
+    targetType?: "mod" | "vanilla" | "modloader";
+    targetId?: string;
+    targetVersion?: string;
     modId: string;
     version: string;
     loader: string;
     mcVersion: string;
-    targetType?: "mod" | "vanilla" | "modloader";
     backend?: string;
     model?: string;
     graphUrl: string;
@@ -677,6 +679,17 @@ interface GraphRegistry {
     version: number;
     graphs: GraphRegistryEntry[];
 }
+
+type GraphTargetType = "mod" | "vanilla" | "modloader";
+
+type DownloadGraphRequest = {
+    targetType?: GraphTargetType;
+    dbId?: number;
+    targetId?: string;
+    targetVersion?: string;
+    loader?: string;
+    mcVersion?: string;
+};
 
 let cachedRegistry: { data: GraphRegistry; fetchedAt: number } | null = null;
 const REGISTRY_CACHE_TTL = 60 * 60 * 1000; // 1 hour
@@ -707,7 +720,7 @@ async function fetchGraphRegistry(): Promise<GraphRegistry> {
  * Download a pre-built graph from the public registry.
  */
 export async function downloadGraph(
-    dbId: number,
+    reqOrDbId: number | DownloadGraphRequest,
 ): Promise<{
     status: string;
     source?: string;
@@ -718,9 +731,42 @@ export async function downloadGraph(
     model?: string;
     targetType?: "mod" | "vanilla" | "modloader";
 }> {
-    validateDbId(dbId);
-    const mod = await findModById(dbId);
-    if (!mod) throw new Error(`Mod #${dbId} not found`);
+    const req: DownloadGraphRequest = typeof reqOrDbId === "number"
+        ? { targetType: "mod", dbId: reqOrDbId }
+        : reqOrDbId;
+
+    const targetType: GraphTargetType = req.targetType ?? "mod";
+
+    let resolvedTargetId = req.targetId ?? "";
+    let resolvedTargetVersion = req.targetVersion ?? "";
+    let installDir = "";
+    let modDbIdForUpdate: number | null = null;
+
+    if (targetType === "mod") {
+        if (req.dbId != null) {
+            validateDbId(req.dbId);
+            const mod = await findModById(req.dbId);
+            if (!mod) throw new Error(`Mod #${req.dbId} not found`);
+            resolvedTargetId = resolvedTargetId || mod.modId;
+            resolvedTargetVersion = resolvedTargetVersion || mod.version;
+            installDir = mod.sourcePath
+                ? join(mod.sourcePath, "graphify-out")
+                : mod.decompPath
+                    ? join(mod.decompPath, "graphify-out")
+                    : paths.graphs(mod.modId, mod.version);
+            modDbIdForUpdate = mod.id;
+        } else {
+            if (!resolvedTargetId || !resolvedTargetVersion) {
+                throw new Error("graph_download targetType=mod requires dbId or targetId+targetVersion");
+            }
+            installDir = join(paths.graphs("mod", "external"), resolvedTargetId, resolvedTargetVersion);
+        }
+    } else {
+        if (!resolvedTargetId || !resolvedTargetVersion) {
+            throw new Error("graph_download for vanilla/modloader requires targetId and targetVersion");
+        }
+        installDir = join(paths.graphs(targetType, "external"), resolvedTargetId, resolvedTargetVersion);
+    }
 
     let registry: GraphRegistry;
     try {
@@ -730,9 +776,14 @@ export async function downloadGraph(
     }
 
     // Find matching entry
-    const entry = registry.graphs.find(g =>
-        g.modId === mod.modId && g.version === mod.version
-    );
+    const entry = registry.graphs.find((g) => {
+        const regType = g.targetType ?? "mod";
+        const regId = g.targetId ?? g.modId;
+        const regVersion = g.targetVersion ?? g.version;
+        return regType === targetType
+            && regId === resolvedTargetId
+            && regVersion === resolvedTargetVersion;
+    });
     if (!entry) {
         return { status: "not_found" };
     }
@@ -774,16 +825,11 @@ export async function downloadGraph(
         throw new Error(`Graph validation failed: ${validation.reason}`);
     }
 
-    // Install to graphify-out directory
-    const targetDir = mod.sourcePath
-        ? join(mod.sourcePath, "graphify-out")
-        : mod.decompPath
-            ? join(mod.decompPath, "graphify-out")
-            : paths.graphs(mod.modId, mod.version);
-
-    await mkdir(targetDir, { recursive: true });
-    await writeFile(join(targetDir, "graph.json"), graphData);
-    await updateMod(dbId, { graphPath: targetDir });
+    await mkdir(installDir, { recursive: true });
+    await writeFile(join(installDir, "graph.json"), graphData);
+    if (modDbIdForUpdate != null) {
+        await updateMod(modDbIdForUpdate, { graphPath: installDir });
+    }
 
     return {
         status: "downloaded",

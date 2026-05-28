@@ -12,7 +12,13 @@ import { Readable } from "stream";
 import { paths, exists, CACHE_ROOT } from "../cache.js";
 import { getDb } from "../db.js";
 import { findModById } from "../repositories/mod.js";
-import { upsertModSourceEmbedding, findModSourceIdsByClassNames } from "../repositories/embeddings.js";
+import {
+    upsertModSourceEmbedding,
+    findModSourceIdsByClassNames,
+    upsertSourceEmbedding,
+    findSourceIdsByClassNames,
+} from "../repositories/embeddings.js";
+import { findMcVersionByVersionId } from "../repositories/mcVersion.js";
 import { validateDbId } from "../validate.js";
 import { validateEmbeddingBundle } from "../security.js";
 
@@ -28,15 +34,24 @@ interface EmbeddingBundle {
     model: string;
     dimensions: number;
     chunkSize: number;
-    modId: string;
-    modVersion: string;
+    targetType: "mod" | "vanilla" | "modloader";
+    targetId: string;
+    targetVersion: string;
+    loader?: string;
+    mcVersion?: string;
+    // Legacy fields (kept for backward compatibility with early bundles)
+    modId?: string;
+    modVersion?: string;
     generatedAt: string;
     entries: EmbeddingEntry[];
 }
 
 interface EmbedRegistryEntry {
-    modId: string;
-    modVersion: string;
+    targetType: "mod" | "vanilla" | "modloader";
+    targetId: string;
+    targetVersion: string;
+    loader?: string;
+    mcVersion?: string;
     model: string;
     dimensions: number;
     entryCount: number;
@@ -49,6 +64,36 @@ interface EmbedRegistry {
     version: 1;
     models: string[];
     bundles: EmbedRegistryEntry[];
+}
+
+type TargetType = "mod" | "vanilla" | "modloader";
+
+type EmbedTarget = {
+    targetType: TargetType;
+    targetId: string;
+    targetVersion: string;
+    loader?: string;
+    mcVersion?: string;
+};
+
+function normalizeBundleTarget(bundle: EmbeddingBundle): EmbedTarget {
+    const targetType = bundle.targetType ?? "mod";
+    if (targetType === "mod") {
+        return {
+            targetType,
+            targetId: bundle.targetId ?? bundle.modId ?? "",
+            targetVersion: bundle.targetVersion ?? bundle.modVersion ?? "",
+            loader: bundle.loader,
+            mcVersion: bundle.mcVersion,
+        };
+    }
+    return {
+        targetType,
+        targetId: bundle.targetId,
+        targetVersion: bundle.targetVersion,
+        loader: bundle.loader,
+        mcVersion: bundle.mcVersion,
+    };
 }
 
 // ── Export ─────────────────────────────────────────────────────────────────────
@@ -90,6 +135,11 @@ export async function exportModEmbeddings(
         model,
         dimensions: dims,
         chunkSize,
+        targetType: "mod",
+        targetId: mod.modId,
+        targetVersion: mod.version,
+        loader: mod.loader,
+        mcVersion: mod.mcVersion,
         modId: mod.modId,
         modVersion: mod.version,
         generatedAt: new Date().toISOString(),
@@ -113,6 +163,78 @@ export async function exportModEmbeddings(
     const sizeBytes = fileData.length;
 
     return { path: outPath, entryCount: entries.length, sizeBytes, sha256 };
+}
+
+export async function exportVanillaEmbeddings(
+    mcVersion: string,
+    outputDir: string,
+): Promise<{ path: string; entryCount: number; sizeBytes: number; sha256: string }> {
+    const versionRow = await findMcVersionByVersionId(mcVersion);
+    if (!versionRow) throw new Error(`MC version ${mcVersion} not found. Run mc_source index first.`);
+
+    const model = process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
+    const dims = parseInt(process.env.OLLAMA_EMBED_DIM ?? "768", 10);
+    const chunkSize = parseInt(process.env.OLLAMA_EMBED_CHUNK ?? "1500", 10);
+
+    const db = await getDb();
+    const rows = await db.$queryRawUnsafe<Array<{ class_name: string; embedding: string }>>(
+        `SELECT class_name, embedding::text AS embedding FROM mc_source_files
+         WHERE mc_version_id = $1 AND embedding IS NOT NULL`,
+        versionRow.id,
+    );
+
+    if (rows.length === 0) {
+        throw new Error(`No vanilla embeddings found for MC ${mcVersion}. Run mc_source index_semantic first.`);
+    }
+
+    const entries: EmbeddingEntry[] = rows.map(r => ({
+        className: r.class_name,
+        embedding: JSON.parse(r.embedding) as number[],
+    }));
+
+    const bundle: EmbeddingBundle = {
+        version: 1,
+        model,
+        dimensions: dims,
+        chunkSize,
+        targetType: "vanilla",
+        targetId: "minecraft",
+        targetVersion: mcVersion,
+        loader: "vanilla",
+        mcVersion,
+        generatedAt: new Date().toISOString(),
+        entries,
+    };
+
+    const modelDir = join(outputDir, model);
+    await mkdir(modelDir, { recursive: true });
+    const filename = `vanilla-${mcVersion}.emb.json.gz`;
+    const outPath = join(modelDir, filename);
+
+    const json = JSON.stringify(bundle);
+    await pipeline(Readable.from(json), createGzip(), createWriteStream(outPath));
+
+    const fileData = await readFile(outPath);
+    const sha256 = createHash("sha256").update(fileData).digest("hex");
+    const sizeBytes = fileData.length;
+
+    return { path: outPath, entryCount: entries.length, sizeBytes, sha256 };
+}
+
+export async function exportEmbeddings(
+    targetType: TargetType,
+    outputDir: string,
+    opts: { dbId?: number; mcVersion?: string } = {},
+): Promise<{ path: string; entryCount: number; sizeBytes: number; sha256: string }> {
+    if (targetType === "mod") {
+        if (!opts.dbId) throw new Error("embed_export targetType=mod requires dbId");
+        return exportModEmbeddings(opts.dbId, outputDir);
+    }
+    if (targetType === "vanilla") {
+        if (!opts.mcVersion) throw new Error("embed_export targetType=vanilla requires mcVersion");
+        return exportVanillaEmbeddings(opts.mcVersion, outputDir);
+    }
+    throw new Error("embed_export targetType=modloader is not supported yet");
 }
 
 /**
@@ -141,8 +263,11 @@ export async function exportAllEmbeddings(
             if (!mod) continue;
 
             entries.push({
-                modId: mod.modId,
-                modVersion: mod.version,
+                targetType: "mod",
+                targetId: mod.modId,
+                targetVersion: mod.version,
+                loader: mod.loader,
+                mcVersion: mod.mcVersion,
                 model,
                 dimensions: parseInt(process.env.OLLAMA_EMBED_DIM ?? "768", 10),
                 entryCount: result.entryCount,
@@ -173,7 +298,7 @@ export async function exportAllEmbeddings(
 /**
  * Import embeddings from a local bundle file into the database.
  */
-export async function importModEmbeddings(
+export async function importEmbeddingsBundle(
     bundlePath: string,
 ): Promise<{ status: string; imported: number; skipped: number; total: number; bundleModel?: string; localModel?: string }> {
     // Read and decompress
@@ -223,20 +348,35 @@ export async function importModEmbeddings(
         };
     }
 
-    // Resolve classNames to source file IDs
-    const db = await getDb();
-    const mod = await db.$queryRawUnsafe<Array<{ id: number }>>(
-        `SELECT id FROM mods WHERE mod_id = $1 AND version = $2 LIMIT 1`,
-        bundle.modId, bundle.modVersion,
-    );
-
-    if (!mod.length) {
-        return { status: "mod_not_found", imported: 0, skipped: bundle.entries.length, total: bundle.entries.length };
-    }
-
-    const modDbId = mod[0].id;
+    const target = normalizeBundleTarget(bundle);
     const classNames = bundle.entries.map(e => e.className);
-    const idMap = await findModSourceIdsByClassNames(classNames, modDbId);
+
+    let idMap: Map<string, number>;
+    if (target.targetType === "mod") {
+        const db = await getDb();
+        const mod = await db.$queryRawUnsafe<Array<{ id: number }>>(
+            `SELECT id FROM mods WHERE mod_id = $1 AND version = $2 LIMIT 1`,
+            target.targetId,
+            target.targetVersion,
+        );
+        if (!mod.length) {
+            return { status: "mod_not_found", imported: 0, skipped: bundle.entries.length, total: bundle.entries.length };
+        }
+        idMap = await findModSourceIdsByClassNames(classNames, mod[0].id);
+    } else if (target.targetType === "vanilla") {
+        const versionRow = await findMcVersionByVersionId(target.targetVersion);
+        if (!versionRow) {
+            return { status: "mc_version_not_found", imported: 0, skipped: bundle.entries.length, total: bundle.entries.length };
+        }
+        idMap = await findSourceIdsByClassNames(classNames, versionRow.id);
+    } else {
+        return {
+            status: "not_supported",
+            imported: 0,
+            skipped: bundle.entries.length,
+            total: bundle.entries.length,
+        };
+    }
 
     let imported = 0;
     let skipped = 0;
@@ -247,11 +387,21 @@ export async function importModEmbeddings(
             skipped++;
             continue;
         }
-        await upsertModSourceEmbedding(sourceFileId, entry.embedding);
+        if (target.targetType === "mod") {
+            await upsertModSourceEmbedding(sourceFileId, entry.embedding);
+        } else if (target.targetType === "vanilla") {
+            await upsertSourceEmbedding(sourceFileId, entry.embedding);
+        }
         imported++;
     }
 
     return { status: "ok", imported, skipped, total: bundle.entries.length };
+}
+
+export async function importModEmbeddings(
+    bundlePath: string,
+): Promise<{ status: string; imported: number; skipped: number; total: number; bundleModel?: string; localModel?: string }> {
+    return importEmbeddingsBundle(bundlePath);
 }
 
 // ── Download from registry ────────────────────────────────────────────────────
@@ -285,13 +435,33 @@ async function fetchEmbedRegistry(): Promise<EmbedRegistry> {
 }
 
 /**
- * Download and import pre-computed embeddings for a specific mod.
+ * Download and import pre-computed embeddings for a specific target.
  */
 export async function downloadEmbeddings(
-    modId: string,
-    modVersion: string,
+    target: {
+        targetType: TargetType;
+        targetId?: string;
+        targetVersion?: string;
+        dbId?: number;
+        model?: string;
+    },
 ): Promise<{ status: string; source?: string; imported?: number; skipped?: number; availableModels?: string[] }> {
-    const localModel = process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
+    const localModel = target.model ?? process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
+    if (target.targetType === "modloader") {
+        return { status: "not_supported", source: "modloader embeddings are not supported yet" };
+    }
+
+    let resolvedTargetId = target.targetId;
+    let resolvedTargetVersion = target.targetVersion;
+    if (target.targetType === "mod" && (!resolvedTargetId || !resolvedTargetVersion) && target.dbId != null) {
+        const mod = await findModById(target.dbId);
+        if (!mod) return { status: "mod_not_found", source: `Mod #${target.dbId} not found` };
+        resolvedTargetId = resolvedTargetId ?? mod.modId;
+        resolvedTargetVersion = resolvedTargetVersion ?? mod.version;
+    }
+    if (!resolvedTargetId || !resolvedTargetVersion) {
+        return { status: "invalid_target", source: "targetId and targetVersion are required" };
+    }
 
     let registry: EmbedRegistry;
     try {
@@ -301,17 +471,17 @@ export async function downloadEmbeddings(
     }
 
     // Find matching bundle for user's model
-    const entry = registry.bundles.find(b =>
-        b.modId === modId && b.modVersion === modVersion && b.model === localModel
-    );
+    const matchingBundles = registry.bundles.filter((b) => {
+        const bundleType = b.targetType ?? "mod";
+        return bundleType === target.targetType
+            && b.targetId === resolvedTargetId
+            && b.targetVersion === resolvedTargetVersion;
+    });
+
+    const entry = matchingBundles.find((b) => b.model === localModel);
 
     if (!entry) {
-        // Check if there are bundles for other models
-        const otherModels = [...new Set(
-            registry.bundles
-                .filter(b => b.modId === modId && b.modVersion === modVersion)
-                .map(b => b.model)
-        )];
+        const otherModels = [...new Set(matchingBundles.map((b) => b.model))];
         return {
             status: "not_found",
             availableModels: otherModels.length ? otherModels : undefined,
@@ -347,10 +517,12 @@ export async function downloadEmbeddings(
     // Save to cache and import
     const bundleDir = paths.embedBundles;
     await mkdir(bundleDir, { recursive: true });
-    const localPath = join(bundleDir, `${modId}-${modVersion}.emb.json.gz`);
+    const safeId = resolvedTargetId.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const safeVer = resolvedTargetVersion.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const localPath = join(bundleDir, `${target.targetType}-${safeId}-${safeVer}.emb.json.gz`);
     await writeFile(localPath, data);
 
-    const result = await importModEmbeddings(localPath);
+    const result = await importEmbeddingsBundle(localPath);
     return {
         status: result.status,
         imported: result.imported,
@@ -390,7 +562,11 @@ export async function downloadPackEmbeddings(): Promise<{
         }
 
         try {
-            const result = await downloadEmbeddings(mod.mod_id, mod.version);
+            const result = await downloadEmbeddings({
+                targetType: "mod",
+                targetId: mod.mod_id,
+                targetVersion: mod.version,
+            });
             if (result.status === "ok" && (result.imported ?? 0) > 0) {
                 downloaded++;
             } else {
@@ -408,19 +584,35 @@ export async function downloadPackEmbeddings(): Promise<{
  * Get embedding status for a mod.
  */
 export async function getEmbedStatus(
-    dbId: number,
+    target: { targetType: TargetType; dbId?: number; mcVersion?: string },
 ): Promise<{ totalFiles: number; embeddedCount: number; model: string; coverage: string }> {
-    validateDbId(dbId);
-    const mod = await findModById(dbId);
-    if (!mod) throw new Error(`Mod #${dbId} not found`);
-
     const db = await getDb();
-    const stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
-        `SELECT COUNT(*)::text AS total,
-                COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
-         FROM mod_source_files WHERE mod_id = $1`,
-        dbId,
-    );
+    let stats: [{ total: string; embedded: string }];
+
+    if (target.targetType === "mod") {
+        if (target.dbId == null) throw new Error("embed_status targetType=mod requires dbId");
+        validateDbId(target.dbId);
+        const mod = await findModById(target.dbId);
+        if (!mod) throw new Error(`Mod #${target.dbId} not found`);
+        stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
+            `SELECT COUNT(*)::text AS total,
+                    COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
+             FROM mod_source_files WHERE mod_id = $1`,
+            target.dbId,
+        );
+    } else if (target.targetType === "vanilla") {
+        if (!target.mcVersion) throw new Error("embed_status targetType=vanilla requires mcVersion");
+        const versionRow = await findMcVersionByVersionId(target.mcVersion);
+        if (!versionRow) throw new Error(`MC version ${target.mcVersion} not found`);
+        stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
+            `SELECT COUNT(*)::text AS total,
+                    COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
+             FROM mc_source_files WHERE mc_version_id = $1`,
+            versionRow.id,
+        );
+    } else {
+        throw new Error("embed_status targetType=modloader is not supported yet");
+    }
 
     const total = parseInt(stats[0].total, 10);
     const embedded = parseInt(stats[0].embedded, 10);
