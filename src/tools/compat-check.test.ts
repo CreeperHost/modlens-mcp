@@ -25,6 +25,7 @@ const BASE_MANIFEST = {
     hasAt: false, hasAw: false,
     atEntries: [], awEntries: [], mixinTargets: [],
     description: "", sourceUrl: null,
+    metadataSource: "mods.toml" as const,
 };
 
 const EXISTING_MOD = {

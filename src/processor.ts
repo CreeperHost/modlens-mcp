@@ -3,6 +3,8 @@ import { createHash } from "crypto";
 import { readFile } from "fs/promises";
 import { parse as parseToml } from "smol-toml";
 
+export type MetadataSource = "fabric.mod.json" | "quilt.mod.json" | "mods.toml" | "mcmod.info" | "@Mod annotation" | "filename";
+
 export interface ParsedManifest {
     modId: string;
     displayName: string;
@@ -19,6 +21,7 @@ export interface ParsedManifest {
     atEntries: string[];
     awEntries: string[];
     mixinTargets: string[];
+    metadataSource: MetadataSource;
 }
 
 export async function parseJar(jarPath: string): Promise<ParsedManifest> {
@@ -77,6 +80,7 @@ export async function parseJar(jarPath: string): Promise<ParsedManifest> {
                     atEntries: [],
                     awEntries: [],
                     mixinTargets: [],
+                    metadataSource: "@Mod annotation",
                 };
             } else {
                 manifest = unknownMod(jarPath);
@@ -156,6 +160,7 @@ function parseFabric(raw: string, entries: string[]): ParsedManifest {
         atEntries: [],
         awEntries: [],
         mixinTargets: [],
+        metadataSource: "fabric.mod.json",
     };
 }
 
@@ -181,6 +186,7 @@ function parseQuilt(raw: string, entries: string[]): ParsedManifest {
         atEntries: [],
         awEntries: [],
         mixinTargets: [],
+        metadataSource: "quilt.mod.json",
     };
 }
 
@@ -256,6 +262,7 @@ function parseForgeToml(raw: string, loader: "neoforge" | "forge", entries: stri
         atEntries: [],
         awEntries: [],
         mixinTargets: [],
+        metadataSource: "mods.toml",
     };
 }
 
@@ -316,6 +323,7 @@ function parseMcModInfo(raw: string, entries: string[]): ParsedManifest {
         atEntries: [],
         awEntries: [],
         mixinTargets: [],
+        metadataSource: "mcmod.info",
     };
 }
 
@@ -568,6 +576,7 @@ function unknownMod(jarPath: string): ParsedManifest {
         atEntries: [],
         awEntries: [],
         mixinTargets: [],
+        metadataSource: "filename",
     };
 }
 

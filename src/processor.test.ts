@@ -106,6 +106,7 @@ describe("parseJar — Fabric", () => {
             expect(m.version).toBe("1.2.3");
             expect(m.loader).toBe("fabric");
             expect(m.mcVersion).toBe("1.21.1");
+            expect(m.metadataSource).toBe("fabric.mod.json");
         } finally {
             await unlink(jarPath);
         }
@@ -180,6 +181,7 @@ mandatory = true
             expect(m.displayName).toBe("Example Mod");
             expect(m.loader).toBe("neoforge");
             expect(m.mcVersion).toBe("[26.1.2,)");
+            expect(m.metadataSource).toBe("mods.toml");
         } finally {
             await unlink(jarPath);
         }
@@ -254,6 +256,7 @@ describe("parseJar — mcmod.info (legacy Forge)", () => {
             expect(m.mcVersion).toBe("1.7.10");
             expect(m.loader).toBe("forge");
             expect(m.description).toBe("A carttastic mod");
+            expect(m.metadataSource).toBe("mcmod.info");
         } finally {
             await unlink(tmpPath);
         }
@@ -326,6 +329,22 @@ describe("parseJar — mcmod.info (legacy Forge)", () => {
             const m = await parseJar(tmpPath);
             expect(m.hasAt).toBe(true);
             expect(m.atEntries).toContain("accessible field net/minecraft/A f I");
+        } finally {
+            await unlink(tmpPath);
+        }
+    });
+});
+
+describe("parseJar — metadataSource fallback", () => {
+    it("sets metadataSource to 'filename' when no metadata is found", async () => {
+        const zip = new AdmZip();
+        zip.addFile("com/example/Util.class", Buffer.from("not a real class"));
+        const tmpPath = join(tmpdir(), `my-cool-mod-${Date.now()}.jar`);
+        zip.writeZip(tmpPath);
+        try {
+            const m = await parseJar(tmpPath);
+            expect(m.metadataSource).toBe("filename");
+            expect(m.loader).toBe("unknown");
         } finally {
             await unlink(tmpPath);
         }
@@ -497,6 +516,7 @@ describe("parseJar — @Mod annotation fallback", () => {
             expect(m.displayName).toBe("Old Mod");
             expect(m.version).toBe("1.0.0");
             expect(m.loader).toBe("forge");
+            expect(m.metadataSource).toBe("@Mod annotation");
         } finally {
             await unlink(tmpPath);
         }
@@ -521,6 +541,7 @@ describe("parseJar — @Mod annotation fallback", () => {
             const m = await parseJar(tmpPath);
             expect(m.modId).toBe("mcmodinfo_id");
             expect(m.displayName).toBe("Correct Name");
+            expect(m.metadataSource).toBe("mcmod.info");
         } finally {
             await unlink(tmpPath);
         }
