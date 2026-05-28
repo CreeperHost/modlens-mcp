@@ -842,3 +842,88 @@ export async function downloadGraph(
         targetType: entry.targetType ?? "mod",
     };
 }
+
+// ── Export ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Export a mod's local graph as a shareable gzipped JSON bundle with metadata.
+ */
+export async function exportGraph(
+    dbId: number,
+    outputDir: string,
+): Promise<{ path: string; nodeCount: number; edgeCount: number; enriched: boolean; sha256: string; sizeBytes: number }> {
+    validateDbId(dbId);
+    const mod = await findModById(dbId);
+    if (!mod) throw new Error(`Mod #${dbId} not found`);
+
+    const graphPath = mod.graphPath;
+    if (!graphPath || !await exists(join(graphPath, "graph.json"))) {
+        throw new Error(`No graph available for ${mod.modId}. Build one first with graph_build.`);
+    }
+
+    const raw = await readFile(join(graphPath, "graph.json"), "utf-8");
+    const graph = JSON.parse(raw) as GraphJson;
+
+    // Build export bundle with metadata
+    const bundle = {
+        version: 1,
+        targetType: "mod" as const,
+        targetId: mod.modId,
+        targetVersion: mod.version,
+        loader: mod.loader,
+        mcVersion: mod.mcVersion,
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.edges.length,
+        enriched: graph.nodes.some((n) => n.community != null),
+        generatedAt: new Date().toISOString(),
+        graph,
+    };
+
+    const json = JSON.stringify(bundle);
+    const { gzipSync } = await import("zlib");
+    const compressed = gzipSync(Buffer.from(json));
+
+    await mkdir(outputDir, { recursive: true });
+    const safeId = mod.modId.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const safeVer = mod.version.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const outPath = join(outputDir, `${safeId}-${safeVer}.graph.json.gz`);
+    await writeFile(outPath, compressed);
+
+    const sha256 = createHash("sha256").update(compressed).digest("hex");
+
+    return {
+        path: outPath,
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.edges.length,
+        enriched: bundle.enriched,
+        sha256,
+        sizeBytes: compressed.length,
+    };
+}
+
+// ── Community submission (groundwork — not yet functional) ────────────────────
+
+/** Payload shape for future community graph submissions. */
+export interface GraphSubmission {
+    /** The exported graph bundle file path */
+    bundlePath: string;
+    /** Optional contributor alias */
+    contributor?: string;
+    /** Free-text note about the graph */
+    note?: string;
+}
+
+/**
+ * Submit a locally-built graph for inclusion in the public registry.
+ * NOT YET IMPLEMENTED — returns a stub response with groundwork details.
+ */
+export async function submitGraph(
+    _submission: GraphSubmission,
+): Promise<{ status: string; message: string }> {
+    return {
+        status: "not_implemented",
+        message: "Community graph submission is planned but not yet available. "
+            + "For now, export your graph with graph_export and share the bundle file manually. "
+            + "Future versions will support direct submission to the public registry.",
+    };
+}

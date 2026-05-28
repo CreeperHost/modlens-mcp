@@ -18,7 +18,7 @@ import {
 } from "./tools/mod-data.js";
 import { traceRecipeChain } from "./tools/mod-data.js";
 import { getModSource, searchSource, decompileModClass } from "./tools/source.js";
-import { buildModGraph, graphBuildStatus, queryModGraph, getGraphReport, enrichNextChunk, submitEnrichment, downloadGraph } from "./tools/graphify.js";
+import { buildModGraph, graphBuildStatus, queryModGraph, getGraphReport, enrichNextChunk, submitEnrichment, downloadGraph, exportGraph, submitGraph } from "./tools/graphify.js";
 import { exportEmbeddings, downloadEmbeddings, downloadPackEmbeddings, getEmbedStatus, submitEmbeddings } from "./tools/embed-registry.js";
 import {
     searchModClass, getModClassMembers, getModClassBytecode,
@@ -156,7 +156,7 @@ function safe<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeof
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: (stub) community embedding submission — not yet functional.",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: (stub) community graph submission — not yet functional. embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: (stub) community embedding submission — not yet functional.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
@@ -164,7 +164,7 @@ server.tool(
             "decompile_class","source","search_source","reindex","batch_ingest",
             "batch_decompile","index_fts","search_indexed","index_semantic","search_semantic","get_paths","delete",
             "graph_build","graph_status","graph_query","graph_report",
-            "graph_enrich_next","graph_enrich_submit","graph_download",
+            "graph_enrich_next","graph_enrich_submit","graph_download","graph_export","graph_submit",
             "embed_export","embed_download","embed_download_all","embed_status","embed_submit",
         ]),
         jarPath:      z.string().optional(),
@@ -256,6 +256,8 @@ server.tool(
                 loader: targetLoader ?? loader,
                 mcVersion: targetMcVersion ?? mcVersion,
             }); break;
+            case "graph_export":    result = await exportGraph(dbId!, outputDir!); break;
+            case "graph_submit":    result = await submitGraph({ bundlePath: outputDir ?? "" }); break;
             case "embed_export":    result = await exportEmbeddings(resolvedTargetType, outputDir!, { dbId, mcVersion: resolvedTargetVersion ?? mcVersion, targetId: resolvedTargetId }); break;
             case "embed_download":  result = await downloadEmbeddings({
                 targetType: resolvedTargetType,
