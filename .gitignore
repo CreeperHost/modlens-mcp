@@ -5,6 +5,7 @@ dist/
 *.sqlite
 output/
 tools/*.jar
+src/generated/
 
 # JVM crash logs from mcsrc-indexer
 hs_err_pid*.log
