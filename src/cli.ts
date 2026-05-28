@@ -765,8 +765,10 @@ try {
 
         case "batch-decompile": {
             const concurrency = (flags.concurrency as number | undefined) ?? 2;
+            const autoEmbed = flags["auto-embed"] === true ? true : flags["auto-embed"] === false ? false : undefined;
+            const autoGraph = flags["auto-graph"] === true ? true : flags["auto-graph"] === false ? false : undefined;
             console.error(`Batch decompiling all un-decompiled mods (concurrency=${concurrency})...`);
-            out(await batchDecompileMods({ concurrency }));
+            out(await batchDecompileMods({ concurrency, autoEmbed, autoGraph }));
             break;
         }
 

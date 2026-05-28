@@ -932,6 +932,9 @@ if (sections.has("automation")) {
     const currentAutoGraph = existingEnv.MODLENS_AUTO_GRAPH !== "0";
     const currentAutoEmbedStartup = existingEnv.MODLENS_AUTO_EMBED !== "0";
     const currentAutoCacheDiffs = existingEnv.AUTO_CACHE_MOD_DIFFS === "1";
+    // Batch defaults: OFF unless explicitly set to "1"
+    const currentBatchAutoEmbed = existingEnv.MODLENS_BATCH_AUTO_EMBED === "1";
+    const currentBatchAutoGraph = existingEnv.MODLENS_BATCH_AUTO_GRAPH === "1";
 
     p.log.message("These settings control what happens automatically after tool actions.\nEach can also be overridden per-call with autoEmbed/autoGraph parameters.");
 
@@ -954,6 +957,16 @@ if (sections.has("automation")) {
                 hint: "Re-queue unfinished embeddings when the server starts",
             },
             {
+                value: "batchAutoEmbed",
+                label: "Auto-embed during batch_decompile",
+                hint: "Also queue embeddings during batch operations (slower but hands-free)",
+            },
+            {
+                value: "batchAutoGraph",
+                label: "Auto-build graph during batch_decompile",
+                hint: "Also build graphs during batch operations (slower but hands-free)",
+            },
+            {
                 value: "autoCacheDiffs",
                 label: "Auto-cache mod diffs",
                 hint: "Cache diff_detailed results to DB automatically",
@@ -963,6 +976,8 @@ if (sections.has("automation")) {
             ...(currentAutoEmbed ? ["autoEmbed"] : []),
             ...(currentAutoGraph ? ["autoGraph"] : []),
             ...(currentAutoEmbedStartup ? ["autoEmbedStartup"] : []),
+            ...(currentBatchAutoEmbed ? ["batchAutoEmbed"] : []),
+            ...(currentBatchAutoGraph ? ["batchAutoGraph"] : []),
             ...(currentAutoCacheDiffs ? ["autoCacheDiffs"] : []),
         ] as string[],
         required: false,
@@ -973,6 +988,8 @@ if (sections.has("automation")) {
     // MODLENS_AUTO_EMBED controls both per-decompile and startup scan
     autoEnv.MODLENS_AUTO_EMBED = (choices.has("autoEmbed") || choices.has("autoEmbedStartup")) ? "1" : "0";
     autoEnv.MODLENS_AUTO_GRAPH = choices.has("autoGraph") ? "1" : "0";
+    autoEnv.MODLENS_BATCH_AUTO_EMBED = choices.has("batchAutoEmbed") ? "1" : "";
+    autoEnv.MODLENS_BATCH_AUTO_GRAPH = choices.has("batchAutoGraph") ? "1" : "";
     autoEnv.AUTO_CACHE_MOD_DIFFS = choices.has("autoCacheDiffs") ? "1" : "";
 
     writeEnv({ ...readEnv(), ...autoEnv });

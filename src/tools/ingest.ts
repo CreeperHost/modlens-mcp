@@ -464,10 +464,26 @@ export async function deleteModFull(dbId: number): Promise<{ deleted: boolean; m
 
 export async function batchDecompileMods(opts?: {
     concurrency?: number;
+    autoEmbed?: boolean;
+    autoGraph?: boolean;
 }): Promise<{ started: number; alreadyDone: number; errors: number; total: number }> {
     const concurrency = opts?.concurrency ?? 4;
     const mods = await listModsSlim({ decompiled: false });
     let started = 0, alreadyDone = 0, errors = 0;
+
+    // Batch auto-behaviors default OFF (unlike single-mod which defaults ON).
+    // Uses MODLENS_BATCH_AUTO_EMBED / MODLENS_BATCH_AUTO_GRAPH with explicit param override.
+    const doAutoEmbed = opts?.autoEmbed ?? (process.env.MODLENS_BATCH_AUTO_EMBED === "1" || process.env.MODLENS_BATCH_AUTO_EMBED === "true");
+    const doAutoGraph = opts?.autoGraph ?? (process.env.MODLENS_BATCH_AUTO_GRAPH === "1" || process.env.MODLENS_BATCH_AUTO_GRAPH === "true");
+
+    function triggerPostDecompile(dbId: number) {
+        if (doAutoEmbed) {
+            isOllamaAvailable().then(ok => { if (ok) enqueueModEmbed(dbId); }).catch(() => {});
+        }
+        if (doAutoGraph) {
+            ensureGraphify().then(() => { buildModGraph(dbId).catch(() => {}); }).catch(() => {});
+        }
+    }
 
     async function processOne(mod: { id: number; modId: string; version: string; jarPath: string | null }) {
         if (!mod.jarPath) { errors++; return; }
@@ -476,6 +492,7 @@ export async function batchDecompileMods(opts?: {
         const state = await isDecompileDone(outDir);
         if (state === "done") {
             await updateMod(mod.id, { decompiled: true, decompPath: outDir });
+            triggerPostDecompile(mod.id);
             alreadyDone++;
             return;
         }
@@ -488,6 +505,7 @@ export async function batchDecompileMods(opts?: {
                 const s = await isDecompileDone(outDir);
                 if (s === "done") {
                     await updateMod(mod.id, { decompiled: true, decompPath: outDir });
+                    triggerPostDecompile(mod.id);
                     started++;
                     return;
                 }

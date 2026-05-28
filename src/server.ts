@@ -225,7 +225,7 @@ server.tool(
             case "search_source":    result = await searchSource(query!, dbId, isRegex ?? false, limit ?? 50); break;
             case "reindex":          result = await reindexClasses(dbId); break;
             case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false, replace ?? false); break;
-            case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2) }); break;
+            case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2), autoEmbed, autoGraph }); break;
             case "refresh_metadata": result = await refreshDegradedMetadata({ loader: loader as any, mcVersion }); break;
             case "index_semantic":   result = await indexModSourceSemantic(dbId!, 50, limit); break;
             case "search_semantic":  result = await searchModSourceSemantic(query!, dbId!, limit ?? 10, provenance); break;
