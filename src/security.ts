@@ -416,3 +416,62 @@ export function validateEmbeddingBundle(bundle: unknown): ValidationResult {
 
     return { valid: true };
 }
+
+// ── Registry index validation ─────────────────────────────────────────────────
+
+/**
+ * Validate an embedding registry index (index.json) returned from a remote server.
+ * Ensures each bundle entry has the expected field types to prevent TypeErrors
+ * from malformed/malicious registry responses.
+ */
+export function validateEmbedRegistryIndex(data: unknown): ValidationResult {
+    if (!data || typeof data !== "object") return { valid: false, reason: "registry must be an object" };
+    const d = data as Record<string, unknown>;
+    if (typeof d.version !== "number") return { valid: false, reason: "missing or invalid version" };
+    if (!Array.isArray(d.bundles)) return { valid: false, reason: "bundles must be an array" };
+    if ((d.bundles as unknown[]).length > 50_000) return { valid: false, reason: "too many bundles (>50k)" };
+
+    for (let i = 0; i < (d.bundles as unknown[]).length; i++) {
+        const entry = (d.bundles as unknown[])[i];
+        if (!entry || typeof entry !== "object") return { valid: false, reason: `bundle[${i}] must be an object` };
+        const e = entry as Record<string, unknown>;
+
+        if (typeof e.url !== "string" || e.url.length > 2000) return { valid: false, reason: `bundle[${i}].url invalid` };
+        if (typeof e.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(e.sha256)) return { valid: false, reason: `bundle[${i}].sha256 invalid` };
+        if (typeof e.model !== "string" || e.model.length > 200) return { valid: false, reason: `bundle[${i}].model invalid` };
+        if (typeof e.targetId !== "string" || e.targetId.length > 200) return { valid: false, reason: `bundle[${i}].targetId invalid` };
+        if (typeof e.targetVersion !== "string" || e.targetVersion.length > 200) return { valid: false, reason: `bundle[${i}].targetVersion invalid` };
+        if (e.targetType != null && !["mod", "vanilla", "modloader"].includes(e.targetType as string)) {
+            return { valid: false, reason: `bundle[${i}].targetType invalid` };
+        }
+    }
+
+    return { valid: true };
+}
+
+/**
+ * Validate a graph registry index (index.json) returned from a remote server.
+ */
+export function validateGraphRegistryIndex(data: unknown): ValidationResult {
+    if (!data || typeof data !== "object") return { valid: false, reason: "registry must be an object" };
+    const d = data as Record<string, unknown>;
+    if (typeof d.version !== "number") return { valid: false, reason: "missing or invalid version" };
+    if (!Array.isArray(d.graphs)) return { valid: false, reason: "graphs must be an array" };
+    if ((d.graphs as unknown[]).length > 50_000) return { valid: false, reason: "too many graphs (>50k)" };
+
+    for (let i = 0; i < (d.graphs as unknown[]).length; i++) {
+        const entry = (d.graphs as unknown[])[i];
+        if (!entry || typeof entry !== "object") return { valid: false, reason: `graph[${i}] must be an object` };
+        const e = entry as Record<string, unknown>;
+
+        if (typeof e.graphUrl !== "string" || e.graphUrl.length > 2000) return { valid: false, reason: `graph[${i}].graphUrl invalid` };
+        if (typeof e.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(e.sha256)) return { valid: false, reason: `graph[${i}].sha256 invalid` };
+        if (typeof e.modId !== "string" || e.modId.length > 200) return { valid: false, reason: `graph[${i}].modId invalid` };
+        if (typeof e.version !== "string" || e.version.length > 200) return { valid: false, reason: `graph[${i}].version invalid` };
+        if (e.targetType != null && !["mod", "vanilla", "modloader"].includes(e.targetType as string)) {
+            return { valid: false, reason: `graph[${i}].targetType invalid` };
+        }
+    }
+
+    return { valid: true };
+}

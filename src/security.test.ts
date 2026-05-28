@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validatePath, safeRegex, fileSha512, verifyFileHash, HashMismatchError, normalizeJarPath, validateGraphBundle, validateGraphEntries, validateEmbeddingBundle, decodeTagChars, stripInvisibleUnicode, containsInvisibleUnicode, assertJarPath } from "./security.js";
+import { validatePath, safeRegex, fileSha512, verifyFileHash, HashMismatchError, normalizeJarPath, validateGraphBundle, validateGraphEntries, validateEmbeddingBundle, decodeTagChars, stripInvisibleUnicode, containsInvisibleUnicode, assertJarPath, validateEmbedRegistryIndex, validateGraphRegistryIndex } from "./security.js";
 import { tmpdir } from "os";
 import { writeFile, unlink } from "fs/promises";
 import { join } from "path";
@@ -695,5 +695,122 @@ describe("hidden unicode in validators", () => {
         // but if it somehow passed, checkStringField would catch it
         const result = validateEmbeddingBundle(b);
         expect(result.valid).toBe(false);
+    });
+});
+
+// ── validateEmbedRegistryIndex ────────────────────────────────────────────────
+
+describe("validateEmbedRegistryIndex", () => {
+    const validIndex = () => ({
+        version: 1,
+        models: ["nomic-embed-text"],
+        bundles: [{
+            targetType: "mod",
+            targetId: "testmod",
+            targetVersion: "1.0.0",
+            model: "nomic-embed-text",
+            dimensions: 768,
+            entryCount: 100,
+            sizeBytes: 5000,
+            sha256: "a".repeat(64),
+            url: "nomic-embed-text/testmod-1.0.0.emb.json.gz",
+        }],
+    });
+
+    it("accepts a valid index", () => {
+        expect(validateEmbedRegistryIndex(validIndex())).toEqual({ valid: true });
+    });
+
+    it("rejects non-object", () => {
+        expect(validateEmbedRegistryIndex(null).valid).toBe(false);
+        expect(validateEmbedRegistryIndex("string").valid).toBe(false);
+    });
+
+    it("rejects missing version", () => {
+        const idx = validIndex();
+        (idx as any).version = undefined;
+        expect(validateEmbedRegistryIndex(idx).valid).toBe(false);
+    });
+
+    it("rejects non-array bundles", () => {
+        const idx = validIndex();
+        (idx as any).bundles = "not an array";
+        expect(validateEmbedRegistryIndex(idx).valid).toBe(false);
+    });
+
+    it("rejects bundle with non-string url", () => {
+        const idx = validIndex();
+        (idx.bundles[0] as any).url = 42;
+        expect(validateEmbedRegistryIndex(idx).valid).toBe(false);
+    });
+
+    it("rejects bundle with invalid sha256", () => {
+        const idx = validIndex();
+        idx.bundles[0].sha256 = "not-a-hash";
+        expect(validateEmbedRegistryIndex(idx).valid).toBe(false);
+    });
+
+    it("rejects bundle with invalid targetType", () => {
+        const idx = validIndex();
+        (idx.bundles[0] as any).targetType = "evil";
+        expect(validateEmbedRegistryIndex(idx).valid).toBe(false);
+    });
+
+    it("accepts bundle without targetType (optional)", () => {
+        const idx = validIndex();
+        delete (idx.bundles[0] as any).targetType;
+        expect(validateEmbedRegistryIndex(idx)).toEqual({ valid: true });
+    });
+});
+
+// ── validateGraphRegistryIndex ────────────────────────────────────────────────
+
+describe("validateGraphRegistryIndex", () => {
+    const validIndex = () => ({
+        version: 1,
+        graphs: [{
+            modId: "testmod",
+            version: "1.0.0",
+            loader: "neoforge",
+            mcVersion: "1.21.1",
+            graphUrl: "testmod-1.0.0.graph.json.gz",
+            sha256: "b".repeat(64),
+            nodeCount: 50,
+            edgeCount: 100,
+            enriched: false,
+            updatedAt: "2026-01-01T00:00:00Z",
+        }],
+    });
+
+    it("accepts a valid index", () => {
+        expect(validateGraphRegistryIndex(validIndex())).toEqual({ valid: true });
+    });
+
+    it("rejects non-object", () => {
+        expect(validateGraphRegistryIndex(42).valid).toBe(false);
+    });
+
+    it("rejects non-array graphs", () => {
+        const idx = validIndex();
+        (idx as any).graphs = {};
+        expect(validateGraphRegistryIndex(idx).valid).toBe(false);
+    });
+
+    it("rejects graph with non-string graphUrl", () => {
+        const idx = validIndex();
+        (idx.graphs[0] as any).graphUrl = null;
+        expect(validateGraphRegistryIndex(idx).valid).toBe(false);
+    });
+
+    it("rejects graph with invalid sha256", () => {
+        const idx = validIndex();
+        idx.graphs[0].sha256 = "tooshort";
+        expect(validateGraphRegistryIndex(idx).valid).toBe(false);
+    });
+
+    it("rejects graph with invalid targetType", () => {
+        const idx = validIndex();
+        (idx.graphs[0] as any).targetType = "bad";
+        expect(validateGraphRegistryIndex(idx).valid).toBe(false);
     });
 });

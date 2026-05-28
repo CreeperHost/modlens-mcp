@@ -708,8 +708,10 @@ async function fetchGraphRegistry(): Promise<GraphRegistry> {
     if (!res.ok) throw new Error(`Failed to fetch graph registry: ${res.status}`);
 
     const data = await res.json() as GraphRegistry;
-    if (!data.version || !Array.isArray(data.graphs)) {
-        throw new Error("Invalid graph registry format");
+    const { validateGraphRegistryIndex } = await import("../security.js");
+    const indexCheck = validateGraphRegistryIndex(data);
+    if (!indexCheck.valid) {
+        throw new Error(`Invalid graph registry: ${indexCheck.reason}`);
     }
 
     cachedRegistry = { data, fetchedAt: Date.now() };

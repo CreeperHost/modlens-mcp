@@ -22,7 +22,7 @@ import {
 } from "../repositories/embeddings.js";
 import { findMcVersionByVersionId } from "../repositories/mcVersion.js";
 import { validateDbId } from "../validate.js";
-import { validateEmbeddingBundle } from "../security.js";
+import { validateEmbeddingBundle, validateEmbedRegistryIndex } from "../security.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -479,8 +479,9 @@ async function fetchEmbedRegistry(): Promise<EmbedRegistry> {
     if (!res.ok) throw new Error(`Failed to fetch embedding registry: ${res.status}`);
 
     const data = await res.json() as EmbedRegistry;
-    if (!data.version || !Array.isArray(data.bundles)) {
-        throw new Error("Invalid embedding registry format");
+    const indexCheck = validateEmbedRegistryIndex(data);
+    if (!indexCheck.valid) {
+        throw new Error(`Invalid embedding registry: ${indexCheck.reason}`);
     }
 
     cachedEmbedRegistry = { data, fetchedAt: Date.now() };
