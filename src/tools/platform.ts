@@ -4,7 +4,7 @@ import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { ensureDir } from "../cache.js";
 import { findModById, updateMod, listModsForSync, getModMetadata } from "../repositories/mod.js";
-import { fileSha512, verifyFileHash, HashMismatchError } from "../security.js";
+import { fileSha512, verifyFileHash, HashMismatchError, validatePath } from "../security.js";
 import { buildModGraph, ensureGraphify } from "./graphify.js";
 import type { AutoBehaviorOpts } from "./ingest.js";
 
@@ -107,25 +107,51 @@ export async function downloadSource(dbId: number, opts?: AutoBehaviorOpts): Pro
     const sourceUrl = meta.sourceUrl;
     if (!sourceUrl) throw new Error("No source URL found. Run sync_modrinth or sync_curseforge first.");
 
+    // ── URL validation ─────────────────────────────────────────────────────
+    let parsed: URL;
+    try { parsed = new URL(sourceUrl); } catch { throw new Error(`Invalid source URL: ${sourceUrl}`); }
+    if (parsed.protocol !== "https:") throw new Error(`Source URL must use HTTPS: ${sourceUrl}`);
+    const ALLOWED_HOSTS = ["github.com", "gitlab.com", "bitbucket.org", "codeberg.org"];
+    if (!ALLOWED_HOSTS.some(h => parsed.hostname === h || parsed.hostname.endsWith(`.${h}`))) {
+        throw new Error(`Source URL hostname not allowed: ${parsed.hostname} (expected: ${ALLOWED_HOSTS.join(", ")})`);
+    }
+
+    // ── Path sanitization ──────────────────────────────────────────────────
+    const safeModId = mod.modId.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const safeVersion = mod.version.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const cacheRoot = `${process.env.HOME ?? process.env.USERPROFILE}/.modlens-cache/sources`;
+    const outDir = `${cacheRoot}/${safeModId}/${safeVersion}`;
+    const tmpZip = outDir + ".tmp.zip";
+    const zipPath = outDir + ".zip";
+    validatePath(outDir, cacheRoot);
+    await ensureDir(tmpZip);
+
+    // ── Download to temp file ──────────────────────────────────────────────
     // Convert GitHub repo URL to ZIP download
     const zipUrl = sourceUrl.replace("github.com", "codeload.github.com")
         .replace(/\/?$/, "/zip/refs/heads/main");
 
-    const outDir = `${process.env.HOME ?? process.env.USERPROFILE}/.modlens-cache/sources/${mod.modId}/${mod.version}`;
-    const zipPath = outDir + ".zip";
-    await ensureDir(zipPath);
-
-    const res = await fetch(zipUrl);
-    if (!res.ok) {
-        // Try master branch
-        const res2 = await fetch(zipUrl.replace("/main", "/master"));
-        if (!res2.ok) throw new Error(`Failed to download source from ${sourceUrl}`);
-        const writer = createWriteStream(zipPath);
-        await pipeline(res2.body as unknown as NodeJS.ReadableStream, writer);
-    } else {
-        const writer = createWriteStream(zipPath);
-        await pipeline(res.body as unknown as NodeJS.ReadableStream, writer);
+    try {
+        const res = await fetch(zipUrl);
+        if (!res.ok) {
+            // Try master branch
+            const res2 = await fetch(zipUrl.replace("/main", "/master"));
+            if (!res2.ok) throw new Error(`Failed to download source from ${sourceUrl}`);
+            const writer = createWriteStream(tmpZip);
+            await pipeline(res2.body as unknown as NodeJS.ReadableStream, writer);
+        } else {
+            const writer = createWriteStream(tmpZip);
+            await pipeline(res.body as unknown as NodeJS.ReadableStream, writer);
+        }
+    } catch (e) {
+        // Clean up partial temp file on any download failure
+        await import("fs/promises").then(f => f.unlink(tmpZip).catch(() => {}));
+        throw e;
     }
+
+    // Atomic rename: temp → final zip
+    const { rename, unlink } = await import("fs/promises");
+    await rename(tmpZip, zipPath);
 
     const AdmZip = (await import("adm-zip")).default;
     const zip = new AdmZip(zipPath);
@@ -139,7 +165,7 @@ export async function downloadSource(dbId: number, opts?: AutoBehaviorOpts): Pro
             await verifyFileHash(zipPath, expectedSha512);
         } catch (e) {
             if (e instanceof HashMismatchError) {
-                await import("fs/promises").then((f) => f.unlink(zipPath).catch(() => {}));
+                await unlink(zipPath).catch(() => {});
                 throw new Error(`Source ZIP integrity check FAILED for mod #${dbId}: ${e.message}`);
             }
             throw e;
@@ -154,6 +180,10 @@ export async function downloadSource(dbId: number, opts?: AutoBehaviorOpts): Pro
     try {
         zip.extractAllTo(outDir, true);
     } catch (e) {
+        // Clean up partial extraction + zip on failure
+        const { rm } = await import("fs/promises");
+        await rm(outDir, { recursive: true, force: true }).catch(() => {});
+        await unlink(zipPath).catch(() => {});
         throw new Error(`Failed to extract source ZIP for mod #${dbId}: ${e instanceof Error ? e.message : String(e)}`);
     }
 
