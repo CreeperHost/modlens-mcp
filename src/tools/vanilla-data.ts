@@ -9,7 +9,7 @@
  *   assets-json  → assets/minecraft/<type>/<id>.json
  */
 import { readFile, writeFile, readdir } from "fs/promises";
-import { join } from "path";
+import { join, resolve } from "path";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
 import { resolveModRef } from "../repositories/mod.js";
 import { searchSource } from "./source.js";
@@ -17,10 +17,24 @@ import { searchSource } from "./source.js";
 const RAW_BASE     = "https://raw.githubusercontent.com/misode/mcmeta";
 const MCMETA_CACHE = join(CACHE_ROOT, "mcmeta");
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+/** Minecraft resource-location component: [a-zA-Z0-9_.+-] */
+const SAFE_COMPONENT = /^[a-zA-Z0-9_.+-]+$/;
+
+function validateMcComponent(value: string, label: string): void {
+    if (!SAFE_COMPONENT.test(value)) {
+        throw new Error(`Invalid ${label}: "${value}" — only alphanumeric, dot, underscore, hyphen, and plus are allowed`);
+    }
+}
+
+// ── Internal helpers ─────────────────────────────────────────────────────────────────
 
 function mcmetaCachePath(version: string, branch: string, filePath: string): string {
-    return join(MCMETA_CACHE, version, branch, filePath);
+    const result = resolve(join(MCMETA_CACHE, version, branch, filePath));
+    const resolvedCache = resolve(MCMETA_CACHE);
+    if (!result.startsWith(resolvedCache + require("path").sep) && result !== resolvedCache) {
+        throw new Error(`Path traversal rejected in mcmeta cache: ${filePath}`);
+    }
+    return result;
 }
 
 async function fetchMcmetaJson<T>(ref: string, filePath: string): Promise<T> {
@@ -105,6 +119,9 @@ export async function getMcTags(
 ): Promise<object> {
     const v = version ?? "26.1.2";
     const branch = "data";
+    validateMcComponent(namespace, "namespace");
+    if (registry) validateMcComponent(registry, "registry");
+    if (tagId) validateMcComponent(tagId.replace(/\//g, "_"), "tagId");
 
     if (registry && tagId) {
         const path = `data/${namespace}/tags/${registry}/${tagId}.json`;

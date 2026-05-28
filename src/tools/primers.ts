@@ -17,6 +17,52 @@ import { embed, isOllamaAvailable, chunkText } from "../embeddings.js";
 import { upsertPrimerEmbedding, searchPrimersByVector, countUnembedded } from "../repositories/embeddings.js";
 import { ftsSearchPrimers } from "../search-adapter.js";
 
+// ── Primer URL security ───────────────────────────────────────────────────────
+const DEFAULT_PRIMER_HOSTS = [
+    "github.com", "raw.githubusercontent.com",
+    "neoforged.net", "docs.neoforged.net",
+    "fabricmc.net", "wiki.fabricmc.net",
+    "modrinth.com",
+    "curseforge.com",
+    "minecraft.wiki",
+    "docs.minecraftforge.net", "minecraftforge.net",
+    "quiltmc.org", "wiki.quiltmc.org",
+    "linuxcafe.net",
+    "gist.github.com",
+    "gitlab.com",
+    "codeberg.org",
+];
+
+function getPrimerAllowedHosts(): Set<string> {
+    const extra = process.env.MODLENS_PRIMER_ALLOWED_HOSTS;
+    const hosts = [...DEFAULT_PRIMER_HOSTS];
+    if (extra) hosts.push(...extra.split(",").map(h => h.trim()).filter(Boolean));
+    return new Set(hosts);
+}
+
+function validatePrimerUrl(url: string): void {
+    // Bypass mode: allow any HTTPS URL
+    if (process.env.MODLENS_PRIMER_ALLOW_ANY_HTTPS === "1") {
+        let parsed: URL;
+        try { parsed = new URL(url); } catch { throw new Error(`Invalid primer URL: ${url}`); }
+        if (parsed.protocol !== "https:") throw new Error(`Primer URL must use HTTPS: ${url}`);
+        return;
+    }
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw new Error(`Invalid primer URL: ${url}`); }
+    if (parsed.protocol !== "https:") throw new Error(`Primer URL must use HTTPS: ${url}`);
+    const allowed = getPrimerAllowedHosts();
+    if (!allowed.has(parsed.hostname) && ![...allowed].some(h => parsed.hostname.endsWith(`.${h}`))) {
+        throw new Error(
+            `Primer URL hostname "${parsed.hostname}" not in allowed list. ` +
+            `Add it via MODLENS_PRIMER_ALLOWED_HOSTS env var, or set MODLENS_PRIMER_ALLOW_ANY_HTTPS=1 to allow any HTTPS URL.`
+        );
+    }
+}
+
+/** Exported for use in setup wizard. */
+export { DEFAULT_PRIMER_HOSTS };
+
 // ── Version resolution ────────────────────────────────────────────────────────
 const VERSIONS_CACHE = join(CACHE_ROOT, "mcmeta", "_latest", "summary", "versions", "data.json");
 const VERSIONS_URL   = "https://raw.githubusercontent.com/misode/mcmeta/summary/versions/data.json";
@@ -79,6 +125,9 @@ export async function ingestPrimer(entries: {
 
     for (const e of entries) {
         // Optionally fetch content from URL
+        // Validate URL for both storage and fetch
+        validatePrimerUrl(e.url);
+
         let content = e.content;
         if (e.fetchContent && !content) {
             try {

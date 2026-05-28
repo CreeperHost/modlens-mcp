@@ -18,15 +18,29 @@
  * All fetched files are cached to ~/.modlens-cache/mcmeta/{version}/{branch}/...
  */
 import { readFile, writeFile, readdir, mkdir } from "fs/promises";
-import { join, dirname, extname } from "path";
+import { join, dirname, extname, resolve } from "path";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 const MCMETA_CACHE = join(CACHE_ROOT, "mcmeta");
 const RAW_BASE     = "https://raw.githubusercontent.com/misode/mcmeta";
 
+/** Minecraft resource-location component pattern: [a-z0-9_.-] */
+const SAFE_COMPONENT = /^[a-zA-Z0-9_.+-]+$/;
+
+function validateMcComponent(value: string, label: string): void {
+    if (!SAFE_COMPONENT.test(value)) {
+        throw new Error(`Invalid ${label}: "${value}" — only alphanumeric, dot, underscore, hyphen, and plus are allowed`);
+    }
+}
+
 function mcmetaCachePath(version: string, branch: string, filePath: string): string {
-    return join(MCMETA_CACHE, version, branch, filePath);
+    const result = resolve(join(MCMETA_CACHE, version, branch, filePath));
+    const resolvedCache = resolve(MCMETA_CACHE);
+    if (!result.startsWith(resolvedCache + require("path").sep) && result !== resolvedCache) {
+        throw new Error(`Path traversal rejected in mcmeta cache: ${filePath}`);
+    }
+    return result;
 }
 
 // ── Fetch + cache ─────────────────────────────────────────────────────────────

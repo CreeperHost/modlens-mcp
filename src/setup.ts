@@ -1013,6 +1013,51 @@ if (sections.has("automation")) {
     p.log.success("Automation preferences saved");
 }
 
+// ── Primer security ───────────────────────────────────────────────────────────
+if (sections.has("automation")) {
+    const { DEFAULT_PRIMER_HOSTS } = await import("./tools/primers.js");
+    const secEnv: Record<string, string> = {};
+    const currentAllowAny = existingEnv.MODLENS_PRIMER_ALLOW_ANY_HTTPS === "1";
+    const currentExtraHosts = existingEnv.MODLENS_PRIMER_ALLOWED_HOSTS ?? "";
+
+    p.log.message(
+        `Primer URL security: when fetchContent is enabled, primers are fetched server-side.\n` +
+        `Default allowed hosts: ${DEFAULT_PRIMER_HOSTS.slice(0, 5).join(", ")}… (${DEFAULT_PRIMER_HOSTS.length} total)\n` +
+        `You can add extra hosts or allow any HTTPS URL.`
+    );
+
+    const primerMode = await p.select({
+        message: "Primer URL security mode",
+        options: [
+            { value: "default", label: "Allowlist only (recommended)", hint: `${DEFAULT_PRIMER_HOSTS.length} known modding sites` },
+            { value: "extra",   label: "Allowlist + extra hosts",      hint: "Add custom domains" },
+            { value: "any",     label: "Allow any HTTPS URL",          hint: "Less secure — trusts all HTTPS sources" },
+        ],
+        initialValue: currentAllowAny ? "any" : currentExtraHosts ? "extra" : "default",
+    });
+    checkCancel(primerMode);
+
+    if (primerMode === "any") {
+        secEnv.MODLENS_PRIMER_ALLOW_ANY_HTTPS = "1";
+        secEnv.MODLENS_PRIMER_ALLOWED_HOSTS = "";
+    } else if (primerMode === "extra") {
+        secEnv.MODLENS_PRIMER_ALLOW_ANY_HTTPS = "";
+        const extraHosts = await p.text({
+            message: "Extra allowed hostnames (comma-separated)",
+            placeholder: "myblog.example.com, wiki.modloader.dev",
+            initialValue: currentExtraHosts,
+        });
+        checkCancel(extraHosts);
+        secEnv.MODLENS_PRIMER_ALLOWED_HOSTS = (extraHosts as string).trim();
+    } else {
+        secEnv.MODLENS_PRIMER_ALLOW_ANY_HTTPS = "";
+        secEnv.MODLENS_PRIMER_ALLOWED_HOSTS = "";
+    }
+
+    writeEnv({ ...readEnv(), ...secEnv });
+    p.log.success("Primer security preferences saved");
+}
+
 // ── MCP client config ─────────────────────────────────────────────────────────
 if (sections.has("mcp")) {
     // For npx/installed mode: env is loaded from ~/.modlens/.env by the launcher,

@@ -19,7 +19,7 @@
  *   search_ftb_mods — search the FTB mod index (returns mixed CF int / MR
  *                     string IDs)
  */
-import { join } from "path";
+import { join, resolve } from "path";
 import { createHash } from "crypto";
 import { rename, mkdir } from "fs/promises";
 import AdmZip from "adm-zip";
@@ -593,10 +593,16 @@ export async function downloadOverridesAction(opts: {
         await rename(tmpPath, zipPath);
     }
 
-    // Extract the full CF pack ZIP — it contains only manifest.json, modlist.html,
-    // and overrides/ (no mod JARs), so extracting everything is safe and simple.
+    // Extract with zip-slip protection: validate each entry resolves inside extractDir
     await mkdir(extractDir, { recursive: true });
     const zip = new AdmZip(zipPath);
+    const resolvedExtractDir = resolve(extractDir);
+    for (const entry of zip.getEntries()) {
+        const target = resolve(extractDir, entry.entryName);
+        if (!target.startsWith(resolvedExtractDir + require("path").sep) && target !== resolvedExtractDir) {
+            throw new Error(`Zip-slip detected: entry "${entry.entryName}" escapes extract dir`);
+        }
+    }
     zip.extractAllTo(extractDir, /* overwrite */ true);
 
     const entries = zip.getEntries().map((e) => e.entryName);
