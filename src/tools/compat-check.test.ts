@@ -61,6 +61,27 @@ describe("checkModCompat", () => {
         expect(result.candidate.version).toBe("1.0");
         expect(result.candidate.loader).toBe("neoforge");
         expect(result.candidate.mcVersion).toBe("1.21");
+        expect(result.candidate.metadataSource).toBe("mods.toml");
+    });
+
+    it("warns when metadataSource is filename", async () => {
+        vi.mocked(parseJar).mockResolvedValue({ ...BASE_MANIFEST, metadataSource: "filename" as const });
+
+        const result = await checkModCompat("/degraded.jar") as any;
+
+        const degraded = result.issues.find((i: any) => i.type === "degraded_metadata");
+        expect(degraded).toBeDefined();
+        expect(degraded.severity).toBe("warn");
+    });
+
+    it("emits info when metadataSource is @Mod annotation", async () => {
+        vi.mocked(parseJar).mockResolvedValue({ ...BASE_MANIFEST, metadataSource: "@Mod annotation" as const });
+
+        const result = await checkModCompat("/annotation.jar") as any;
+
+        const degraded = result.issues.find((i: any) => i.type === "degraded_metadata");
+        expect(degraded).toBeDefined();
+        expect(degraded.severity).toBe("info");
     });
 
     it("reports mixin conflict as error", async () => {

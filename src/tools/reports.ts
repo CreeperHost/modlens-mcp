@@ -16,6 +16,7 @@
 import { writeFile, mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { resolveModRef, findModTagsByMod } from "../repositories/mod.js";
+import { getDb } from "../db.js";
 import { getMixinConflictMatrix, getMixinHotspots, listModsWithMixins } from "./mixin-scan.js";
 import { findTagConflicts, getTagContributors, getModTagList, searchModTags } from "./mod-tags.js";
 import { findVersionConflicts, getDependencyGraph, listModSourceUrls } from "./catalog.js";
@@ -267,7 +268,14 @@ export type ReportType =
 
 async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbIds?: number[] }): Promise<string> {
     // Run all relevant checks concurrently
-    const [versionData, atawData, mixinData, tagData] = await Promise.all([
+    const degradedWhere: Record<string, unknown> = {
+        metadataSource: { in: ["filename", "@Mod annotation"] },
+    };
+    if (opts.mcVersion) degradedWhere.mcVersion = { contains: opts.mcVersion };
+    if (opts.loader) degradedWhere.loader = opts.loader;
+    const db = await getDb();
+
+    const [versionData, atawData, mixinData, tagData, degradedMods] = await Promise.all([
         findVersionConflicts({ mcVersion: opts.mcVersion, loader: opts.loader }) as Promise<{
             duplicateModIds: { count: number; mods: Array<{ modId: string; display: string; ingestedVersions: Array<{ version: string; mcVersion: string; loader: string; dbId: number }> }> };
             unsatisfiedDeps: { count: number; deps: Array<{ declaredBy: string; depId: string; requiredRange: string; foundVersions: string[]; required: boolean }> };
@@ -285,6 +293,11 @@ async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbI
             hardConflicts: { count: number; conflicts: Array<{ tagPath: string; registry: string; conflictingMods: Array<{ mod: string }> }> };
             softConflicts: { count: number };
         }>,
+        db.mod.findMany({
+            where: degradedWhere,
+            select: { modId: true, displayName: true, jarPath: true, metadataSource: true },
+            orderBy: { modId: "asc" },
+        }),
     ]);
 
     let md = h1("Pack Compatibility Report");
@@ -298,6 +311,7 @@ async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbI
         versionData.unsatisfiedDeps.count > 0 ? `${versionData.unsatisfiedDeps.count} unsatisfied dep(s)` : null,
         mixinData.conflictingClasses > 0 ? `${mixinData.conflictingClasses} mixin-conflicted class(es)` : null,
         tagData.hardConflicts.count > 0 ? `${tagData.hardConflicts.count} hard tag conflict(s)` : null,
+        degradedMods.length > 0 ? `${degradedMods.length} mod(s) with degraded metadata` : null,
     ].filter(Boolean);
 
     md += h2("Scorecard");
@@ -362,6 +376,18 @@ async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbI
         }
         md += "\n";
         if (tagData.hardConflicts.count > 10) md += `_…and ${tagData.hardConflicts.count - 10} more. Run \`reports report=tag_conflicts\` for full list._\n`;
+    }
+
+    // ── Degraded metadata
+    if (degradedMods.length > 0) {
+        md += h2(`Degraded Metadata (${degradedMods.length} mods)`);
+        md += `> These mods had no standard manifest and were identified by ${bold("filename")} or ${bold("@Mod annotation")} — their modId, version, and dependencies may be inaccurate.\n\n`;
+        md += tableHeader(["Mod", "Source", "JAR"]);
+        for (const m of degradedMods) {
+            const jar = m.jarPath.split(/[\\/]/).pop() ?? m.jarPath;
+            md += "\n" + tableRow([code(m.modId), code(m.metadataSource ?? "unknown"), code(jar)]);
+        }
+        md += "\n";
     }
 
     return md;

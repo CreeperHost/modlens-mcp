@@ -21,7 +21,7 @@ import { normalizeJarPath } from "../security.js";
 export type IssueSeverity = "error" | "warn" | "info";
 export type IssueType =
     | "mixin_conflict" | "at_conflict" | "aw_conflict"
-    | "asset_conflict" | "missing_dep"  | "sidedness";
+    | "asset_conflict" | "missing_dep"  | "sidedness" | "degraded_metadata";
 
 export interface CompatIssue {
     severity: IssueSeverity;
@@ -93,6 +93,21 @@ export async function checkModCompat(
 
     const manifest = await parseJar(jarPath);
     const issues: CompatIssue[] = [];
+
+    // ── Check 0: Degraded metadata warning ────────────────────────────────────
+    if (manifest.metadataSource === "filename") {
+        issues.push({
+            severity: "warn",
+            type: "degraded_metadata",
+            detail: `Mod identified by filename only — modId, version, and dependencies may be inaccurate`,
+        });
+    } else if (manifest.metadataSource === "@Mod annotation") {
+        issues.push({
+            severity: "info",
+            type: "degraded_metadata",
+            detail: `Mod identified by @Mod annotation — dependency information is unavailable`,
+        });
+    }
 
     // ── Check 1: Mixin conflicts ──────────────────────────────────────────────
     if (manifest.mixinTargets.length > 0) {
@@ -242,10 +257,11 @@ export async function checkModCompat(
 
     return {
         candidate: {
-            modId:     manifest.modId,
-            version:   manifest.version,
-            loader:    manifest.loader,
-            mcVersion: manifest.mcVersion,
+            modId:          manifest.modId,
+            version:        manifest.version,
+            loader:         manifest.loader,
+            mcVersion:      manifest.mcVersion,
+            metadataSource: manifest.metadataSource,
         },
         sidedness: {
             sidedness,
