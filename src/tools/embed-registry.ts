@@ -11,7 +11,7 @@ import { join } from "path";
 import { Readable } from "stream";
 import { paths, exists, CACHE_ROOT } from "../cache.js";
 import { getDb } from "../db.js";
-import { findModById } from "../repositories/mod.js";
+import { findModById, findModByModIdLike } from "../repositories/mod.js";
 import {
     upsertModSourceEmbedding,
     findModSourceIdsByClassNames,
@@ -224,7 +224,7 @@ export async function exportVanillaEmbeddings(
 export async function exportEmbeddings(
     targetType: TargetType,
     outputDir: string,
-    opts: { dbId?: number; mcVersion?: string } = {},
+    opts: { dbId?: number; mcVersion?: string; targetId?: string } = {},
 ): Promise<{ path: string; entryCount: number; sizeBytes: number; sha256: string }> {
     if (targetType === "mod") {
         if (!opts.dbId) throw new Error("embed_export targetType=mod requires dbId");
@@ -234,7 +234,12 @@ export async function exportEmbeddings(
         if (!opts.mcVersion) throw new Error("embed_export targetType=vanilla requires mcVersion");
         return exportVanillaEmbeddings(opts.mcVersion, outputDir);
     }
-    throw new Error("embed_export targetType=modloader is not supported yet");
+    // modloader — stored as a Mod row (modId="neoforge"/"fabric"), so resolve and reuse mod export
+    if (opts.dbId) return exportModEmbeddings(opts.dbId, outputDir);
+    const loaderId = opts.targetId ?? opts.mcVersion ?? "neoforge";
+    const loaderMod = await findModByModIdLike(loaderId);
+    if (!loaderMod) throw new Error(`No ingested modloader found matching "${loaderId}". Ingest the modloader JAR first.`);
+    return exportModEmbeddings(loaderMod.id, outputDir);
 }
 
 /**
@@ -370,12 +375,22 @@ export async function importEmbeddingsBundle(
         }
         idMap = await findSourceIdsByClassNames(classNames, versionRow.id);
     } else {
-        return {
-            status: "not_supported",
-            imported: 0,
-            skipped: bundle.entries.length,
-            total: bundle.entries.length,
-        };
+        // modloader — stored in mod_source_files, same as mods
+        const db = await getDb();
+        const loaderMod = await db.$queryRawUnsafe<Array<{ id: number }>>(
+            `SELECT id FROM mods WHERE mod_id = $1 LIMIT 1`,
+            target.targetId,
+        );
+        if (!loaderMod.length) {
+            // Try fuzzy match (e.g., "neoforge" matches modId containing "neoforge")
+            const fuzzy = await findModByModIdLike(target.targetId);
+            if (!fuzzy) {
+                return { status: "modloader_not_found", imported: 0, skipped: bundle.entries.length, total: bundle.entries.length };
+            }
+            idMap = await findModSourceIdsByClassNames(classNames, fuzzy.id);
+        } else {
+            idMap = await findModSourceIdsByClassNames(classNames, loaderMod[0].id);
+        }
     }
 
     let imported = 0;
@@ -387,7 +402,7 @@ export async function importEmbeddingsBundle(
             skipped++;
             continue;
         }
-        if (target.targetType === "mod") {
+        if (target.targetType === "mod" || target.targetType === "modloader") {
             await upsertModSourceEmbedding(sourceFileId, entry.embedding);
         } else if (target.targetType === "vanilla") {
             await upsertSourceEmbedding(sourceFileId, entry.embedding);
@@ -447,17 +462,20 @@ export async function downloadEmbeddings(
     },
 ): Promise<{ status: string; source?: string; imported?: number; skipped?: number; availableModels?: string[] }> {
     const localModel = target.model ?? process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
-    if (target.targetType === "modloader") {
-        return { status: "not_supported", source: "modloader embeddings are not supported yet" };
-    }
 
     let resolvedTargetId = target.targetId;
     let resolvedTargetVersion = target.targetVersion;
-    if (target.targetType === "mod" && (!resolvedTargetId || !resolvedTargetVersion) && target.dbId != null) {
+    if ((target.targetType === "mod" || target.targetType === "modloader") && (!resolvedTargetId || !resolvedTargetVersion) && target.dbId != null) {
         const mod = await findModById(target.dbId);
         if (!mod) return { status: "mod_not_found", source: `Mod #${target.dbId} not found` };
         resolvedTargetId = resolvedTargetId ?? mod.modId;
         resolvedTargetVersion = resolvedTargetVersion ?? mod.version;
+    } else if (target.targetType === "modloader" && !target.dbId && resolvedTargetId) {
+        // Resolve modloader name to mod row
+        const loaderMod = await findModByModIdLike(resolvedTargetId);
+        if (!loaderMod) return { status: "modloader_not_found", source: `No ingested modloader "${resolvedTargetId}". Ingest the modloader JAR first.` };
+        resolvedTargetId = loaderMod.modId;
+        resolvedTargetVersion = resolvedTargetVersion ?? loaderMod.version;
     }
     if (!resolvedTargetId || !resolvedTargetVersion) {
         return { status: "invalid_target", source: "targetId and targetVersion are required" };
@@ -611,7 +629,24 @@ export async function getEmbedStatus(
             versionRow.id,
         );
     } else {
-        throw new Error("embed_status targetType=modloader is not supported yet");
+        // modloader — stored as a Mod row in mod_source_files
+        let modDbId = target.dbId;
+        if (modDbId == null) {
+            // Resolve by loader name — repurpose mcVersion as loader hint if no dbId
+            const loaderName = target.mcVersion ?? "neoforge";
+            const loaderMod = await findModByModIdLike(loaderName);
+            if (!loaderMod) throw new Error(`No ingested modloader "${loaderName}". Ingest the modloader JAR first.`);
+            modDbId = loaderMod.id;
+        }
+        validateDbId(modDbId);
+        const mod = await findModById(modDbId);
+        if (!mod) throw new Error(`Mod #${modDbId} not found`);
+        stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
+            `SELECT COUNT(*)::text AS total,
+                    COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
+             FROM mod_source_files WHERE mod_id = $1`,
+            modDbId,
+        );
     }
 
     const total = parseInt(stats[0].total, 10);
