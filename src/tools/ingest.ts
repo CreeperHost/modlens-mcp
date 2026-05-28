@@ -261,7 +261,7 @@ export async function decompileMod(dbId: number): Promise<{ status: string; outD
     }
 
     // Kick off background decompile — returns in ~300ms
-    // decompileJarJiJ handles Fabric-style Jar-in-Jar bundles automatically
+    // decompileJarJiJ handles Jar-in-Jar bundles automatically (Fabric META-INF/jars/ + NeoForge META-INF/jarjar/)
     await decompileJarJiJ(mod.jarPath, outDir);
 
     return {

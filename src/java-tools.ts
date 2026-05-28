@@ -247,7 +247,8 @@ export async function decompileJarJiJ(jarPath: string, outputDir: string): Promi
     const { writeFile, mkdir } = await import("fs/promises");
     const zip = new AdmZip(jarPath);
     const nestedEntries = zip.getEntries().filter(
-        (e) => e.entryName.startsWith("META-INF/jars/") && e.entryName.endsWith(".jar")
+        (e) => (e.entryName.startsWith("META-INF/jars/") || e.entryName.startsWith("META-INF/jarjar/"))
+            && e.entryName.endsWith(".jar")
     );
 
     if (nestedEntries.length === 0) {
@@ -264,18 +265,25 @@ export async function decompileJarJiJ(jarPath: string, outputDir: string): Promi
     await unlink(decompileSentinelDone(outputDir)).catch(() => {});
     await unlink(decompileSentinelErr(outputDir)).catch(() => {});
 
-    // Kick off background worker that decompiles every nested JAR sequentially
+    // Kick off background worker that decompiles the main JAR + nested JARs sequentially
     (async () => {
         const tmpDir = join(tmpdir(), "modlens-jij-" + Date.now());
         await mkdir(tmpDir, { recursive: true });
         try {
+            // 1. Decompile the main JAR itself (contains the mod's own classes)
+            await new Promise<void>((resolve, reject) => {
+                const proc = spawn(java, [...jvmErrorFlags(), "-jar", vf, jarPath, outputDir], { stdio: "ignore" });
+                proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`Vineflower exited ${code} for main JAR`)));
+                proc.on("error", reject);
+            });
+
+            // 2. Decompile each nested JAR (bundled dependencies)
             for (const entry of nestedEntries) {
                 const buf = zip.readFile(entry);
                 if (!buf) continue;
                 const nestedJarPath = join(tmpDir, entry.entryName.replace(/\//g, "_"));
                 await writeFile(nestedJarPath, buf);
 
-                // Run Vineflower synchronously per nested JAR
                 await new Promise<void>((resolve, reject) => {
                     const proc = spawn(java, [...jvmErrorFlags(), "-jar", vf, nestedJarPath, outputDir], { stdio: "ignore" });
                     proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`Vineflower exited ${code} for ${entry.entryName}`)));

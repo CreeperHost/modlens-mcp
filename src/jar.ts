@@ -29,8 +29,12 @@ export function listClasses(jarPath: string, _depth = 0): string[] {
     for (const entry of entries) {
         if (entry.entryName.endsWith(".class")) {
             classes.push(entry.entryName);
-        } else if (entry.entryName.startsWith("META-INF/jars/") && entry.entryName.endsWith(".jar") && _depth === 0) {
-            // Jar-in-Jar: extract nested JAR to temp and recurse
+        } else if (
+            (entry.entryName.startsWith("META-INF/jars/") || entry.entryName.startsWith("META-INF/jarjar/"))
+            && entry.entryName.endsWith(".jar")
+            && _depth < 2
+        ) {
+            // Jar-in-Jar: Fabric (META-INF/jars/) and NeoForge/Forge (META-INF/jarjar/)
             try {
                 const buf = zip.readFile(entry);
                 if (!buf) continue;
