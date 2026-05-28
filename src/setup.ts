@@ -175,8 +175,8 @@ const existingEnv = readEnv();
 const isReconfigure = existsSync(ENV_PATH);
 
 // ── Section selection ─────────────────────────────────────────────────────────
-type Section = "containers" | "semantic" | "schema" | "pgvector" | "seed" | "backfill" | "graphs" | "mcp";
-const ALL_SECTIONS: Section[] = ["containers", "semantic", "schema", "pgvector", "seed", "backfill", "graphs", "mcp"];
+type Section = "containers" | "semantic" | "schema" | "pgvector" | "seed" | "backfill" | "graphs" | "automation" | "mcp";
+const ALL_SECTIONS: Section[] = ["containers", "semantic", "schema", "pgvector", "seed", "backfill", "graphs", "automation", "mcp"];
 
 // ── Profile types ─────────────────────────────────────────────────────────────
 type ProfileName = "full" | "zero-friction" | "lightweight" | "standard" | "existing" | "custom";
@@ -196,7 +196,7 @@ const PROFILES: Record<ProfileName, Profile> = {
         label: "Full power  — Docker Postgres + optional semantic search",
         hint: "recommended",
         backend: "postgres",
-        sections: ["containers", "semantic", "schema", "pgvector", "seed", "backfill", "graphs", "mcp"],
+        sections: ["containers", "semantic", "schema", "pgvector", "seed", "backfill", "graphs", "automation", "mcp"],
         requiresDocker: true,
     },
     "zero-friction": {
@@ -204,7 +204,7 @@ const PROFILES: Record<ProfileName, Profile> = {
         label: "Zero-friction  — PGlite (embedded Postgres, no Docker required)",
         hint: "great for solo use or CI",
         backend: "pglite",
-        sections: ["schema", "pgvector", "seed", "backfill", "graphs", "mcp"],
+        sections: ["schema", "pgvector", "seed", "backfill", "graphs", "automation", "mcp"],
         requiresDocker: false,
     },
     "lightweight": {
@@ -212,7 +212,7 @@ const PROFILES: Record<ProfileName, Profile> = {
         label: "Lightweight  — SQLite (fully embedded, no Docker, no semantic search)",
         hint: "smallest footprint",
         backend: "sqlite",
-        sections: ["schema", "seed", "mcp"],
+        sections: ["schema", "seed", "automation", "mcp"],
         requiresDocker: false,
     },
     "standard": {
@@ -220,7 +220,7 @@ const PROFILES: Record<ProfileName, Profile> = {
         label: "Standard  — Docker Postgres, no semantic search",
         hint: "good default if Ollama is unavailable",
         backend: "postgres",
-        sections: ["containers", "schema", "pgvector", "seed", "mcp"],
+        sections: ["containers", "schema", "pgvector", "seed", "automation", "mcp"],
         requiresDocker: true,
     },
     "existing": {
@@ -228,7 +228,7 @@ const PROFILES: Record<ProfileName, Profile> = {
         label: "Existing Postgres server  — connect to a running Postgres instance",
         hint: "bring your own database",
         backend: "postgres",
-        sections: ["schema", "pgvector", "seed", "backfill", "graphs", "mcp"],
+        sections: ["schema", "pgvector", "seed", "backfill", "graphs", "automation", "mcp"],
         requiresDocker: false,
     },
     "custom": {
@@ -457,6 +457,7 @@ if (!isReconfigure) {
                 { value: "backfill",   label: "Re-generate embeddings (docs + primers)",
                   hint: hasSemantic ? "" : "requires Ollama" },
                 { value: "graphs",     label: "Graph extraction config (Graphify)" },
+                { value: "automation", label: "Automation preferences (auto-embed, auto-graph, auto-cache)" },
                 { value: "mcp",        label: "Update MCP client config" },
             ],
             initialValues: hasSemantic ? [] : (["semantic", "pgvector", "backfill"] as Section[]),
@@ -920,6 +921,62 @@ if (sections.has("graphs")) {
             p.log.success("Graph extraction config saved");
         }
     }
+}
+
+// ── Automation preferences ────────────────────────────────────────────────────
+if (sections.has("automation")) {
+    const autoEnv: Record<string, string> = {};
+
+    // Current defaults: all "1" (on) unless explicitly set to "0"
+    const currentAutoEmbed = existingEnv.MODLENS_AUTO_EMBED !== "0";
+    const currentAutoGraph = existingEnv.MODLENS_AUTO_GRAPH !== "0";
+    const currentAutoEmbedStartup = existingEnv.MODLENS_AUTO_EMBED !== "0";
+    const currentAutoCacheDiffs = existingEnv.AUTO_CACHE_MOD_DIFFS === "1";
+
+    p.log.message("These settings control what happens automatically after tool actions.\nEach can also be overridden per-call with autoEmbed/autoGraph parameters.");
+
+    const autoChoices = await p.multiselect({
+        message: "Select which auto-behaviors to enable  (space to toggle)",
+        options: [
+            {
+                value: "autoEmbed",
+                label: "Auto-embed on decompile",
+                hint: "Queue semantic embeddings when decompile completes (requires Ollama)",
+            },
+            {
+                value: "autoGraph",
+                label: "Auto-build graph on decompile / source download",
+                hint: "Build knowledge graph when decompile completes or source is downloaded",
+            },
+            {
+                value: "autoEmbedStartup",
+                label: "Auto-embed scan on startup",
+                hint: "Re-queue unfinished embeddings when the server starts",
+            },
+            {
+                value: "autoCacheDiffs",
+                label: "Auto-cache mod diffs",
+                hint: "Cache diff_detailed results to DB automatically",
+            },
+        ],
+        initialValues: [
+            ...(currentAutoEmbed ? ["autoEmbed"] : []),
+            ...(currentAutoGraph ? ["autoGraph"] : []),
+            ...(currentAutoEmbedStartup ? ["autoEmbedStartup"] : []),
+            ...(currentAutoCacheDiffs ? ["autoCacheDiffs"] : []),
+        ] as string[],
+        required: false,
+    });
+    checkCancel(autoChoices);
+
+    const choices = new Set(autoChoices as unknown as string[]);
+    // MODLENS_AUTO_EMBED controls both per-decompile and startup scan
+    autoEnv.MODLENS_AUTO_EMBED = (choices.has("autoEmbed") || choices.has("autoEmbedStartup")) ? "1" : "0";
+    autoEnv.MODLENS_AUTO_GRAPH = choices.has("autoGraph") ? "1" : "0";
+    autoEnv.AUTO_CACHE_MOD_DIFFS = choices.has("autoCacheDiffs") ? "1" : "";
+
+    writeEnv({ ...readEnv(), ...autoEnv });
+    p.log.success("Automation preferences saved");
 }
 
 // ── MCP client config ─────────────────────────────────────────────────────────

@@ -271,7 +271,23 @@ export async function decompileMod(dbId: number): Promise<{ status: string; outD
     };
 }
 
-export async function decompileModStatus(dbId: number): Promise<{ status: string; outDir: string; message: string }> {
+export interface AutoBehaviorOpts {
+    autoEmbed?: boolean;
+    autoGraph?: boolean;
+}
+
+/** Resolve an auto-behavior flag: explicit param > env var > default (true). */
+function resolveAuto(explicit: boolean | undefined, envKey: string): boolean {
+    if (explicit !== undefined) return explicit;
+    const envVal = process.env[envKey];
+    if (envVal === "0" || envVal === "false") return false;
+    return true; // on by default
+}
+
+export async function decompileModStatus(
+    dbId: number,
+    opts?: AutoBehaviorOpts,
+): Promise<{ status: string; outDir: string; message: string }> {
     const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
 
@@ -283,13 +299,17 @@ export async function decompileModStatus(dbId: number): Promise<{ status: string
         if (!mod.decompiled) {
             await updateMod(dbId, { decompiled: true, decompPath: outDir });
             // Fire-and-forget: enqueue for background semantic indexing if Ollama is available
-            isOllamaAvailable().then(available => {
-                if (available) enqueueModEmbed(dbId);
-            }).catch(() => {});
+            if (resolveAuto(opts?.autoEmbed, "MODLENS_AUTO_EMBED")) {
+                isOllamaAvailable().then(available => {
+                    if (available) enqueueModEmbed(dbId);
+                }).catch(() => {});
+            }
             // Fire-and-forget: auto-build knowledge graph if graphify is available
-            ensureGraphify().then(() => {
-                buildModGraph(dbId).catch(() => {});
-            }).catch(() => {});
+            if (resolveAuto(opts?.autoGraph, "MODLENS_AUTO_GRAPH")) {
+                ensureGraphify().then(() => {
+                    buildModGraph(dbId).catch(() => {});
+                }).catch(() => {});
+            }
         }
         return { status: "done", outDir, message: "Decompile complete. Use get_mod_source to browse." };
     }

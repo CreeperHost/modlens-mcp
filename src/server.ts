@@ -156,7 +156,7 @@ function safe<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeof
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: (stub) community graph submission — not yet functional. embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: (stub) community embedding submission — not yet functional.",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: (stub) community graph submission — not yet functional. embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: (stub) community embedding submission — not yet functional. Auto-behaviors: decompile_status auto-queues embedding (MODLENS_AUTO_EMBED) and graph build (MODLENS_AUTO_GRAPH). Pass autoEmbed/autoGraph to override per-call.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
@@ -198,8 +198,10 @@ server.tool(
         targetLoader: z.string().optional().describe("Optional loader hint for registry matching"),
         targetMcVersion: z.string().optional().describe("Optional MC version hint for registry matching"),
         model:        z.string().optional().describe("Embedding model override for embed_download"),
+        autoEmbed:    z.boolean().optional().describe("Override auto-embed on decompile completion (default: env MODLENS_AUTO_EMBED, true)"),
+        autoGraph:    z.boolean().optional().describe("Override auto-graph-build on decompile/source-download (default: env MODLENS_AUTO_GRAPH, true)"),
     },
-    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model }) => {
+    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model, autoEmbed, autoGraph }) => {
         const dbId = await resolveDbIdAsync(rawDbId, modId);
         const resolvedTargetType = targetType ?? "mod";
         const resolvedTargetId = targetId ?? (typeof modId === "string" ? modId : undefined) ?? (resolvedTargetType === "vanilla" ? "minecraft" : undefined);
@@ -216,7 +218,7 @@ server.tool(
             case "version_conflicts":result = await findVersionConflicts(); break;
             case "source_urls":      result = await listModSourceUrls(query); break;
             case "decompile":        result = await decompileMod(dbId!); break;
-            case "decompile_status": result = await decompileModStatus(dbId!); break;
+            case "decompile_status": result = await decompileModStatus(dbId!, { autoEmbed, autoGraph }); break;
             case "decompile_class":  result = await decompileModClass(dbId!, className!); break;
             case "source":           result = await getModSource(dbId!, path); break;
             case "search_source":    result = await searchSource(query!, dbId, isRegex ?? false, limit ?? 50); break;
@@ -364,7 +366,7 @@ server.tool(
 
 server.tool(
     "platform",
-    "Modrinth/CurseForge platform sync and source download. action=sync_modrinth|sync_curseforge|check_updates|batch_sync|download_source.",
+    "Modrinth/CurseForge platform sync and source download. action=sync_modrinth|sync_curseforge|check_updates|batch_sync|download_source. download_source downloads GitHub source without decompilation — auto-queues graph build (override with autoGraph). Env: MODLENS_AUTO_GRAPH (default: 1).",
     {
         action:          z.enum(["sync_modrinth","sync_curseforge","check_updates","batch_sync","download_source"]),
         dbId:            z.number().optional().describe("DB id"),
@@ -373,8 +375,9 @@ server.tool(
         downloadSources: z.boolean().optional(),
         modIdFilter:     z.string().optional(),
         limit:           z.number().optional(),
+        autoGraph:       z.boolean().optional().describe("Override auto-graph-build on source download (default: env MODLENS_AUTO_GRAPH, true)"),
     },
-    safe(async ({ action, dbId: rawDbId, syncModrinth: sm, syncCurseforge: sc, downloadSources, modIdFilter, limit }) => {
+    safe(async ({ action, dbId: rawDbId, syncModrinth: sm, syncCurseforge: sc, downloadSources, modIdFilter, limit, autoGraph }) => {
         const dbId = await resolveDbIdAsync(rawDbId, undefined);
         let result: unknown;
         switch (action) {
@@ -382,7 +385,7 @@ server.tool(
             case "sync_curseforge": result = await syncCurseforge(dbId!); break;
             case "check_updates":   result = await checkUpdates(dbId!); break;
             case "batch_sync":      result = await batchSyncSources({ syncModrinth: sm, syncCurseforge: sc, downloadSources, modIdFilter, limit }); break;
-            case "download_source": { const dir = await downloadSource(dbId!); result = `Source downloaded to: ${dir}`; break; }
+            case "download_source": { const dir = await downloadSource(dbId!, { autoGraph }); result = `Source downloaded to: ${dir}`; break; }
         }
         return out(result);
     })

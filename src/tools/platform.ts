@@ -6,6 +6,15 @@ import { ensureDir } from "../cache.js";
 import { findModById, updateMod, listModsForSync, getModMetadata } from "../repositories/mod.js";
 import { fileSha512, verifyFileHash, HashMismatchError } from "../security.js";
 import { buildModGraph, ensureGraphify } from "./graphify.js";
+import type { AutoBehaviorOpts } from "./ingest.js";
+
+/** Resolve an auto-behavior flag: explicit param > env var > default (true). */
+function resolveAuto(explicit: boolean | undefined, envKey: string): boolean {
+    if (explicit !== undefined) return explicit;
+    const envVal = process.env[envKey];
+    if (envVal === "0" || envVal === "false") return false;
+    return true;
+}
 
 export async function syncModrinth(dbId: number) {
     const mod = await findModById(dbId);
@@ -90,7 +99,7 @@ export async function checkUpdates(dbId: number) {
     return { checked: true, currentVersion: mod.version, ...results };
 }
 
-export async function downloadSource(dbId: number): Promise<string> {
+export async function downloadSource(dbId: number, opts?: AutoBehaviorOpts): Promise<string> {
     const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
 
@@ -151,9 +160,11 @@ export async function downloadSource(dbId: number): Promise<string> {
     await updateMod(dbId, { sourcePath: outDir });
 
     // Fire-and-forget: auto-build knowledge graph from downloaded source
-    ensureGraphify().then(() => {
-        buildModGraph(dbId).catch(() => {});
-    }).catch(() => {});
+    if (resolveAuto(opts?.autoGraph, "MODLENS_AUTO_GRAPH")) {
+        ensureGraphify().then(() => {
+            buildModGraph(dbId).catch(() => {});
+        }).catch(() => {});
+    }
 
     return outDir;
 }
