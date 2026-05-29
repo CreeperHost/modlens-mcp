@@ -199,7 +199,12 @@ async function get<T>(path: string): Promise<T | null> {
     const res = await fetchWithRetry(`${FTBAPI}/${path}`, { headers: HEADERS });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`modpacks.ch API ${res.status} for /${path}`);
-    return res.json() as Promise<T>;
+    const text = await res.text();
+    try {
+        return JSON.parse(text) as T;
+    } catch {
+        throw new Error(`modpacks.ch returned non-JSON for /${path}: ${text.slice(0, 200)}`);
+    }
 }
 
 // ── Mod API ───────────────────────────────────────────────────────────────────

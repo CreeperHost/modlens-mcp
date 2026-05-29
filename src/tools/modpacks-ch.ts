@@ -110,14 +110,14 @@ export async function packInfoAction(packId: number, namespace: PackNamespace = 
         synopsis: pack.synopsis,
         provider: pack.provider,
         installs: pack.installs,
-        tags:     pack.tags.map((t) => t.name),
-        authors:  pack.authors.map((a) => ({ name: a.name, type: a.type })),
-        links:    pack.links.map((l) => ({ type: l.type, url: l.link })),
-        versions: pack.versions.map((v) => ({
+        tags:     (pack.tags ?? []).map((t) => t.name),
+        authors:  (pack.authors ?? []).map((a) => ({ name: a.name, type: a.type })),
+        links:    (pack.links ?? []).map((l) => ({ type: l.type, url: l.link })),
+        versions: (pack.versions ?? []).map((v) => ({
             id:      v.id,
             name:    v.name,
             type:    v.type,
-            targets: v.targets.map((t) => ({ name: t.name, version: t.version })),
+            targets: (v.targets ?? []).map((t) => ({ name: t.name, version: t.version })),
             updated: new Date(v.updated * 1000).toISOString(),
         })),
     };
@@ -144,21 +144,22 @@ export async function packManifestAction(packId: number, versionId: number, name
         cfFile:     f.curseforge?.file    ?? null,
     });
 
+    const manifestFiles = manifest.files ?? [];
     return {
         id:        manifest.id,
         parent:    manifest.parent,
         name:      manifest.name,
         version:   manifest.version,
         type:      manifest.type,
-        targets:   manifest.targets.map((t) => ({ name: t.name, version: t.version })),
-        fileCount: manifest.files.length,
+        targets:   (manifest.targets ?? []).map((t) => ({ name: t.name, version: t.version })),
+        fileCount: manifestFiles.length,
         byType:    Object.fromEntries(
-            [...new Set(manifest.files.map((f) => f.type))].map((t) => [
+            [...new Set(manifestFiles.map((f) => f.type))].map((t) => [
                 t,
-                manifest.files.filter((f) => f.type === t).length,
+                manifestFiles.filter((f) => f.type === t).length,
             ]),
         ),
-        files: manifest.files.map(fileSummary),
+        files: manifestFiles.map(fileSummary),
     };
 }
 
@@ -169,17 +170,18 @@ export async function searchFtbModsAction(term: string, limit = 20) {
     if (!r) return { mods: [], total: 0, enriched: [] };
     // Enrich the first up to 20 IDs into full mod objects so callers get
     // names/synopses without having to call ftb_mod_info for each hit.
-    const take = r.mods.slice(0, Math.min(r.mods.length, 20));
+    const mods = r.mods ?? [];
+    const take = mods.slice(0, Math.min(mods.length, 20));
     const enriched = await getModsBatch(take);
     return {
-        total: r.total,
-        mods:  r.mods,
+        total: r.total ?? 0,
+        mods,
         enriched: enriched.map((m) => ({
             id:       m.id,
             name:     m.name,
             synopsis: m.synopsis,
             installs: m.installs,
-            links:    m.links.map((l) => ({ type: l.type, url: l.link })),
+            links:    (m.links ?? []).map((l) => ({ type: l.type, url: l.link })),
         })),
     };
 }
