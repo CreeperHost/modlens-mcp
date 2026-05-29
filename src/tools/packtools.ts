@@ -11,8 +11,10 @@
  */
 
 import AdmZip from "adm-zip";
+import { readFileSync, readdirSync, statSync, existsSync } from "fs";
+import { join, relative, normalize, isAbsolute } from "path";
 import { resolveModRef, listModsSlim, listMods, findModsByIds } from "../repositories/mod.js";
-import { listEntries } from "../jar.js";
+import { listEntries, extractEntry } from "../jar.js";
 import { indexJar } from "../java-tools.js";
 import { assertJarPath } from "../security.js";
 import { getDb } from "../db.js";
@@ -655,5 +657,153 @@ export async function buildPackGraph(
         },
         nodes,
         edges,
+    };
+}
+
+// ── Config diff analysis ───────────────────────────────────────────────────────
+
+/**
+ * Walk a directory tree recursively and return relative paths of all files.
+ */
+function walkDir(dir: string, base = dir): string[] {
+    const files: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+            files.push(...walkDir(full, base));
+        } else if (entry.isFile()) {
+            files.push(relative(base, full).replace(/\\/g, "/"));
+        }
+    }
+    return files;
+}
+
+/**
+ * Compare a modpack's config directory against default configs bundled in mod JARs.
+ *
+ * For each ingested mod, extracts default config files from the JAR
+ * (`defaultconfigs/` and `config/` prefixes) and compares against the
+ * on-disk pack config directory.
+ *
+ * Returns:
+ *   - modified:  files that exist in both the pack and a JAR default, but content differs
+ *   - custom:    files on disk that don't match any mod's JAR defaults
+ *   - unchanged: files identical to the JAR default
+ *
+ * @param configDir  absolute path to the modpack's config/ directory
+ * @param mcVersion  optional MC version filter
+ * @param loader     optional loader filter
+ */
+export async function diffPackConfigs(
+    configDir: string,
+    mcVersion?: string,
+    loader?: string,
+): Promise<object> {
+    const resolved = normalize(configDir);
+    if (!isAbsolute(resolved)) {
+        return { error: "configDir must be an absolute path" };
+    }
+    if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+        return { error: `Config directory not found or not a directory: ${configDir}` };
+    }
+
+    const mods = await listModsSlim({ mcVersion, loader });
+
+    // Build a map of config filename → { modId, jarPath, jarEntryPath, content }
+    // We strip the "config/" or "defaultconfigs/" prefix from JAR entry paths to match disk layout
+    interface JarDefault { modId: string; display: string; jarEntry: string; content: Buffer }
+    const defaults = new Map<string, JarDefault[]>();
+
+    for (const mod of mods) {
+        try {
+            assertJarPath(mod.jarPath);
+            for (const prefix of ["config/", "defaultconfigs/"]) {
+                const entries = listEntries(mod.jarPath, prefix);
+                for (const entry of entries) {
+                    if (entry.endsWith("/")) continue;
+                    // Normalize to relative config path (strip prefix for matching)
+                    const relPath = entry.startsWith("defaultconfigs/")
+                        ? entry.slice("defaultconfigs/".length)
+                        : entry.slice("config/".length);
+                    const buf = extractEntry(mod.jarPath, entry);
+                    if (!buf) continue;
+                    const list = defaults.get(relPath) ?? [];
+                    list.push({ modId: mod.modId, display: mod.displayName, jarEntry: entry, content: buf });
+                    defaults.set(relPath, list);
+                }
+            }
+        } catch { /* skip unreadable JARs */ }
+    }
+
+    // Walk the on-disk config directory
+    const diskFiles = walkDir(configDir);
+
+    const modified: Array<{ file: string; mod: string; display: string; jarEntry: string; sizeDisk: number; sizeJar: number }> = [];
+    const unchanged: Array<{ file: string; mod: string; display: string }> = [];
+    const custom: string[] = [];
+
+    for (const diskRel of diskFiles) {
+        const jarDefaults = defaults.get(diskRel);
+        if (!jarDefaults || jarDefaults.length === 0) {
+            custom.push(diskRel);
+            continue;
+        }
+
+        let diskContent: Buffer;
+        try {
+            diskContent = readFileSync(join(configDir, diskRel));
+        } catch {
+            custom.push(diskRel);
+            continue;
+        }
+
+        // Compare against each mod that ships this config (typically one)
+        let anyDiff = false;
+        for (const def of jarDefaults) {
+            if (diskContent.equals(def.content)) {
+                unchanged.push({ file: diskRel, mod: def.modId, display: def.display });
+            } else {
+                modified.push({
+                    file: diskRel,
+                    mod: def.modId,
+                    display: def.display,
+                    jarEntry: def.jarEntry,
+                    sizeDisk: diskContent.length,
+                    sizeJar: def.content.length,
+                });
+                anyDiff = true;
+            }
+        }
+        if (!anyDiff && !unchanged.some(u => u.file === diskRel)) {
+            custom.push(diskRel);
+        }
+    }
+
+    // Also report JAR defaults that have no on-disk counterpart (could indicate a missing config)
+    const missing: Array<{ file: string; mod: string; display: string }> = [];
+    for (const [relPath, defs] of defaults) {
+        if (!diskFiles.includes(relPath)) {
+            for (const def of defs) {
+                missing.push({ file: relPath, mod: def.modId, display: def.display });
+            }
+        }
+    }
+
+    return {
+        configDir,
+        modsScanned: mods.length,
+        totalDiskFiles: diskFiles.length,
+        totalJarDefaults: defaults.size,
+        summary: {
+            modified: modified.length,
+            unchanged: unchanged.length,
+            custom: custom.length,
+            missingOnDisk: missing.length,
+        },
+        note: "modified = pack config differs from JAR default. custom = on disk but no JAR default found. missing = JAR ships a default but no on-disk file exists.",
+        modified,
+        unchanged,
+        custom,
+        missing,
     };
 }

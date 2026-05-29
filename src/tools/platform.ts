@@ -1,5 +1,5 @@
-import { lookupBySha512, getProject as getMrProject, getLatestVersion as getMrLatest } from "../modrinth.js";
-import { lookupByFingerprint, getLatestFile as getCfLatest } from "../curseforge.js";
+import { lookupBySha512, getProject as getMrProject, getLatestVersion as getMrLatest, searchProjects as searchModrinth } from "../modrinth.js";
+import { lookupByFingerprint, getLatestFile as getCfLatest, searchMods as searchCurseforge } from "../curseforge.js";
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { ensureDir } from "../cache.js";
@@ -310,5 +310,104 @@ export async function batchSyncSources(opts: {
         curseforge: doCF ? { matched: cfMatched, skipped: cfSkipped, failed: cfFailed } : "skipped",
         github:     doGH ? { downloaded: ghDownloaded, failed: ghFailed } : "skipped",
         results,
+    };
+}
+
+// ── Unified platform search ────────────────────────────────────────────────────
+
+interface UnifiedSearchHit {
+    name: string;
+    slug: string;
+    description: string;
+    platform: "modrinth" | "curseforge";
+    projectId: string | number;
+    downloads: number;
+    categories?: string[];
+    mcVersions?: string[];
+    url: string;
+}
+
+/**
+ * Search both Modrinth and CurseForge for mods by name, returning a unified
+ * deduplicated result set ordered by download count.
+ */
+export async function searchPlatforms(
+    query: string,
+    opts: { loader?: string; mcVersion?: string; limit?: number } = {},
+): Promise<object> {
+    const limit = opts.limit ?? 20;
+
+    // Search both platforms in parallel
+    const [mrResults, cfResults] = await Promise.all([
+        searchModrinth(query, { loader: opts.loader, mcVersion: opts.mcVersion, limit }).catch(() => null),
+        searchCurseforge(query, { loader: opts.loader, mcVersion: opts.mcVersion, limit }).catch(() => null),
+    ]);
+
+    const hits: UnifiedSearchHit[] = [];
+
+    // Normalize Modrinth results
+    if (mrResults?.hits) {
+        for (const h of mrResults.hits) {
+            hits.push({
+                name: h.title,
+                slug: h.slug,
+                description: (h.description ?? "").slice(0, 200),
+                platform: "modrinth",
+                projectId: h.project_id,
+                downloads: h.downloads ?? 0,
+                categories: h.categories,
+                mcVersions: h.versions,
+                url: `https://modrinth.com/mod/${h.slug}`,
+            });
+        }
+    }
+
+    // Normalize CurseForge results
+    if (cfResults) {
+        for (const h of cfResults) {
+            hits.push({
+                name: h.name,
+                slug: h.slug,
+                description: (h.summary ?? "").slice(0, 200),
+                platform: "curseforge",
+                projectId: h.id,
+                downloads: h.downloadCount ?? 0,
+                url: `https://www.curseforge.com/minecraft/mc-mods/${h.slug}`,
+            });
+        }
+    }
+
+    // Deduplicate: if same slug appears on both platforms, merge into one entry
+    const seen = new Map<string, UnifiedSearchHit>();
+    const deduped: UnifiedSearchHit[] = [];
+
+    for (const hit of hits) {
+        const key = hit.slug.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const existing = seen.get(key);
+        if (existing) {
+            // Keep the one with more downloads, note both platforms
+            if (hit.downloads > existing.downloads) {
+                const idx = deduped.indexOf(existing);
+                if (idx >= 0) deduped[idx] = { ...hit, description: hit.description || existing.description };
+                seen.set(key, hit);
+            }
+            continue;
+        }
+        seen.set(key, hit);
+        deduped.push(hit);
+    }
+
+    // Sort by downloads descending
+    deduped.sort((a, b) => b.downloads - a.downloads);
+
+    return {
+        query,
+        loader: opts.loader ?? "(any)",
+        mcVersion: opts.mcVersion ?? "(any)",
+        totalResults: deduped.length,
+        modrinthResults: mrResults?.hits?.length ?? 0,
+        curseforgeResults: cfResults?.length ?? 0,
+        note: "Results merged from Modrinth and CurseForge, deduplicated by slug, sorted by downloads. CurseForge requires CURSEFORGE_API_KEY env var.",
+        results: deduped.slice(0, limit),
     };
 }
