@@ -524,7 +524,7 @@ export async function buildPackGraph(
 
         const deps = (mod.dependencies ?? []) as Array<{ id: string; version?: string; required?: boolean }>;
         for (const dep of deps) {
-            if (PSEUDO_DEPS.has(dep.id)) continue;
+            if (!dep.id || PSEUDO_DEPS.has(dep.id)) continue;
             const targetId = `mod:${dep.id}`;
             addNode({ id: targetId, type: "mod", label: dep.id });
             edges.push({

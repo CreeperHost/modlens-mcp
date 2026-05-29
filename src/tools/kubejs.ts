@@ -182,6 +182,7 @@ export async function searchKubeJsScripts(
 
 // ── Embedding cache (survives across MCP tool calls in the same server session) ──
 
+const EMBED_CACHE_MAX = 500;
 const embedCache = new Map<string, number[]>();
 
 function contentHash(text: string): string {
@@ -193,7 +194,14 @@ async function cachedEmbed(text: string): Promise<number[] | null> {
     const cached = embedCache.get(hash);
     if (cached) return cached;
     const vec = await embed(text);
-    if (vec) embedCache.set(hash, vec);
+    if (vec) {
+        if (embedCache.size >= EMBED_CACHE_MAX) {
+            // Evict oldest entry (first inserted)
+            const oldest = embedCache.keys().next().value;
+            if (oldest !== undefined) embedCache.delete(oldest);
+        }
+        embedCache.set(hash, vec);
+    }
     return vec;
 }
 
