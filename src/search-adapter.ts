@@ -10,6 +10,11 @@
 import { detectBackend } from "./db-backend.js";
 import { getDb } from "./db.js";
 
+/** Escape LIKE metacharacters so user input is matched literally. */
+function escapeLike(s: string): string {
+    return s.replace(/[%_\\]/g, c => "\\" + c);
+}
+
 export interface FtsSourceResult {
     className: string;
     snippet: string;
@@ -178,7 +183,7 @@ export async function ftsSearchDocs(
 
     // Postgres / PGlite — raw LIKE (case-insensitive via lower())
     const db = await getDb();
-    const kw = query.toLowerCase();
+    const kw = escapeLike(query.toLowerCase());
     type Row = {
         id: number; class_name: string | null; title: string; summary: string | null;
         url: string; category: string; namespace: string; tags: string[];
