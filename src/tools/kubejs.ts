@@ -9,6 +9,7 @@
 
 import { readFileSync, readdirSync } from "fs";
 import { join, extname } from "path";
+import { embed, isOllamaAvailable } from "../embeddings.js";
 
 // ── Event pattern registry ────────────────────────────────────────────────────
 
@@ -175,5 +176,83 @@ export async function searchKubeJsScripts(
         totalMatches: results.length,
         capped:       results.length >= limit,
         results,
+    };
+}
+
+// ── Cosine similarity helper ──────────────────────────────────────────────────
+
+function cosine(a: number[], b: number[]): number {
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        na  += a[i] * a[i];
+        nb  += b[i] * b[i];
+    }
+    const denom = Math.sqrt(na) * Math.sqrt(nb);
+    return denom === 0 ? 0 : dot / denom;
+}
+
+/**
+ * Semantic search over KubeJS scripts using Ollama embeddings.
+ *
+ * Reads all scripts from disk, embeds each file's content and the query,
+ * then ranks by cosine similarity. Requires Ollama running.
+ *
+ * scriptsDir: absolute path to the kubejs/ folder
+ * query: natural language question
+ * limit: max results (default 10)
+ */
+export async function semanticSearchKubeJsScripts(
+    scriptsDir: string,
+    query: string,
+    limit = 10,
+): Promise<object> {
+    if (!await isOllamaAvailable()) {
+        return { error: "Ollama is not available. Start Ollama to use semantic search." };
+    }
+
+    const files = walkDir(scriptsDir);
+    if (files.length === 0) {
+        return { error: `No .js/.ts files found under: ${scriptsDir}` };
+    }
+
+    // Embed the query
+    const queryVec = await embed(query);
+    if (!queryVec) {
+        return { error: "Failed to generate embedding for query." };
+    }
+
+    // Read and embed each script (first 4000 chars to stay within embedding limits)
+    const scored: Array<{ file: string; score: number; preview: string; lineCount: number; categories: string[] }> = [];
+
+    for (const file of files) {
+        try {
+            const content = readFileSync(file, "utf8");
+            const rel = file.replace(scriptsDir, "").replace(/\\/g, "/").replace(/^\//, "");
+            const snippet = content.slice(0, 4000);
+            const vec = await embed(snippet);
+            if (!vec) continue;
+
+            const score = cosine(queryVec, vec);
+            const analysis = analyzeScript(rel, content);
+            scored.push({
+                file: rel,
+                score: Math.round(score * 10000) / 10000,
+                preview: content.split("\n").slice(0, 5).join("\n").trim().slice(0, 300),
+                lineCount: analysis.lineCount,
+                categories: analysis.categories,
+            });
+        } catch { /* skip unreadable */ }
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, limit);
+
+    return {
+        scriptsDir,
+        query,
+        model: "nomic-embed-text",
+        totalFiles: files.length,
+        results: top,
     };
 }

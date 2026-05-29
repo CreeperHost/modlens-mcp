@@ -7,6 +7,7 @@
  *   - Mod sidedness classification (client-only / server-only / common / client-optional)
  *   - Mod complexity scoring for performance/compat triage
  *   - Pack-level changelog between two sets of mods
+ *   - Pack knowledge graph — composite graph of all mods, deps, tags, mixins, and optionally KubeJS scripts
  */
 
 import AdmZip from "adm-zip";
@@ -14,6 +15,8 @@ import { resolveModRef, listModsSlim, listMods, findModsByIds } from "../reposit
 import { listEntries } from "../jar.js";
 import { indexJar } from "../java-tools.js";
 import { assertJarPath } from "../security.js";
+import { getDb } from "../db.js";
+import { indexKubeJsScripts } from "./kubejs.js";
 
 // ── Asset conflict detection ───────────────────────────────────────────────────
 
@@ -448,5 +451,209 @@ export async function findDataConflicts(
         vanillaOverrideConflicts,
         note: capped ? `Results capped at ${limit}. Use dataType or loader/mcVersion to narrow.` : "",
         conflicts: limited,
+    };
+}
+
+// ── Pack knowledge graph ───────────────────────────────────────────────────────
+
+interface GraphNode {
+    id: string;
+    type: "mod" | "mc_class" | "tag" | "script" | "script_category";
+    label: string;
+    meta?: Record<string, unknown>;
+}
+
+interface GraphEdge {
+    source: string;
+    target: string;
+    type: "depends_on" | "mixes_into" | "contributes_tag" | "tag_conflict" | "script_modifies" | "has_category";
+    meta?: Record<string, unknown>;
+}
+
+/**
+ * Build a composite knowledge graph of the entire modpack.
+ *
+ * Nodes: mods, mixin target classes, tags, KubeJS scripts, script categories
+ * Edges: depends_on, mixes_into, contributes_tag, tag_conflict, script_modifies, has_category
+ *
+ * @param mcVersion  optional MC version filter
+ * @param loader     optional loader filter
+ * @param scriptsDir optional path to kubejs/ directory to include script analysis
+ */
+export async function buildPackGraph(
+    mcVersion?: string,
+    loader?: string,
+    scriptsDir?: string,
+): Promise<object> {
+    const db = await getDb();
+
+    // 1. Fetch all mods with deps and mixin data
+    const mods = await db.mod.findMany({
+        where: {
+            ...(mcVersion ? { mcVersion: { contains: mcVersion } } : {}),
+            ...(loader ? { loader } : {}),
+        },
+        select: {
+            id: true, modId: true, displayName: true, version: true,
+            loader: true, mcVersion: true, hasMixins: true,
+            dependencies: true, mixinTargets: true,
+        },
+    });
+
+    const nodes: GraphNode[] = [];
+    const edges: GraphEdge[] = [];
+    const nodeIds = new Set<string>();
+
+    const addNode = (n: GraphNode) => {
+        if (nodeIds.has(n.id)) return;
+        nodeIds.add(n.id);
+        nodes.push(n);
+    };
+
+    // Loader pseudo-deps to skip
+    const PSEUDO_DEPS = new Set(["minecraft", "neoforge", "forge", "fabricloader", "fabric-api", "java", "quilt_loader"]);
+
+    // 2. Mod nodes + dependency edges
+    for (const mod of mods) {
+        addNode({
+            id: `mod:${mod.modId}`,
+            type: "mod",
+            label: mod.displayName,
+            meta: { version: mod.version, loader: mod.loader, mcVersion: mod.mcVersion },
+        });
+
+        const deps = (mod.dependencies ?? []) as Array<{ id: string; version?: string; required?: boolean }>;
+        for (const dep of deps) {
+            if (PSEUDO_DEPS.has(dep.id)) continue;
+            const targetId = `mod:${dep.id}`;
+            addNode({ id: targetId, type: "mod", label: dep.id });
+            edges.push({
+                source: `mod:${mod.modId}`,
+                target: targetId,
+                type: "depends_on",
+                meta: { required: dep.required ?? true, versionRange: dep.version },
+            });
+        }
+
+        // 3. Mixin target edges
+        const targets = (mod.mixinTargets ?? []) as string[];
+        for (const cls of targets) {
+            const classId = `class:${cls}`;
+            addNode({ id: classId, type: "mc_class", label: cls.split("/").pop() ?? cls, meta: { fqn: cls } });
+            edges.push({ source: `mod:${mod.modId}`, target: classId, type: "mixes_into" });
+        }
+    }
+
+    // 4. Tag contribution edges
+    const tags = await db.modTag.findMany({
+        where: {
+            mod: {
+                ...(mcVersion ? { mcVersion: { contains: mcVersion } } : {}),
+                ...(loader ? { loader } : {}),
+            },
+        },
+        select: { modId: true, tagPath: true, registry: true, replace: true, mod: { select: { modId: true } } },
+    });
+
+    const tagContributors = new Map<string, Array<{ modId: string; replace: boolean }>>();
+    for (const t of tags) {
+        const tagId = `tag:${t.registry}/${t.tagPath}`;
+        addNode({ id: tagId, type: "tag", label: `#${t.tagPath}`, meta: { registry: t.registry } });
+        edges.push({
+            source: `mod:${t.mod.modId}`,
+            target: tagId,
+            type: "contributes_tag",
+            meta: { replace: t.replace },
+        });
+        const list = tagContributors.get(tagId) ?? [];
+        list.push({ modId: t.mod.modId, replace: t.replace });
+        tagContributors.set(tagId, list);
+    }
+
+    // 5. Tag conflict edges (multiple mods with replace:true on same tag)
+    for (const [tagId, contributors] of tagContributors) {
+        const replacers = contributors.filter(c => c.replace);
+        if (replacers.length >= 2) {
+            for (let i = 0; i < replacers.length; i++) {
+                for (let j = i + 1; j < replacers.length; j++) {
+                    edges.push({
+                        source: `mod:${replacers[i].modId}`,
+                        target: `mod:${replacers[j].modId}`,
+                        type: "tag_conflict",
+                        meta: { tag: tagId },
+                    });
+                }
+            }
+        }
+    }
+
+    // 6. KubeJS scripts (optional)
+    let kubeJsStats: { fileCount: number; categories: Record<string, number> } | undefined;
+    if (scriptsDir) {
+        try {
+            const kjResult = await indexKubeJsScripts(scriptsDir) as {
+                fileCount: number;
+                categorySummary: Record<string, number>;
+                scripts: Array<{ path: string; lineCount: number; categories: string[] }>;
+            };
+            kubeJsStats = { fileCount: kjResult.fileCount, categories: kjResult.categorySummary };
+
+            for (const cat of Object.keys(kjResult.categorySummary)) {
+                addNode({ id: `kjs_cat:${cat}`, type: "script_category", label: cat });
+            }
+
+            for (const script of kjResult.scripts) {
+                const scriptId = `script:${script.path}`;
+                addNode({
+                    id: scriptId,
+                    type: "script",
+                    label: script.path.split("/").pop() ?? script.path,
+                    meta: { path: script.path, lineCount: script.lineCount },
+                });
+                for (const cat of script.categories) {
+                    edges.push({ source: scriptId, target: `kjs_cat:${cat}`, type: "has_category" });
+                    if (cat.startsWith("recipe_") || cat === "tag_modify" || cat === "loot_modify") {
+                        edges.push({ source: scriptId, target: `kjs_cat:${cat}`, type: "script_modifies" });
+                    }
+                }
+            }
+        } catch { /* scriptsDir unreadable — skip */ }
+    }
+
+    // 7. Summary stats
+    const byNodeType: Record<string, number> = {};
+    for (const n of nodes) byNodeType[n.type] = (byNodeType[n.type] ?? 0) + 1;
+    const byEdgeType: Record<string, number> = {};
+    for (const e of edges) byEdgeType[e.type] = (byEdgeType[e.type] ?? 0) + 1;
+
+    const edgeCounts = new Map<string, number>();
+    for (const e of edges) {
+        edgeCounts.set(e.source, (edgeCounts.get(e.source) ?? 0) + 1);
+        edgeCounts.set(e.target, (edgeCounts.get(e.target) ?? 0) + 1);
+    }
+    const hubs = [...edgeCounts.entries()]
+        .filter(([id]) => id.startsWith("mod:"))
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([id, count]) => ({ id, connections: count }));
+
+    const mixinHotspots = [...edgeCounts.entries()]
+        .filter(([id]) => id.startsWith("class:"))
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([id, count]) => ({ id, modCount: count }));
+
+    return {
+        summary: {
+            totalNodes: nodes.length,
+            totalEdges: edges.length,
+            byNodeType,
+            byEdgeType,
+            hubs,
+            mixinHotspots,
+            ...(kubeJsStats ? { kubeJs: kubeJsStats } : {}),
+        },
+        nodes,
+        edges,
     };
 }

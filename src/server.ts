@@ -74,8 +74,8 @@ import {
     getModGradleFiles, searchGradleFiles, compareGradleDeps,
 } from "./tools/gradle.js";
 import { generateReport } from "./tools/reports.js";
-import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog, findDataConflicts } from "./tools/packtools.js";
-import { indexKubeJsScripts, searchKubeJsScripts } from "./tools/kubejs.js";
+import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog, findDataConflicts, buildPackGraph } from "./tools/packtools.js";
+import { indexKubeJsScripts, searchKubeJsScripts, semanticSearchKubeJsScripts } from "./tools/kubejs.js";
 import { searchPacksAction, featuredPacksAction, packInfoAction, packManifestAction, syncPackModsAction, searchFtbModsAction, ftbModInfoAction, downloadModAction, downloadOverridesAction, listPackVersionsAction, listPackFilesAction, findModInPacksAction } from "./tools/modpacks-ch.js";
 import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
 import { checkModCompat } from "./tools/compat-check.js";
@@ -1029,21 +1029,23 @@ server.tool(
     "action=pack_sidedness: classify ALL mods in the DB by sidedness in one pass (mcVersion, loader). " +
     "action=complexity: compute class/mixin/AT/AW complexity score per mod \u2014 ranked list for perf/crash triage (mcVersion, loader). " +
     "action=pack_changelog: diff two pack snapshots by DB id lists \u2014 added/removed/updated mods (oldIds, newIds). " +
-    "action=data_conflicts: find data/ paths (recipes, loot_tables, advancements, etc.) shipped by 2+ mods \u2014 last-loaded mod silently wins (dataType, mcVersion, loader, limit).",
+    "action=data_conflicts: find data/ paths (recipes, loot_tables, advancements, etc.) shipped by 2+ mods \u2014 last-loaded mod silently wins (dataType, mcVersion, loader, limit). " +
+    "action=pack_graph: build a composite knowledge graph of the entire modpack \u2014 nodes (mods, tags, MC classes, KubeJS scripts) and edges (depends_on, mixes_into, contributes_tag, tag_conflict, script_modifies). Includes hub detection and mixin hotspots (mcVersion, loader, scriptsDir).",
     {
-        action:      z.enum(["asset_conflicts","vanilla_overrides","sidedness","pack_sidedness","complexity","pack_changelog","data_conflicts"]),
+        action:      z.enum(["asset_conflicts","vanilla_overrides","sidedness","pack_sidedness","complexity","pack_changelog","data_conflicts","pack_graph"]),
         modId:       z.union([z.string(), z.number()]).optional(),
         assetType:   z.enum(["textures","models","sounds","blockstates","shaders","all"]).optional().describe("Asset sub-folder filter (asset_conflicts)"),
         dataType:    z.enum(["recipe","loot_tables","advancements","tags","structures","all"]).optional().describe("Data sub-folder filter (data_conflicts)"),
         overrideType:z.enum(["data","assets","all"]).optional().describe("Override type filter (vanilla_overrides)"),
         dataSubtype: z.string().optional().describe("Data subfolder, e.g. 'recipes', 'loot_tables', 'advancements' (vanilla_overrides)"),
+        scriptsDir:  z.string().optional().describe("Absolute path to kubejs/ folder for pack_graph KubeJS integration"),
         mcVersion:   z.string().optional(),
         loader:      z.string().optional(),
         oldIds:      z.array(z.number()).optional(),
         newIds:      z.array(z.number()).optional(),
         limit:       z.number().optional(),
     },
-    safe(async ({ action, modId, assetType, dataType, overrideType, dataSubtype, mcVersion, loader, oldIds, newIds, limit }) => {
+    safe(async ({ action, modId, assetType, dataType, overrideType, dataSubtype, scriptsDir, mcVersion, loader, oldIds, newIds, limit }) => {
         let result: unknown;
         switch (action) {
             case "asset_conflicts":   result = await findAssetConflicts(assetType, mcVersion, loader, limit); break;
@@ -1053,6 +1055,7 @@ server.tool(
             case "complexity":        result = await computeModComplexity(mcVersion, loader); break;
             case "pack_changelog":    result = await computePackChangelog(oldIds!, newIds!); break;
             case "data_conflicts":    result = await findDataConflicts(dataType, mcVersion, loader, limit); break;
+            case "pack_graph":        result = await buildPackGraph(mcVersion, loader, scriptsDir); break;
         }
         return out(result);
     })
@@ -1062,9 +1065,9 @@ server.tool(
 
 server.tool(
     "kubejs",
-    "KubeJS script analysis — index a kubejs/ directory or text-search scripts. action=index|search.",
+    "KubeJS script analysis \u2014 index a kubejs/ directory or text-search scripts. action=index|search|semantic_search. semantic_search requires Ollama running.",
     {
-        action:     z.enum(["index","search"]),
+        action:     z.enum(["index","search","semantic_search"]),
         scriptsDir: z.string().describe("Absolute path to the kubejs/ folder or a subfolder like kubejs/server_scripts/"),
         query:      z.string().optional(),
         limit:      z.number().optional(),
@@ -1072,8 +1075,9 @@ server.tool(
     safe(async ({ action, scriptsDir, query, limit }) => {
         let result: unknown;
         switch (action) {
-            case "index":  result = await indexKubeJsScripts(scriptsDir); break;
-            case "search": result = await searchKubeJsScripts(scriptsDir, query!, limit); break;
+            case "index":           result = await indexKubeJsScripts(scriptsDir); break;
+            case "search":          result = await searchKubeJsScripts(scriptsDir, query!, limit); break;
+            case "semantic_search": result = await semanticSearchKubeJsScripts(scriptsDir, query!, limit); break;
         }
         return out(result);
     })
