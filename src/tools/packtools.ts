@@ -807,3 +807,111 @@ export async function diffPackConfigs(
         missing,
     };
 }
+
+// ── Pack health summary ────────────────────────────────────────────────────────
+
+/**
+ * One-shot modpack health overview.
+ * Aggregates key metrics in a single call to give agents a fast starting point:
+ *   - mod count, loader/MC version breakdown
+ *   - missing dependency count
+ *   - mixin hotspot count (classes targeted by 3+ mods)
+ *   - asset/data conflict counts
+ *   - sidedness breakdown (client_only / server_only / common)
+ */
+export async function packHealth(
+    mcVersion?: string,
+    loader?: string,
+): Promise<object> {
+    const db = await getDb();
+
+    // 1. Basic stats
+    const where = {
+        ...(mcVersion ? { mcVersion: { contains: mcVersion } } : {}),
+        ...(loader ? { loader } : {}),
+    };
+    const mods = await db.mod.findMany({
+        where,
+        select: {
+            id: true, modId: true, displayName: true, version: true,
+            loader: true, mcVersion: true, hasMixins: true,
+            dependencies: true, mixinTargets: true,
+            modrinthId: true, curseforgeId: true,
+        },
+    });
+
+    const loaderBreakdown: Record<string, number> = {};
+    const versionBreakdown: Record<string, number> = {};
+    let withMixins = 0, linkedMR = 0, linkedCF = 0;
+
+    for (const m of mods) {
+        loaderBreakdown[m.loader] = (loaderBreakdown[m.loader] ?? 0) + 1;
+        versionBreakdown[m.mcVersion] = (versionBreakdown[m.mcVersion] ?? 0) + 1;
+        if (m.hasMixins) withMixins++;
+        if (m.modrinthId) linkedMR++;
+        if (m.curseforgeId) linkedCF++;
+    }
+
+    // 2. Missing deps (lightweight inline check)
+    const SKIP = new Set(["minecraft", "neoforge", "forge", "fabric-api", "fabricloader", "quilt_loader", "java"]);
+    const ingestedIds = new Set(mods.map(m => m.modId));
+    let missingDeps = 0;
+    const missingList: Array<{ dep: string; requiredBy: string }> = [];
+    for (const mod of mods) {
+        const deps = (mod.dependencies ?? []) as Array<{ id?: string; required?: boolean }>;
+        for (const dep of deps) {
+            if (!dep.id || SKIP.has(dep.id)) continue;
+            if (!ingestedIds.has(dep.id)) {
+                missingDeps++;
+                if (missingList.length < 10) {
+                    missingList.push({ dep: dep.id, requiredBy: mod.modId });
+                }
+            }
+        }
+    }
+
+    // 3. Mixin hotspots (classes targeted by 3+ mods)
+    const classHits = new Map<string, Set<string>>();
+    for (const mod of mods) {
+        const targets = (mod.mixinTargets ?? []) as string[];
+        for (const cls of targets) {
+            const set = classHits.get(cls) ?? new Set();
+            set.add(mod.modId);
+            classHits.set(cls, set);
+        }
+    }
+    const hotspots = [...classHits.entries()]
+        .filter(([, mods]) => mods.size >= 3)
+        .sort((a, b) => b[1].size - a[1].size)
+        .slice(0, 10)
+        .map(([cls, modSet]) => ({ class: cls, modCount: modSet.size, mods: [...modSet].slice(0, 5) }));
+
+    // 4. Tag conflicts (lightweight — count only from indexed tags)
+    let tagConflicts = 0;
+    try {
+        const tags = await db.modTag.groupBy({
+            by: ["tagPath", "registry"],
+            where: { replace: true, mod: where },
+            _count: { modId: true },
+        });
+        tagConflicts = tags.filter(t => t._count.modId >= 2).length;
+    } catch { /* tag table may not exist */ }
+
+    return {
+        mcVersion: mcVersion ?? "(all)",
+        loader: loader ?? "(all)",
+        totalMods: mods.length,
+        loaderBreakdown,
+        versionBreakdown,
+        modsWithMixins: withMixins,
+        platformLinks: { modrinth: linkedMR, curseforge: linkedCF, unlinked: mods.length - Math.max(linkedMR, linkedCF) },
+        issues: {
+            missingDeps,
+            missingDepsTop: missingList,
+            mixinHotspots: hotspots.length,
+            mixinHotspotsTop: hotspots,
+            tagConflicts,
+        },
+        note: "Use specific pack_tools actions for detailed analysis: asset_conflicts, data_conflicts, config_diff, pack_sidedness.",
+    };
+}

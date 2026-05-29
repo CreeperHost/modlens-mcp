@@ -28,7 +28,7 @@ import {
     findOptionalIntegrations, findNetworkPayloads, extractConfigSchema,
 } from "./tools/bytecode.js";
 import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolveMixinTargets, getMixinsTargetingPackage, findAtAwConflicts } from "./tools/mixin-scan.js";
-import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources, searchPlatforms } from "./tools/platform.js";
+import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources, searchPlatforms, batchCheckUpdates } from "./tools/platform.js";
 import { listMcVersions, listNeoForgeVersions, listFabricApiVersions, listForgeVersions, downloadNeoForge, downloadFabricApi, downloadForge } from "./platform.js";
 import {
     searchMinecraftClass, getMinecraftSource, getMcClassBytecode, getMcClassMembers,
@@ -74,7 +74,7 @@ import {
     getModGradleFiles, searchGradleFiles, compareGradleDeps,
 } from "./tools/gradle.js";
 import { generateReport } from "./tools/reports.js";
-import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog, findDataConflicts, buildPackGraph, diffPackConfigs } from "./tools/packtools.js";
+import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog, findDataConflicts, buildPackGraph, diffPackConfigs, packHealth } from "./tools/packtools.js";
 import { indexKubeJsScripts, searchKubeJsScripts, semanticSearchKubeJsScripts } from "./tools/kubejs.js";
 import { searchPacksAction, featuredPacksAction, packInfoAction, packManifestAction, syncPackModsAction, searchFtbModsAction, ftbModInfoAction, downloadModAction, downloadOverridesAction, listPackVersionsAction, listPackFilesAction, findModInPacksAction } from "./tools/modpacks-ch.js";
 import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
@@ -371,11 +371,12 @@ server.tool(
 
 server.tool(
     "platform",
-    "Modrinth/CurseForge platform sync and source download. action=sync_modrinth|sync_curseforge|check_updates|batch_sync|download_source|search. " +
+    "Modrinth/CurseForge platform sync and source download. action=sync_modrinth|sync_curseforge|check_updates|batch_sync|download_source|search|batch_check_updates. " +
     "action=search: unified mod search across both Modrinth and CurseForge — deduplicated, sorted by downloads (query required, loader, mcVersion, limit). " +
+    "action=batch_check_updates: check ALL linked mods for newer versions on Modrinth/CurseForge in one pass (mcVersion, loader, modIdFilter, limit). " +
     "download_source downloads GitHub source without decompilation — auto-queues graph build (override with autoGraph). Env: MODLENS_AUTO_GRAPH (default: 1).",
     {
-        action:          z.enum(["sync_modrinth","sync_curseforge","check_updates","batch_sync","download_source","search"]),
+        action:          z.enum(["sync_modrinth","sync_curseforge","check_updates","batch_sync","download_source","search","batch_check_updates"]),
         dbId:            z.number().optional().describe("DB id"),
         query:           z.string().optional().describe("Search query (required for action=search)"),
         syncModrinth:    z.boolean().optional(),
@@ -397,6 +398,7 @@ server.tool(
             case "batch_sync":      result = await batchSyncSources({ syncModrinth: sm, syncCurseforge: sc, downloadSources, modIdFilter, limit }); break;
             case "download_source": { const dir = await downloadSource(dbId!, { autoGraph }); result = `Source downloaded to: ${dir}`; break; }
             case "search":          result = await searchPlatforms(query!, { loader, mcVersion, limit }); break;
+            case "batch_check_updates": result = await batchCheckUpdates({ mcVersion, loader, modIdFilter, limit }); break;
         }
         return out(result);
     })
@@ -1037,9 +1039,10 @@ server.tool(
     "action=pack_changelog: diff two pack snapshots by DB id lists \u2014 added/removed/updated mods (oldIds, newIds). " +
     "action=data_conflicts: find data/ paths (recipes, loot_tables, advancements, etc.) shipped by 2+ mods \u2014 last-loaded mod silently wins (dataType, mcVersion, loader, limit). " +
     "action=pack_graph: build a composite knowledge graph of the entire modpack \u2014 nodes (mods, tags, MC classes, KubeJS scripts) and edges (depends_on, mixes_into, contributes_tag, tag_conflict, script_modifies). Includes hub detection and mixin hotspots (mcVersion, loader, scriptsDir). " +
-    "action=config_diff: compare a modpack's on-disk config/ directory against default configs bundled in mod JARs \u2014 identifies modified, unchanged, custom, and missing configs (configDir required, mcVersion, loader).",
+    "action=config_diff: compare a modpack's on-disk config/ directory against default configs bundled in mod JARs \u2014 identifies modified, unchanged, custom, and missing configs (configDir required, mcVersion, loader). " +
+    "action=health: one-shot modpack health overview \u2014 mod count, loader breakdown, missing deps, mixin hotspots, tag conflicts, platform link stats (mcVersion, loader).",
     {
-        action:      z.enum(["asset_conflicts","vanilla_overrides","sidedness","pack_sidedness","complexity","pack_changelog","data_conflicts","pack_graph","config_diff"]),
+        action:      z.enum(["asset_conflicts","vanilla_overrides","sidedness","pack_sidedness","complexity","pack_changelog","data_conflicts","pack_graph","config_diff","health"]),
         modId:       z.union([z.string(), z.number()]).optional(),
         assetType:   z.enum(["textures","models","sounds","blockstates","shaders","all"]).optional().describe("Asset sub-folder filter (asset_conflicts)"),
         dataType:    z.enum(["recipe","loot_tables","advancements","tags","structures","all"]).optional().describe("Data sub-folder filter (data_conflicts)"),
@@ -1065,6 +1068,7 @@ server.tool(
             case "data_conflicts":    result = await findDataConflicts(dataType, mcVersion, loader, limit); break;
             case "pack_graph":        result = await buildPackGraph(mcVersion, loader, scriptsDir); break;
             case "config_diff":       result = await diffPackConfigs(configDir!, mcVersion, loader); break;
+            case "health":            result = await packHealth(mcVersion, loader); break;
         }
         return out(result);
     })

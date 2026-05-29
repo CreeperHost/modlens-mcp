@@ -313,6 +313,92 @@ export async function batchSyncSources(opts: {
     };
 }
 
+// ── Batch update check ─────────────────────────────────────────────────────────
+
+/**
+ * Check all linked mods for newer versions on Modrinth and CurseForge.
+ * Returns a list of mods that have updates available.
+ */
+export async function batchCheckUpdates(opts: {
+    mcVersion?: string;
+    loader?: string;
+    modIdFilter?: string;
+    limit?: number;
+} = {}): Promise<object> {
+    const mods = await listModsForSync({ modIdFilter: opts.modIdFilter, limit: opts.limit ?? 500 });
+
+    const updates: Array<{
+        modId: string; version: string; dbId: number;
+        modrinth?: { latestVersion: string; isNewer: boolean; url?: string };
+        curseforge?: { latestFile: string; url?: string };
+    }> = [];
+    let checked = 0, skipped = 0, failed = 0;
+
+    const BATCH = 5; // throttle to avoid hammering APIs
+    for (let i = 0; i < mods.length; i += BATCH) {
+        const batch = mods.slice(i, i + BATCH);
+        const results = await Promise.all(batch.map(async (mod) => {
+            const row: (typeof updates)[0] = { modId: mod.modId, version: mod.version, dbId: mod.id };
+
+            if (!mod.modrinthId && !mod.curseforgeId) {
+                skipped++;
+                return null;
+            }
+
+            checked++;
+
+            // Modrinth check
+            if (mod.modrinthId) {
+                try {
+                    const latest = await getMrLatest(mod.modrinthId, opts.mcVersion);
+                    if (latest && latest.version_number !== mod.version) {
+                        row.modrinth = {
+                            latestVersion: latest.version_number,
+                            isNewer: true,
+                            url: latest.files.find(f => f.primary)?.url,
+                        };
+                    }
+                } catch { failed++; }
+            }
+
+            // CurseForge check
+            if (mod.curseforgeId) {
+                try {
+                    const latest = await getCfLatest(mod.curseforgeId, opts.mcVersion);
+                    if (latest) {
+                        row.curseforge = {
+                            latestFile: latest.displayName,
+                            url: latest.downloadUrl ?? undefined,
+                        };
+                    }
+                } catch { failed++; }
+            }
+
+            return (row.modrinth || row.curseforge) ? row : null;
+        }));
+
+        for (const r of results) {
+            if (r) updates.push(r);
+        }
+
+        if ((i + BATCH) % 50 === 0) {
+            process.stderr.write(`[batch_check_updates] Checked ${Math.min(i + BATCH, mods.length)}/${mods.length}\n`);
+        }
+    }
+
+    return {
+        totalMods: mods.length,
+        checked,
+        skipped,
+        failed,
+        updatesAvailable: updates.length,
+        note: skipped > 0
+            ? `${skipped} mods skipped (not linked to Modrinth or CurseForge). Run batch_sync first.`
+            : undefined,
+        updates,
+    };
+}
+
 // ── Unified platform search ────────────────────────────────────────────────────
 
 interface UnifiedSearchHit {
