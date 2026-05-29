@@ -29,6 +29,8 @@ export interface ModrinthProject {
 }
 
 export async function lookupBySha512(sha512: string): Promise<ModrinthVersion | null> {
+    if (!/^[a-f0-9]{128}$/i.test(sha512))
+        throw new Error(`Invalid SHA-512 hash: expected 128 hex chars, got ${sha512.length} chars`);
     const res = await fetchWithRetry(`${MODRINTH_BASE}/version_file/${sha512}?algorithm=sha512`, { headers });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Modrinth lookup failed: ${res.status}`);

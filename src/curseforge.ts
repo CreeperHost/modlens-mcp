@@ -29,6 +29,8 @@ export interface CFFile {
 }
 
 export async function lookupByFingerprint(murmur2: number): Promise<CFProject | null> {
+    if (!Number.isFinite(murmur2) || murmur2 < 0)
+        throw new Error(`Invalid murmur2 fingerprint: expected non-negative integer, got ${murmur2}`);
     const res = await fetchWithRetry(`${CF_BASE}/fingerprints/${MINECRAFT_GAME_ID}`, {
         method: "POST",
         headers,
