@@ -8,6 +8,7 @@
  */
 
 import { readFileSync, readdirSync } from "fs";
+import { createHash } from "crypto";
 import { join, extname } from "path";
 import { embed, isOllamaAvailable } from "../embeddings.js";
 
@@ -179,6 +180,23 @@ export async function searchKubeJsScripts(
     };
 }
 
+// ── Embedding cache (survives across MCP tool calls in the same server session) ──
+
+const embedCache = new Map<string, number[]>();
+
+function contentHash(text: string): string {
+    return createHash("sha256").update(text).digest("hex");
+}
+
+async function cachedEmbed(text: string): Promise<number[] | null> {
+    const hash = contentHash(text);
+    const cached = embedCache.get(hash);
+    if (cached) return cached;
+    const vec = await embed(text);
+    if (vec) embedCache.set(hash, vec);
+    return vec;
+}
+
 // ── Cosine similarity helper ──────────────────────────────────────────────────
 
 function cosine(a: number[], b: number[]): number {
@@ -216,13 +234,13 @@ export async function semanticSearchKubeJsScripts(
         return { error: `No .js/.ts files found under: ${scriptsDir}` };
     }
 
-    // Embed the query
+    // Embed the query (not cached — queries vary)
     const queryVec = await embed(query);
     if (!queryVec) {
         return { error: "Failed to generate embedding for query." };
     }
 
-    // Read and embed each script (first 4000 chars to stay within embedding limits)
+    // Read and embed each script (first 4000 chars, cached by content hash)
     const scored: Array<{ file: string; score: number; preview: string; lineCount: number; categories: string[] }> = [];
 
     for (const file of files) {
@@ -230,7 +248,7 @@ export async function semanticSearchKubeJsScripts(
             const content = readFileSync(file, "utf8");
             const rel = file.replace(scriptsDir, "").replace(/\\/g, "/").replace(/^\//, "");
             const snippet = content.slice(0, 4000);
-            const vec = await embed(snippet);
+            const vec = await cachedEmbed(snippet);
             if (!vec) continue;
 
             const score = cosine(queryVec, vec);
