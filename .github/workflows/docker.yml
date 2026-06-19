@@ -6,6 +6,7 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master]
+  workflow_dispatch: # allow manual builds for any branch or tag
 
 env:
   REGISTRY: ghcr.io
