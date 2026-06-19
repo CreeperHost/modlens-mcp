@@ -1,5 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { randomUUID } from "node:crypto";
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { z } from "zod";
 import { startupEmbedScan } from "./embed-queue.js";
 
@@ -104,7 +107,13 @@ for (const ep of [ENV_PATH, localEnvPath]) {
     }
 }
 
-const server = new McpServer({ name: "modlens", version: "1.4.0" });
+// Version is sourced from package.json so it stays in sync with releases.
+// package.json sits one level up from both src/ (dev) and dist/ (built).
+const pkg = JSON.parse(
+    readFileSync(join(__dirname, "..", "package.json"), "utf8"),
+) as { version: string };
+
+const server = new McpServer({ name: "modlens", version: pkg.version });
 
 /** Serialize any result to MCP text content. */
 function out(result: unknown): { content: Array<{ type: "text"; text: string }> } {
@@ -1146,11 +1155,130 @@ server.tool(
 process.on("SIGINT", async () => { await disconnect(); process.exit(0); });
 process.on("SIGTERM", async () => { await disconnect(); process.exit(0); });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Transport selection:
+//   • MCP_PORT set  → Streamable HTTP transport (for k8s / remote deployments).
+//   • otherwise     → stdio transport (default, local CLI use).
+const httpPort = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : null;
+
+if (httpPort && !Number.isNaN(httpPort)) {
+    await startHttpServer(httpPort);
+} else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+}
 
 // Background: re-queue any mods that were partially embedded before this start
 // Set MODLENS_AUTO_EMBED=0 to disable.
 if (process.env.MODLENS_AUTO_EMBED !== "0") {
     startupEmbedScan().catch(() => {});
+}
+
+/**
+ * Streamable HTTP transport with per-session state.
+ *
+ * - POST /mcp           → client→server messages. A request with no session id
+ *                          and an `initialize` body opens a new session.
+ * - GET  /mcp           → server→client SSE stream for an existing session.
+ * - DELETE /mcp         → explicit session teardown.
+ * - GET  /healthz       → liveness/readiness probe (k8s).
+ *
+ * Bind path is configurable via MCP_PATH (default "/mcp"). Set MCP_HOST to
+ * change the bind address (default 0.0.0.0).
+ */
+async function startHttpServer(port: number): Promise<void> {
+    const mcpPath = process.env.MCP_PATH ?? "/mcp";
+    const host = process.env.MCP_HOST ?? "0.0.0.0";
+
+    // Active sessions keyed by Mcp-Session-Id header.
+    const transports = new Map<string, StreamableHTTPServerTransport>();
+
+    const readBody = (req: IncomingMessage): Promise<unknown> =>
+        new Promise((resolve, reject) => {
+            const chunks: Buffer[] = [];
+            req.on("data", (c) => chunks.push(c as Buffer));
+            req.on("end", () => {
+                const raw = Buffer.concat(chunks).toString("utf8");
+                if (!raw) return resolve(undefined);
+                try { resolve(JSON.parse(raw)); }
+                catch (e) { reject(e); }
+            });
+            req.on("error", reject);
+        });
+
+    const sendJson = (res: ServerResponse, status: number, body: unknown) => {
+        const payload = JSON.stringify(body);
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(payload);
+    };
+
+    const isInitialize = (body: unknown): boolean =>
+        !!body && typeof body === "object" && (body as { method?: string }).method === "initialize";
+
+    const httpServer = createHttpServer(async (req, res) => {
+        const url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
+
+        if (url.pathname === "/healthz") {
+            return sendJson(res, 200, { status: "ok" });
+        }
+
+        if (url.pathname !== mcpPath) {
+            return sendJson(res, 404, { error: "not found" });
+        }
+
+        const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+        try {
+            // Existing session — route to its transport.
+            if (sessionId && transports.has(sessionId)) {
+                const transport = transports.get(sessionId)!;
+                const body = req.method === "POST" ? await readBody(req) : undefined;
+                await transport.handleRequest(req, res, body);
+                return;
+            }
+
+            // New session — must be an initialize POST.
+            if (req.method === "POST") {
+                const body = await readBody(req);
+                if (!isInitialize(body)) {
+                    return sendJson(res, 400, {
+                        jsonrpc: "2.0",
+                        error: { code: -32000, message: "No valid session ID provided" },
+                        id: null,
+                    });
+                }
+                const transport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: () => randomUUID(),
+                    onsessioninitialized: (id) => { transports.set(id, transport); },
+                });
+                transport.onclose = () => {
+                    if (transport.sessionId) transports.delete(transport.sessionId);
+                };
+                await server.connect(transport);
+                await transport.handleRequest(req, res, body);
+                return;
+            }
+
+            return sendJson(res, 400, {
+                jsonrpc: "2.0",
+                error: { code: -32000, message: "No valid session ID provided" },
+                id: null,
+            });
+        } catch (err) {
+            if (!res.headersSent) {
+                sendJson(res, 500, {
+                    jsonrpc: "2.0",
+                    error: { code: -32603, message: "Internal server error" },
+                    id: null,
+                });
+            }
+            console.error("[mcp-http] request error:", err);
+        }
+    });
+
+    await new Promise<void>((resolve) => {
+        httpServer.listen(port, host, () => {
+            console.error(`modlens-mcp listening on http://${host}:${port}${mcpPath}`);
+            resolve();
+        });
+    });
 }

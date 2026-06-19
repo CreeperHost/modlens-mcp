@@ -58,4 +58,9 @@ COPY tools/mcsrc-indexer.jar ./tools/mcsrc-indexer.jar
 ENV MODLENS_HOME=/data
 VOLUME ["/data"]
 
+# When MCP_PORT is set the server starts the Streamable HTTP transport on this
+# port (default path /mcp, liveness probe at /healthz). Left unset → stdio mode.
+ENV MCP_PORT=3000
+EXPOSE 3000
+
 CMD ["node", "dist/server.js"]
