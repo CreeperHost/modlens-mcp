@@ -1076,7 +1076,7 @@ if (sections.has("mcp")) {
 
     const serverPath = join(ROOT, "dist", "server.js").replace(/\\/g, "/");
     // Pinned version so MCP client never auto-updates mid-project
-    const npxArgs = ["-y", `@mattabase/modlens-mcp@${pkgVersion}`];
+    const npxArgs = ["-y", `@creeperhost/modlens-mcp@${pkgVersion}`];
 
     const vscodeEntry = IS_INSTALLED
         ? { type: "stdio", command: "npx", args: npxArgs }

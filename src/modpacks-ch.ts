@@ -12,7 +12,7 @@ import { pipeline } from "stream/promises";
 export const FTBAPI = "https://api.modpacks.ch/public";
 
 /** User-Agent as requested by the modpacks.ch (CreeperHost) team for usage tracking. */
-export const USER_AGENT = "modlens-mcp/1.0 (github.com/Mattabase/modlens-mcp)";
+export const USER_AGENT = "modlens-mcp/1.0 (github.com/CreeperHost/modlens-mcp)";
 const HEADERS = { "User-Agent": USER_AGENT };
 
 // ── API type definitions ──────────────────────────────────────────────────────

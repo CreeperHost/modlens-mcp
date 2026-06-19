@@ -5,7 +5,7 @@ const MODRINTH_BASE = "https://api.modrinth.com/v2";
 const token = process.env.MODRINTH_TOKEN ?? "";
 
 const headers: Record<string, string> = {
-    "User-Agent": "modlens-mcp/1.0 (github.com/Mattabase/modlens-mcp)",
+    "User-Agent": "modlens-mcp/1.0 (github.com/CreeperHost/modlens-mcp)",
     ...(token ? { Authorization: token } : {}),
 };
 

@@ -21,7 +21,7 @@ const VINEFLOWER_URL =
 
 // Auto-downloaded on first use, cached to ~/.modlens-cache/tools/
 const INDEXER_URL =
-    "https://github.com/Mattabase/modlens-mcp/releases/download/tools-v1/mcsrc-indexer.jar";
+    "https://github.com/CreeperHost/modlens-mcp/releases/download/tools-v1/mcsrc-indexer.jar";
 
 // Fallback: local copy alongside this package (present in dev checkout)
 const __dirname = dirname(fileURLToPath(import.meta.url));

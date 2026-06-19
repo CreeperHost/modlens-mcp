@@ -9,19 +9,19 @@ Store mod metadata, class indexes, mixin targets, AT/AW entries, and decompiled 
 ### Option A — npx (recommended, no clone required)
 
 ```bash
-npx @mattabase/modlens-mcp
+npx @creeperhost/modlens-mcp
 ```
 
 On first run the setup wizard launches automatically — pick your database profile, configure Ollama (optional), and the wizard writes your MCP client config. Settings are stored in `~/.modlens/.env` and survive updates.
 
 **Reconfigure anytime:**
 ```bash
-npx @mattabase/modlens-mcp --setup
+npx @creeperhost/modlens-mcp --setup
 ```
 
 **Update to the latest version:**
 ```bash
-npx @mattabase/modlens-mcp@latest --setup
+npx @creeperhost/modlens-mcp@latest --setup
 ```
 This re-runs the wizard and pins the new version in your MCP client config. Your database and settings in `~/.modlens/` are untouched.
 
@@ -30,7 +30,7 @@ This re-runs the wizard and pins the new version in your MCP client config. Your
 ### Option B — git clone (for contributors / advanced users)
 
 ```bash
-git clone https://github.com/Mattabase/modlens-mcp
+git clone https://github.com/CreeperHost/modlens-mcp
 cd modlens-mcp
 npm install
 npm run setup   # interactive setup wizard
@@ -84,7 +84,7 @@ docker compose down -v
 ## Setup
 
 ```bash
-git clone https://github.com/Mattabase/modlens-mcp
+git clone https://github.com/CreeperHost/modlens-mcp
 cd modlens-mcp
 npm install
 npm run build
