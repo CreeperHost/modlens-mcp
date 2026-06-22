@@ -1,7 +1,13 @@
 // prisma/backends/schema.sqlite.prisma
 generator client {
-  provider = "prisma-client-js"
-  output   = "../../src/generated/sqlite"
+  // New Rust-free client: no native query-engine binary. Queries run through a
+  // portable WASM query compiler driven by the better-sqlite3 driver adapter,
+  // so the prebuilt client ships and runs on every platform.
+  provider     = "prisma-client"
+  engineType   = "client"
+  output       = "../../src/generated/sqlite"
+  runtime      = "nodejs"
+  moduleFormat = "esm"
 }
 
 datasource db {

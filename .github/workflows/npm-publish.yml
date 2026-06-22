@@ -7,13 +7,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Skip while the repo is private: npm provenance requires a public repo, and
-    # publishing makes the package public on npm. This auto-enables once the repo
-    # is made public — no workflow change needed at that point.
-    if: ${{ github.event.repository.private == false }}
     permissions:
       contents: read
-      id-token: write # required for npm provenance
+      id-token: write # required for OIDC trusted publishing + provenance
 
     steps:
       - name: Checkout
@@ -42,7 +38,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Trusted publishing: npm mints a short-lived, per-run credential via OIDC.
+      # No NPM_TOKEN secret is stored. Requires a Trusted Publisher to be
+      # configured for this package on npmjs.com, linked to this repo + workflow.
+      # The package must already exist on npm (do the first publish manually).
+      - name: Ensure npm CLI supports trusted publishing
+        run: npm install -g npm@latest
+
       - name: Publish
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

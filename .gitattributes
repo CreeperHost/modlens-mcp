@@ -1,0 +1,9 @@
+# Normalize all text files to LF in the repo and on checkout, on every platform.
+# Overrides a machine's core.autocrlf so line endings stay consistent.
+* text=auto eol=lf
+
+# Binary files Git must never touch.
+*.db binary
+*.jar binary
+*.png binary
+*.wasm binary

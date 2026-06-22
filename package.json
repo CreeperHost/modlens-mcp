@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "postinstall": "prisma generate",
-    "build": "tsc",
+    "build": "npm run db:generate:sqlite && tsc && node scripts/build-template-db.mjs",
     "dev": "tsc --watch",
     "start": "node dist/server.js",
     "setup": "npm run build && node dist/setup.js",
@@ -39,8 +39,11 @@
   "dependencies": {
     "@clack/prompts": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.10.0",
+    "@prisma/adapter-better-sqlite3": "^6.0.0",
     "@prisma/client": "^6.0.0",
     "adm-zip": "^0.5.16",
+    "better-sqlite3": "^9.0.0",
+    "prisma": "^6.0.0",
     "smol-toml": "^1.6.1",
     "zod": "^3.23.8"
   },
@@ -48,15 +51,12 @@
     "@types/adm-zip": "^0.5.7",
     "@types/better-sqlite3": "^7.0.0",
     "@types/node": "^22.0.0",
-    "prisma": "^6.0.0",
     "typescript": "^5.6.0",
     "vitest": "^4.1.6"
   },
   "optionalDependencies": {
     "@electric-sql/pglite": "^0.2.0",
-    "@prisma/adapter-better-sqlite3": "^6.0.0",
     "@prisma/adapter-pglite": "^6.0.0",
-    "better-sqlite3": "^9.0.0",
     "sqlite-vec": "^0.1.0"
   }
 }

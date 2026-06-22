@@ -16,7 +16,7 @@ export async function getDb(): Promise<PrismaClient> {
         const url = process.env.DATABASE_URL ?? "";
         const { PrismaBetterSQLite3 } = await import("@prisma/adapter-better-sqlite3");
         const adapter = new PrismaBetterSQLite3({ url });
-        const { PrismaClient: SQLiteClient } = await import("./generated/sqlite/index.js");
+        const { PrismaClient: SQLiteClient } = await import("./generated/sqlite/client.js");
         _client = new SQLiteClient({ adapter }) as unknown as PrismaClient;
         return _client;
     }

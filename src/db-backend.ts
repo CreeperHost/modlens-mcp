@@ -8,9 +8,11 @@ export type Backend = "postgres" | "pglite" | "sqlite";
 
 export function detectBackend(): Backend {
     const url = process.env.DATABASE_URL ?? "";
-    if (url.startsWith("file:") || url.endsWith(".db")) return "sqlite";
+    if (url.startsWith("postgresql://") || url.startsWith("postgres://")) return "postgres";
     if (url.startsWith("pglite://") || url.startsWith("pglite:")) return "pglite";
-    return "postgres";
+    // SQLite is the default: explicit `file:`/`.db` URLs, and also the no-URL
+    // case (zero-config embedded backend the launcher bootstraps on first run).
+    return "sqlite";
 }
 
 /**
