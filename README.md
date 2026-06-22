@@ -2,7 +2,7 @@
 
 MCP server and CLI for browsing, decompiling, and analyzing Minecraft mod JARs.
 
-Store mod metadata, class indexes, mixin targets, AT/AW entries, and decompiled source in a local PostgreSQL database. Query everything via AI (MCP) or command line (CLI).
+Store mod metadata, class indexes, mixin targets, AT/AW entries, and decompiled source in a local database — **embedded SQLite by default** (zero setup), or PostgreSQL/PGlite if you want them. Query everything via AI (MCP) or command line (CLI).
 
 ## Installation
 
@@ -12,18 +12,28 @@ Store mod metadata, class indexes, mixin targets, AT/AW entries, and decompiled 
 npx @creeperhost/modlens-mcp
 ```
 
-On first run the setup wizard launches automatically — pick your database profile, configure Ollama (optional), and the wizard writes your MCP client config. Settings are stored in `~/.modlens/.env` and survive updates.
+On first run it works with **zero configuration** — an embedded SQLite database is created automatically at `~/.modlens/data/modlens.db` (no Docker, no external services). Settings are stored in `~/.modlens/.env` and survive updates.
 
-**Reconfigure anytime:**
+Add it to your MCP client config to start using it:
+```json
+{
+  "mcpServers": {
+    "modlens": { "command": "npx", "args": ["-y", "@creeperhost/modlens-mcp"] }
+  }
+}
+```
+
+**Optional — switch backends or enable semantic search:**
 ```bash
 npx @creeperhost/modlens-mcp --setup
 ```
+The setup wizard lets you move to PostgreSQL/PGlite, configure Ollama for semantic search, and auto-write your MCP client config. Re-run it any time to reconfigure.
 
 **Update to the latest version:**
 ```bash
 npx @creeperhost/modlens-mcp@latest --setup
 ```
-This re-runs the wizard and pins the new version in your MCP client config. Your database and settings in `~/.modlens/` are untouched.
+This pins the new version in your MCP client config. Your database and settings in `~/.modlens/` are untouched.
 
 ---
 
@@ -44,7 +54,7 @@ npm run start   # start the server
 | Requirement | Notes |
 |-------------|-------|
 | **Node.js 22+** | Runtime for the MCP server |
-| **Docker** | Runs the PostgreSQL container via `docker compose` |
+| **Docker** | *Optional* — only for the PostgreSQL backend (`docker compose`). Not needed for the default embedded SQLite. |
 | **JDK 21+** | Required for decompilation (Vineflower) and bytecode analysis (`javap`). Eclipse Adoptium recommended — auto-discovered at `C:/Program Files/Eclipse Adoptium`, `C:/Program Files/Java`, `C:/Program Files/Microsoft`, or via `JAVA_HOME` |
 | **Vineflower** | Decompiler JAR — **auto-downloaded** from Maven Central on first use |
 | **mcsrc-indexer.jar** | JAR bytecode indexer — **auto-downloaded** from the modlens-mcp GitHub release on first use |
@@ -60,6 +70,8 @@ npm run start   # start the server
 ---
 
 ## Docker — PostgreSQL Setup
+
+> Only needed if you choose the **PostgreSQL** backend. The default embedded SQLite backend requires none of this.
 
 The included `docker-compose.yml` starts a PostgreSQL 16 container on port **5433**.
 
