@@ -4,29 +4,44 @@ on:
   push:
     tags: ["v*"]
 
+# Two-stage release: the OIDC publish credential is isolated from the job that
+# runs untrusted dependency code (npm ci / build scripts). The build job has no
+# id-token and produces a tarball artifact; the publish job holds id-token but
+# runs only `npm publish` on that prebuilt tarball — so a compromised dependency
+# cannot scrape the publish credential from memory (the TanStack attack vector).
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      id-token: write # required for OIDC trusted publishing + provenance
-
+      contents: read # no id-token: this job must never hold the publish credential
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so we can verify the tag is on the default branch
+
+      # Refuse to build/publish a tag that points at a commit not merged into the
+      # default branch — blocks releasing unreviewed code from a side branch.
+      - name: Verify tag is on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch --no-tags origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "Tag ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not an ancestor of ${DEFAULT_BRANCH} — refusing to publish unreviewed code." >&2
+            exit 1
+          fi
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: npm ci
 
       # The git tag is the single source of truth for the version. Stamp it into
-      # package.json for this build only (not committed) — no manual version bump
-      # in code is needed; just push a vX.Y.Z tag.
+      # package.json so the packed tarball carries the right version (not committed).
       - name: Set version from tag
         run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
 
@@ -36,12 +51,44 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Trusted publishing: npm mints a short-lived, per-run credential via OIDC.
-      # No NPM_TOKEN secret is stored. Requires a Trusted Publisher to be
-      # configured for this package on npmjs.com, linked to this repo + workflow.
-      # The package must already exist on npm (do the first publish manually).
+      - name: Pack tarball
+        run: npm pack --pack-destination ./dist-pack
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: dist-pack/*.tgz
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Manual approval gate: configure "Required reviewers" on the `release`
+    # environment (repo Settings → Environments). This job holds the OIDC
+    # credential but runs NO dependency code — only `npm publish` of the tarball.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # required for OIDC trusted publishing + provenance
+    steps:
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: dist-pack
+
+      # Trusted publishing needs a recent npm; the runner's bundled npm may predate it.
       - name: Ensure npm CLI supports trusted publishing
         run: npm install -g npm@latest
 
+      # Publishes the prebuilt tarball. Tarball publishes run no package lifecycle
+      # scripts, so no untrusted code executes while the OIDC token is present.
       - name: Publish
-        run: npm publish --access public --provenance
+        run: npm publish dist-pack/*.tgz --access public --provenance
