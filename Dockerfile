@@ -13,11 +13,12 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src/ ./src/
+# scripts/ holds build-template-db.mjs, invoked by `npm run build`.
+COPY scripts/ ./scripts/
 
-# postinstall already generated the default (Postgres/PGlite) client into
-# node_modules. The SQLite backend client is emitted to src/generated/sqlite
-# from a separate schema and is required for tsc to type-check db.ts.
-RUN npx prisma generate --schema prisma/backends/schema.sqlite.prisma
+# `npm run build` generates the SQLite client, compiles with tsc, and builds the
+# prebuilt template.db. (postinstall already generated the default Postgres/PGlite
+# client into node_modules during `npm ci`.)
 RUN npm run build
 
 # ── Stage 2: runtime ────────────────────────────────────────────────────────
@@ -42,12 +43,13 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/node_modules/ ./node_modules/
+# dist/ already contains the compiled SQLite client (tsc emits
+# src/generated/sqlite → dist/generated/sqlite) plus the rest of the build.
 COPY --from=builder /app/dist/ ./dist/
-# SQLite client (generated under src/, not emitted by tsc) so the sqlite
-# backend resolves at runtime too — db.ts imports it via ./generated/sqlite.
-COPY --from=builder /app/src/generated/ ./dist/generated/
 COPY package.json ./
-COPY prisma/ ./prisma/
+# From the builder so the prebuilt template.db (made by `npm run build`) is
+# included — the launcher copies it to /data on first run for zero-config SQLite.
+COPY --from=builder /app/prisma/ ./prisma/
 COPY scripts/ ./scripts/
 # Vendored bytecode indexer. ensureIndexer() resolves this bundled copy
 # (tools/mcsrc-indexer.jar next to the package) before any network fetch,
@@ -63,4 +65,7 @@ VOLUME ["/data"]
 ENV MCP_PORT=3000
 EXPOSE 3000
 
-CMD ["node", "dist/server.js"]
+# Launcher (not server.js directly) so the container gets zero-config SQLite by
+# default: on first run it bootstraps an embedded DB under /data. Provide
+# DATABASE_URL (e.g. Postgres) to skip that and use your own database.
+CMD ["node", "dist/launcher.js"]

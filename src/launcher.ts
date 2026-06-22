@@ -45,7 +45,10 @@ for (const ep of [ENV_FILE, join(PKG_ROOT, ".env")]) {
 
 const args = process.argv.slice(2);
 const wantSetup = args.includes("--setup");
-const isFirstRun = IS_INSTALLED && !existsSync(ENV_FILE);
+// Bootstrap embedded SQLite only when nothing else is configured. A
+// pre-supplied DATABASE_URL (e.g. Postgres via a container env var) opts out, so
+// `docker run -e DATABASE_URL=postgresql://…` works without a stray SQLite db.
+const isFirstRun = IS_INSTALLED && !existsSync(ENV_FILE) && !process.env.DATABASE_URL;
 
 // ── Explicit setup wizard (--setup) ─────────────────────────────────────────
 // Opt-in interactive configuration (Postgres, semantic search, MCP client, …).

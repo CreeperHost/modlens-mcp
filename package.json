@@ -3,6 +3,14 @@
   "version": "0.0.0",
   "description": "MCP server for browsing, decompiling, and analyzing Minecraft mod JARs",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CreeperHost/modlens-mcp.git"
+  },
+  "homepage": "https://github.com/CreeperHost/modlens-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/CreeperHost/modlens-mcp/issues"
+  },
   "main": "dist/server.js",
   "bin": {
     "modlens-mcp": "dist/launcher.js"
