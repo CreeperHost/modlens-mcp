@@ -46,7 +46,11 @@ describe("validatePath", () => {
 describe("assertJarPath", () => {
     it("accepts an absolute .jar path", () => {
         expect(() => assertJarPath("/mods/testmod.jar")).not.toThrow();
-        expect(() => assertJarPath("C:\\mods\\testmod.jar")).not.toThrow();
+        // A Windows-style absolute path is only absolute when running on Windows
+        // (assertJarPath uses platform-native path.isAbsolute).
+        if (process.platform === "win32") {
+            expect(() => assertJarPath("C:\\mods\\testmod.jar")).not.toThrow();
+        }
     });
 
     it("rejects a relative path", () => {

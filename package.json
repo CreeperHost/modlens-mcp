@@ -42,7 +42,7 @@
     "@prisma/adapter-better-sqlite3": "^6.0.0",
     "@prisma/client": "^6.0.0",
     "adm-zip": "^0.5.16",
-    "better-sqlite3": "^9.0.0",
+    "better-sqlite3": "^11.9.0",
     "prisma": "^6.0.0",
     "smol-toml": "^1.6.1",
     "zod": "^3.23.8"
