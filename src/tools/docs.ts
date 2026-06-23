@@ -18,6 +18,7 @@ import type { Prisma } from "@prisma/client";
 import { embed, isOllamaAvailable } from "../embeddings.js";
 import { upsertDocEmbedding, searchDocsByVector, countUnembedded } from "../repositories/embeddings.js";
 import { ftsSearchDocs } from "../search-adapter.js";
+import { caseInsensitive } from "../db-backend.js";
 
 export interface DocEntryInput {
     className?: string;
@@ -101,9 +102,9 @@ export async function searchDocumentation(query: string, category?: string, name
 
     const where: Prisma.DocEntryWhereInput = {
         OR: [
-            { title:    { contains: kw, mode: "insensitive" } },
-            { summary:  { contains: kw, mode: "insensitive" } },
-            { className:{ contains: kw, mode: "insensitive" } },
+            { title:    { contains: kw, ...caseInsensitive() } },
+            { summary:  { contains: kw, ...caseInsensitive() } },
+            { className:{ contains: kw, ...caseInsensitive() } },
         ],
     };
     if (category)  where.category  = category;

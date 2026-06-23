@@ -14,9 +14,10 @@
  *   - gradle_deps            — cross-mod gradle dependency comparison
  */
 import { writeFile, mkdir } from "fs/promises";
-import { join, dirname, resolve, extname } from "path";
-import { resolveModRef, findModTagsByMod } from "../repositories/mod.js";
+import { join, dirname, resolve, extname, sep } from "path";
+import { resolveModRef, findModTagsByMod, mcVersionWhere } from "../repositories/mod.js";
 import { getDb } from "../db.js";
+import { assertHostAccessiblePath } from "../security.js";
 import { getMixinConflictMatrix, getMixinHotspots, listModsWithMixins } from "./mixin-scan.js";
 import { findTagConflicts, getTagContributors, getModTagList, searchModTags } from "./mod-tags.js";
 import { findVersionConflicts, getDependencyGraph, listModSourceUrls } from "./catalog.js";
@@ -52,6 +53,10 @@ function getAllowedExtensions(): Set<string> {
 }
 
 function validateSavePath(savePath: string): void {
+    // A Windows path on a non-Windows host can never be written — surface a
+    // clear error regardless of the policy override below.
+    assertHostAccessiblePath(savePath);
+
     // Env override: skip all validation
     if (process.env.MODLENS_REPORT_ALLOW_ANY_PATH === "1") return;
 
@@ -68,7 +73,7 @@ function validateSavePath(savePath: string): void {
     const blocked = getBlockedPrefixes();
     const resolvedLower = resolved.toLowerCase();
     for (const prefix of blocked) {
-        if (resolvedLower.startsWith(prefix.toLowerCase() + require("path").sep) || resolvedLower === prefix.toLowerCase()) {
+        if (resolvedLower.startsWith(prefix.toLowerCase() + sep) || resolvedLower === prefix.toLowerCase()) {
             throw new Error(
                 `Report savePath blocked: "${resolved}" is under system path "${prefix}". ` +
                 `Add override paths via MODLENS_REPORT_BLOCKED_PATHS env var, or set MODLENS_REPORT_ALLOW_ANY_PATH=1 to disable.`
@@ -322,7 +327,7 @@ async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbI
     const degradedWhere: Record<string, unknown> = {
         metadataSource: { in: ["filename", "@Mod annotation"] },
     };
-    if (opts.mcVersion) degradedWhere.mcVersion = { contains: opts.mcVersion };
+    if (opts.mcVersion) Object.assign(degradedWhere, mcVersionWhere(opts.mcVersion));
     if (opts.loader) degradedWhere.loader = opts.loader;
     const db = await getDb();
 

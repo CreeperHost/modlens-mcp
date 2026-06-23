@@ -6,6 +6,7 @@
 import { getDb } from "../db.js";
 import type { Mod, Prisma } from "@prisma/client";
 import { ftsSearchModSource } from "../search-adapter.js";
+import { caseInsensitive, detectBackend } from "../db-backend.js";
 
 // ── Projections ───────────────────────────────────────────────────────────────
 
@@ -34,6 +35,16 @@ export type SyncModRow = {
     modrinthId: string | null; curseforgeId: number | null;
     sourcePath: string | null; metadata: unknown;
 };
+
+/**
+ * Prisma `where` fragment matching an exact MC version, or a version-segment
+ * family prefix ("1.21" → every "1.21.x"). The trailing "." is what stops
+ * "1.21.1" from matching "1.21.11" — different patch releases are not
+ * cross-compatible, so a query for one must never pull in the other.
+ */
+export function mcVersionWhere(mcVersion: string): Prisma.ModWhereInput {
+    return { OR: [{ mcVersion }, { mcVersion: { startsWith: mcVersion + "." } }] };
+}
 
 // ── Mod queries ───────────────────────────────────────────────────────────────
 
@@ -114,10 +125,10 @@ export async function listMods(opts: {
     return db.mod.findMany({
         where: {
             ...(opts.loader ? { loader: opts.loader } : {}),
-            ...(opts.mcVersion ? { mcVersion: { contains: opts.mcVersion } } : {}),
+            ...(opts.mcVersion ? mcVersionWhere(opts.mcVersion) : {}),
             ...(opts.hasMixins !== undefined ? { hasMixins: opts.hasMixins } : {}),
             ...(opts.decompiled !== undefined ? { decompiled: opts.decompiled } : {}),
-            ...(opts.modIdFilter ? { modId: { contains: opts.modIdFilter, mode: "insensitive" as const } } : {}),
+            ...(opts.modIdFilter ? { modId: { contains: opts.modIdFilter, ...caseInsensitive() } } : {}),
         },
         orderBy: { ingestedAt: "desc" },
         take: opts.limit ?? 100,
@@ -132,7 +143,7 @@ export async function listModsSlim(opts?: {
     return db.mod.findMany({
         where: {
             ...(opts?.loader ? { loader: opts.loader } : {}),
-            ...(opts?.mcVersion ? { mcVersion: { contains: opts.mcVersion } } : {}),
+            ...(opts?.mcVersion ? mcVersionWhere(opts.mcVersion) : {}),
             ...(opts?.hasMixins !== undefined ? { hasMixins: opts.hasMixins } : {}),
             ...(opts?.decompiled !== undefined ? { decompiled: opts.decompiled } : {}),
             ...(opts?.modIdFilter ? { modId: { contains: opts.modIdFilter } } : {}),
@@ -149,7 +160,7 @@ export async function listModsForMixinScan(opts?: {
         where: {
             ...(opts?.hasMixins !== undefined ? { hasMixins: opts.hasMixins } : {}),
             ...(opts?.loader ? { loader: opts.loader } : {}),
-            ...(opts?.mcVersion ? { mcVersion: { contains: opts.mcVersion } } : {}),
+            ...(opts?.mcVersion ? mcVersionWhere(opts.mcVersion) : {}),
         },
         select: {
             id: true, modId: true, displayName: true, version: true,
@@ -162,7 +173,7 @@ export async function listModsForMixinScan(opts?: {
 export async function listModsForDepGraph(mcVersion?: string): Promise<DepModRow[]> {
     const db = await getDb();
     return db.mod.findMany({
-        where: mcVersion ? { mcVersion: { contains: mcVersion } } : undefined,
+        where: mcVersion ? mcVersionWhere(mcVersion) : undefined,
         select: {
             id: true, modId: true, displayName: true, version: true,
             mcVersion: true, loader: true, dependencies: true, metadata: true,
@@ -217,19 +228,24 @@ export async function searchModsFts(query: string, opts?: {
     loader?: string; mcVersion?: string; limit?: number;
 }): Promise<Mod[]> {
     const q = query.toLowerCase();
+    // metadata is a JSON column on Postgres/PGlite (filter the `description`
+    // path) but a TEXT column on SQLite (filter the raw JSON via substring).
+    const metadataMatch: Prisma.ModWhereInput = detectBackend() === "sqlite"
+        ? ({ metadata: { contains: q } } as unknown as Prisma.ModWhereInput)
+        : { metadata: { path: ["description"], string_contains: q } };
     const db = await getDb();
     return db.mod.findMany({
         where: {
             AND: [
                 {
                     OR: [
-                        { modId: { contains: q, mode: "insensitive" } },
-                        { displayName: { contains: q, mode: "insensitive" } },
-                        { metadata: { path: ["description"], string_contains: q } },
+                        { modId: { contains: q, ...caseInsensitive() } },
+                        { displayName: { contains: q, ...caseInsensitive() } },
+                        metadataMatch,
                     ],
                 },
                 ...(opts?.loader ? [{ loader: opts.loader }] : []),
-                ...(opts?.mcVersion ? [{ mcVersion: { contains: opts.mcVersion } }] : []),
+                ...(opts?.mcVersion ? [mcVersionWhere(opts.mcVersion)] : []),
             ],
         },
         orderBy: { ingestedAt: "desc" },
@@ -241,21 +257,48 @@ export async function listModsForSourceUrls(query?: string) {
     const db = await getDb();
     return db.mod.findMany({
         where: query
-            ? { OR: [{ modId: { contains: query, mode: "insensitive" } }, { displayName: { contains: query, mode: "insensitive" } }] }
+            ? { OR: [{ modId: { contains: query, ...caseInsensitive() } }, { displayName: { contains: query, ...caseInsensitive() } }] }
             : undefined,
         select: { modId: true, displayName: true, version: true, loader: true, metadata: true },
         orderBy: { modId: "asc" },
     });
 }
 
+/**
+ * Mod columns that are native JSON/array on Postgres/PGlite but plain TEXT
+ * (holding serialized JSON) on SQLite. The Prisma types are generated from the
+ * Postgres schema (arrays/objects), so on SQLite these must be stringified
+ * before a write — `deserializeArray` / JSON.parse reverse this on read.
+ */
+const SQLITE_JSON_FIELDS = [
+    "mixinConfigs", "mixinTargets", "atEntries", "awEntries", "dependencies", "tags", "metadata",
+] as const;
+
+/**
+ * Pre-serialize JSON-text columns for SQLite writes. No-op on Postgres/PGlite,
+ * where the columns are native JSON/array. Only touches fields that are present
+ * and not already strings, so partial update inputs are safe.
+ */
+function serializeModWrite<T>(data: T): T {
+    if (detectBackend() !== "sqlite") return data;
+    const out = { ...(data as Record<string, unknown>) };
+    for (const field of SQLITE_JSON_FIELDS) {
+        const value = out[field];
+        if (value != null && typeof value !== "string") {
+            out[field] = JSON.stringify(value);
+        }
+    }
+    return out as T;
+}
+
 export async function createMod(data: Prisma.ModCreateInput): Promise<Mod> {
     const db = await getDb();
-    return db.mod.create({ data });
+    return db.mod.create({ data: serializeModWrite(data) });
 }
 
 export async function updateMod(id: number, data: Prisma.ModUpdateInput): Promise<Mod> {
     const db = await getDb();
-    return db.mod.update({ where: { id }, data });
+    return db.mod.update({ where: { id }, data: serializeModWrite(data) });
 }
 
 export async function getModMetadata(id: number): Promise<{ metadata: unknown } | null> {
@@ -375,7 +418,7 @@ export async function searchModTagsByPath(query: string, registry?: string, limi
     const db = await getDb();
     return db.modTag.findMany({
         where: {
-            tagPath: { contains: query, mode: "insensitive" },
+            tagPath: { contains: query, ...caseInsensitive() },
             ...(registry ? { registry } : {}),
         },
         include: { mod: { select: { modId: true, displayName: true, version: true } } },

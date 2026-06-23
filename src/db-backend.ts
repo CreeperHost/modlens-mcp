@@ -16,6 +16,20 @@ export function detectBackend(): Backend {
 }
 
 /**
+ * Prisma case-insensitive `contains`/`equals` modifier, backend-aware.
+ *
+ * Postgres/PGlite support `mode: "insensitive"` (ILIKE). The SQLite Prisma
+ * connector rejects the `mode` argument entirely (`Unknown argument 'mode'`),
+ * but SQLite's `LIKE` is already case-insensitive for ASCII — so we omit it.
+ *
+ * Spread into a string filter:
+ *   { title: { contains: q, ...caseInsensitive() } }
+ */
+export function caseInsensitive(): { mode?: "insensitive" } {
+    return detectBackend() === "sqlite" ? {} : { mode: "insensitive" };
+}
+
+/**
  * Serialize an array to a JSON string for SQLite String columns.
  * On postgres/pglite, returns the original value unchanged.
  */
@@ -28,7 +42,7 @@ export function serializeArray<T>(value: T[]): T[] | string {
  * Deserialize a SQLite JSON string column back to an array.
  * On postgres/pglite, returns the original value unchanged.
  */
-export function deserializeArray<T>(value: T[] | string | null | undefined): T[] {
+export function deserializeArray<T>(value: unknown): T[] {
     if (typeof value === "string") {
         try { return JSON.parse(value) as T[]; } catch { return []; }
     }

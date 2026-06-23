@@ -520,7 +520,11 @@ server.tool(
     safe(async ({ action, type, mcVersion, version, skipIndex, limit }) => {
         let result: unknown;
         switch (action) {
-            case "list_mc":      result = await listMcVersions(type ?? "release"); break;
+            case "list_mc": {
+                const mcVersions = await listMcVersions(type ?? "release");
+                result = limit ? mcVersions.slice(0, limit) : mcVersions;
+                break;
+            }
             case "list_neoforge":result = await listNeoForgeVersions(mcVersion, limit ?? 20); break;
             case "list_forge":  result = await listForgeVersions(mcVersion, limit ?? 20); break;
             case "list_fabric":  result = await listFabricApiVersions(mcVersion, limit ?? 20); break;

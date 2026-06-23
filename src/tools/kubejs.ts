@@ -11,6 +11,7 @@ import { readFileSync, readdirSync } from "fs";
 import { createHash } from "crypto";
 import { join, extname } from "path";
 import { embed, isOllamaAvailable } from "../embeddings.js";
+import { assertHostAccessiblePath } from "../security.js";
 
 // ── Event pattern registry ────────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ const KUBEJS_PATTERNS: Record<string, string[]> = {
 // ── File walker ───────────────────────────────────────────────────────────────
 
 function walkDir(dir: string, exts: string[] = [".js", ".ts"]): string[] {
+    assertHostAccessiblePath(dir);
     const files: string[] = [];
     try {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {

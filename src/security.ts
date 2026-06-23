@@ -48,6 +48,29 @@ export function validatePath(untrusted: string, base: string): string {
     return resolvedTarget;
 }
 
+// ── Host-accessibility guard ────────────────────────────────────────────────
+
+const WINDOWS_ABS_PATH = /^[a-zA-Z]:[\\/]/;
+
+/**
+ * Throw a clear, actionable error when `p` is a Windows-style absolute path
+ * (e.g. C:\mods\foo.jar) but the server is NOT running on Windows — typically a
+ * Linux container with no access to the host's Windows filesystem.
+ *
+ * Without this, such paths fail with a confusing "not absolute" rejection
+ * (assertJarPath) or a silent empty result (directory walkers).
+ */
+export function assertHostAccessiblePath(p: string): void {
+    if (platform() !== "win32" && WINDOWS_ABS_PATH.test(p)) {
+        throw new Error(
+            `Path '${p}' looks like a Windows path, but this server is running on ${platform()} ` +
+            `(e.g. a Linux container) and cannot access the host's Windows filesystem. ` +
+            `Mount the directory into the container and pass the in-container path, or use a ` +
+            `/mnt/<drive>/… path that maps to a mounted Windows volume.`,
+        );
+    }
+}
+
 // ── JAR path guard ────────────────────────────────────────────────────────────
 
 /**
@@ -56,6 +79,7 @@ export function validatePath(untrusted: string, base: string): string {
  * to prevent filesystem access to arbitrary files.
  */
 export function assertJarPath(p: string): void {
+    assertHostAccessiblePath(p);
     if (!isAbsolute(p) || !p.toLowerCase().endsWith(".jar")) {
         throw new Error(`Invalid JAR path rejected: '${p}'`);
     }

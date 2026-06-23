@@ -13,6 +13,7 @@ import { join } from "path";
 import { getDb } from "../db.js";
 import { Prisma } from "@prisma/client";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
+import { caseInsensitive } from "../db-backend.js";
 import { embed, isOllamaAvailable, chunkText } from "../embeddings.js";
 import { upsertPrimerEmbedding, searchPrimersByVector, countUnembedded } from "../repositories/embeddings.js";
 import { ftsSearchPrimers } from "../search-adapter.js";
@@ -283,9 +284,9 @@ export async function searchPrimers(
             AND: [
                 {
                     OR: [
-                        { title: { contains: query, mode: "insensitive" } },
-                        { summary: { contains: query, mode: "insensitive" } },
-                        { content: { contains: query, mode: "insensitive" } },
+                        { title: { contains: query, ...caseInsensitive() } },
+                        { summary: { contains: query, ...caseInsensitive() } },
+                        { content: { contains: query, ...caseInsensitive() } },
                         { tags: { has: query } },
                     ],
                 },

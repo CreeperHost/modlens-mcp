@@ -8,7 +8,7 @@ import { indexJar } from "../java-tools.js";
 import { paths, ensureDir } from "../cache.js";
 import { join } from "path";
 import { rm } from "fs/promises";
-import { normalizeJarPath, assertJarPath } from "../security.js";
+import { normalizeJarPath, assertJarPath, assertHostAccessiblePath } from "../security.js";
 import { isOllamaAvailable } from "../embeddings.js";
 import { enqueueModEmbed } from "../embed-queue.js";
 import { buildModGraph, ensureGraphify } from "./graphify.js";
@@ -16,7 +16,7 @@ import {
     findModByJarPath, findModByDupKey, findModBySha512,
     createMod, updateMod, findModById, listAllMods,
     countModClasses, createModClasses, findModByModId, deleteModById,
-    listModsSlim,
+    listModsSlim, mcVersionWhere,
 } from "../repositories/mod.js";
 import { getDb } from "../db.js";
 import { validateDbId } from "../validate.js";
@@ -56,6 +56,7 @@ async function lookupPlatforms(
 
 export async function ingestMod(jarPath: string, skipSource = false, replace = false): Promise<IngestResult> {
     jarPath = normalizeJarPath(jarPath);
+    assertHostAccessiblePath(jarPath);
     const existing = await findModByJarPath(jarPath);
     if (existing) {
         // Re-parse to check if the JAR now has higher-quality metadata
@@ -259,7 +260,7 @@ export async function refreshDegradedMetadata(opts?: { loader?: string; mcVersio
         metadataSource: { in: ["filename", "@Mod annotation"] },
     };
     if (opts?.loader) where.loader = opts.loader;
-    if (opts?.mcVersion) where.mcVersion = { contains: opts.mcVersion };
+    if (opts?.mcVersion) Object.assign(where, mcVersionWhere(opts.mcVersion));
 
     const mods = await db.mod.findMany({ where, orderBy: { modId: "asc" } });
     let refreshed = 0, unchanged = 0, failed = 0;

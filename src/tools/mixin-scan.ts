@@ -6,8 +6,8 @@
  *   - Full conflict matrix: for each class, every mod that mixes into it
  *   - Summary: most-contested classes, mods with the most mixins, etc.
  */
-import { listModsForMixinScan, listModsSlim, findModsByIds, findModById, findModByModId, updateMod, listMods } from "../repositories/mod.js";
-import { getDb } from "../db.js";
+import { listModsForMixinScan, listModsSlim, findModsByIds, findModById, findModByModId, updateMod, listMods, type MixinModRow } from "../repositories/mod.js";
+import { deserializeArray } from "../db-backend.js";
 import { getBytecode } from "../java-tools.js";
 import { assertJarPath } from "../security.js";
 import AdmZip from "adm-zip";
@@ -30,40 +30,33 @@ async function mixinConflictRaw(
     mcVersion?: string,
     minConflicts = 2,
 ): Promise<Array<{ className: string; modCount: number; modIds: number[] }>> {
-    const params: unknown[] = [minConflicts];
-    const whereClauses: string[] = ["has_mixins = true"];
+    // Computed in JS (rather than backend-specific raw SQL) so it works
+    // identically on SQLite, Postgres, and PGlite. mixinTargets is a JSON
+    // string column on SQLite and a JSON array on Postgres — deserializeArray
+    // normalizes both.
+    const mods = await listModsForMixinScan({ hasMixins: true, loader, mcVersion });
 
-    if (loader)    { params.push(loader);    whereClauses.push(`loader = $${params.length}`); }
-    if (mcVersion) { params.push(mcVersion); whereClauses.push(`mc_version = $${params.length}`); }
+    // Dedup by modId, keeping the latest-ingested row (highest id).
+    const latestByModId = new Map<string, MixinModRow>();
+    for (const m of mods) {
+        const prev = latestByModId.get(m.modId);
+        if (!prev || m.id > prev.id) latestByModId.set(m.modId, m);
+    }
 
-    const whereSQL = whereClauses.join(" AND ");
+    // class_name → set of deduped mod row ids that target it
+    const classToModIds = new Map<string, Set<number>>();
+    for (const m of latestByModId.values()) {
+        for (const className of new Set(deserializeArray<string>(m.mixinTargets))) {
+            let ids = classToModIds.get(className);
+            if (!ids) { ids = new Set(); classToModIds.set(className, ids); }
+            ids.add(m.id);
+        }
+    }
 
-    const db = await getDb();
-    const rows = await db.$queryRawUnsafe<
-        Array<{ class_name: string; mod_count: string; mod_ids: number[] }>
-    >(`
-        WITH deduped AS (
-            SELECT DISTINCT ON (mod_id) id, mod_id, mixin_targets
-            FROM "mods"
-            WHERE ${whereSQL}
-            ORDER BY mod_id, id DESC
-        )
-        SELECT
-            t.class_name,
-            COUNT(DISTINCT d.mod_id)::int AS mod_count,
-            ARRAY_AGG(DISTINCT d.id) AS mod_ids
-        FROM deduped d
-        CROSS JOIN LATERAL jsonb_array_elements_text(d.mixin_targets::jsonb) AS t(class_name)
-        GROUP BY t.class_name
-        HAVING COUNT(DISTINCT d.mod_id) >= $1
-        ORDER BY mod_count DESC
-    `, ...params);
-
-    return rows.map((r) => ({
-        className: r.class_name,
-        modCount:  Number(r.mod_count),
-        modIds:    r.mod_ids,
-    }));
+    return [...classToModIds.entries()]
+        .filter(([, ids]) => ids.size >= minConflicts)
+        .map(([className, ids]) => ({ className, modCount: ids.size, modIds: [...ids] }))
+        .sort((a, b) => b.modCount - a.modCount);
 }
 
 // ── Public tools ──────────────────────────────────────────────────────────────
@@ -78,7 +71,7 @@ export async function listModsWithMixins(loader?: string, mcVersion?: string): P
     return {
         count: mods.length,
         mods: mods.map((m) => {
-            const targets = (m.mixinTargets as string[]) ?? [];
+            const targets = deserializeArray<string>(m.mixinTargets);
             return {
                 dbId:         m.id,
                 modId:        m.modId,
@@ -153,7 +146,7 @@ export async function getMixinClassDetail(targetClass: string): Promise<object> 
     const normalClass = targetClass.replace(/\./g, "/");
 
     const all = await listModsForMixinScan({ hasMixins: true });
-    const mods = all.filter((m) => (m.mixinTargets as string[])?.includes(normalClass));
+    const mods = all.filter((m) => deserializeArray<string>(m.mixinTargets).includes(normalClass));
 
     return {
         targetClass:  normalClass,

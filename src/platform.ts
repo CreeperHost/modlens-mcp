@@ -73,8 +73,10 @@ export async function listNeoForgeVersions(mcVersion?: string, limit = 20): Prom
             .reverse(); // newest first
     }
 
+    // Exact MC version, or a version-segment prefix family (e.g. "1.21" → all
+    // "1.21.x"). The trailing "." prevents "1.21.1" from matching "1.21.11".
     const filtered = mcVersion
-        ? neoforgeCache.filter((v) => v.mcVersion === mcVersion || v.mcVersion.startsWith(mcVersion))
+        ? neoforgeCache.filter((v) => v.mcVersion === mcVersion || v.mcVersion.startsWith(mcVersion + "."))
         : neoforgeCache;
 
     return filtered.slice(0, limit);
@@ -148,8 +150,10 @@ export async function listForgeVersions(mcVersion?: string, limit = 20): Promise
         forgeCache = allVersions.reverse(); // newest first
     }
 
+    // Exact MC version, or a version-segment prefix family (e.g. "1.21" → all
+    // "1.21.x"). The trailing "." prevents "1.21.1" from matching "1.21.11".
     const filtered = mcVersion
-        ? forgeCache.filter((v) => v.mcVersion === mcVersion || v.mcVersion.startsWith(mcVersion))
+        ? forgeCache.filter((v) => v.mcVersion === mcVersion || v.mcVersion.startsWith(mcVersion + "."))
         : forgeCache;
 
     return filtered.slice(0, limit);

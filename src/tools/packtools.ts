@@ -13,7 +13,7 @@
 import AdmZip from "adm-zip";
 import { readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join, relative, normalize, isAbsolute } from "path";
-import { resolveModRef, listModsSlim, listMods, findModsByIds } from "../repositories/mod.js";
+import { resolveModRef, listModsSlim, listMods, findModsByIds, mcVersionWhere } from "../repositories/mod.js";
 import { listEntries, extractEntry } from "../jar.js";
 import { indexJar } from "../java-tools.js";
 import { assertJarPath } from "../security.js";
@@ -492,7 +492,7 @@ export async function buildPackGraph(
     // 1. Fetch all mods with deps and mixin data
     const mods = await db.mod.findMany({
         where: {
-            ...(mcVersion ? { mcVersion: { contains: mcVersion } } : {}),
+            ...(mcVersion ? mcVersionWhere(mcVersion) : {}),
             ...(loader ? { loader } : {}),
         },
         select: {
@@ -550,7 +550,7 @@ export async function buildPackGraph(
     const tags = await db.modTag.findMany({
         where: {
             mod: {
-                ...(mcVersion ? { mcVersion: { contains: mcVersion } } : {}),
+                ...(mcVersion ? mcVersionWhere(mcVersion) : {}),
                 ...(loader ? { loader } : {}),
             },
         },
@@ -827,7 +827,7 @@ export async function packHealth(
 
     // 1. Basic stats
     const where = {
-        ...(mcVersion ? { mcVersion: { contains: mcVersion } } : {}),
+        ...(mcVersion ? mcVersionWhere(mcVersion) : {}),
         ...(loader ? { loader } : {}),
     };
     const mods = await db.mod.findMany({
