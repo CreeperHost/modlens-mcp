@@ -128,7 +128,7 @@ await call("mc_data", { action: "entity_attributes", version: "26.1.2" }, "mc_da
 // ── mc_files ──────────────────────────────────────────────────────────────
 console.log("\n=== mc_files ===");
 await call("mc_files", { action: "list_files", dirPath: "minecraft/recipes", version: "26.1.2", branch: "data" }, "mc_files/list_files");
-await call("mc_files", { action: "get_data", filePath: "minecraft/recipes/crafting_table.json", version: "26.1.2" }, "mc_files/get_data");
+await call("mc_files", { action: "get_data", filePath: "data/minecraft/recipe/crafting_table.json", version: "26.1.2" }, "mc_files/get_data");
 await call("mc_files", { action: "changelog", version: "26.1.2" }, "mc_files/changelog");
 await call("mc_files", { action: "atlas", version: "26.1.2" }, "mc_files/atlas");
 
