@@ -97,3 +97,27 @@ jobs:
       # as a GitHub repo shorthand (owner/repo) instead of a local tarball.
       - name: Publish
         run: npm publish ./dist-pack/*.tgz --access public --provenance
+
+  # Publishes a GitHub release with auto-generated notes for the tag. Runs only
+  # after publish succeeds, so it inherits the default-branch guard (build job)
+  # and the environment approval (publish job). Holds no id-token and runs no
+  # dependency code — just the GitHub API via `gh`.
+  release-notes:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/edit the GitHub release
+    steps:
+      - name: Create GitHub release with auto-generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — skipping."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi
