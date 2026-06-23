@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { z } from "zod";
@@ -113,8 +114,6 @@ const pkg = JSON.parse(
     readFileSync(join(__dirname, "..", "package.json"), "utf8"),
 ) as { version: string };
 
-const server = new McpServer({ name: "modlens", version: pkg.version });
-
 /** Serialize any result to MCP text content. */
 function out(result: unknown): { content: Array<{ type: "text"; text: string }> } {
     const text =
@@ -163,6 +162,11 @@ function safe<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeof
         }
     };
 }
+
+class JsonBodyParseError extends Error {}
+
+function createMcpServer(): McpServer {
+    const server = new McpServer({ name: "modlens", version: pkg.version });
 
 // ── 1. mod ────────────────────────────────────────────────────────────────────
 
@@ -1150,6 +1154,9 @@ server.tool(
     })
 );
 
+    return server;
+}
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 process.on("SIGINT", async () => { await disconnect(); process.exit(0); });
@@ -1163,6 +1170,7 @@ const httpPort = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : nul
 if (httpPort && !Number.isNaN(httpPort)) {
     await startHttpServer(httpPort);
 } else {
+    const server = createMcpServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
 }
@@ -1200,7 +1208,7 @@ async function startHttpServer(port: number): Promise<void> {
                 const raw = Buffer.concat(chunks).toString("utf8");
                 if (!raw) return resolve(undefined);
                 try { resolve(JSON.parse(raw)); }
-                catch (e) { reject(e); }
+                catch { reject(new JsonBodyParseError("Invalid JSON request body")); }
             });
             req.on("error", reject);
         });
@@ -1211,8 +1219,15 @@ async function startHttpServer(port: number): Promise<void> {
         res.end(payload);
     };
 
-    const isInitialize = (body: unknown): boolean =>
-        !!body && typeof body === "object" && (body as { method?: string }).method === "initialize";
+    const isInitialize = (body: unknown): boolean => {
+        const messages = Array.isArray(body) ? body : [body];
+        return messages.length === 1 && isInitializeRequest(messages[0]);
+    };
+
+    const getHeader = (req: IncomingMessage, name: string): string | undefined => {
+        const value = req.headers[name.toLowerCase()];
+        return Array.isArray(value) ? value[0] : value;
+    };
 
     const httpServer = createHttpServer(async (req, res) => {
         const url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
@@ -1225,12 +1240,19 @@ async function startHttpServer(port: number): Promise<void> {
             return sendJson(res, 404, { error: "not found" });
         }
 
-        const sessionId = req.headers["mcp-session-id"] as string | undefined;
+        const sessionId = getHeader(req, "mcp-session-id");
 
         try {
             // Existing session — route to its transport.
-            if (sessionId && transports.has(sessionId)) {
-                const transport = transports.get(sessionId)!;
+            if (sessionId) {
+                const transport = transports.get(sessionId);
+                if (!transport) {
+                    return sendJson(res, 404, {
+                        jsonrpc: "2.0",
+                        error: { code: -32001, message: "Session not found" },
+                        id: null,
+                    });
+                }
                 const body = req.method === "POST" ? await readBody(req) : undefined;
                 await transport.handleRequest(req, res, body);
                 return;
@@ -1253,6 +1275,7 @@ async function startHttpServer(port: number): Promise<void> {
                 transport.onclose = () => {
                     if (transport.sessionId) transports.delete(transport.sessionId);
                 };
+                const server = createMcpServer();
                 await server.connect(transport);
                 await transport.handleRequest(req, res, body);
                 return;
@@ -1265,6 +1288,13 @@ async function startHttpServer(port: number): Promise<void> {
             });
         } catch (err) {
             if (!res.headersSent) {
+                if (err instanceof JsonBodyParseError) {
+                    return sendJson(res, 400, {
+                        jsonrpc: "2.0",
+                        error: { code: -32700, message: "Parse error: Invalid JSON" },
+                        id: null,
+                    });
+                }
                 sendJson(res, 500, {
                     jsonrpc: "2.0",
                     error: { code: -32603, message: "Internal server error" },
