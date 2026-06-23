@@ -13,7 +13,7 @@
 import { extractEntry, listEntries } from "../jar.js";
 import { resolveModRef, findModById, listModsSlim } from "../repositories/mod.js";
 import { writeFile, mkdir } from "fs/promises";
-import { join, extname, dirname, resolve } from "path";
+import { join, extname, dirname, resolve, sep } from "path";
 import { CACHE_ROOT } from "../cache.js";
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -186,7 +186,7 @@ export async function getModJarFile(modId: string | number, path: string): Promi
     if (BINARY_EXTS.has(ext)) {
         const jarExtractRoot = resolve(CACHE_ROOT, "jar-extract");
         const cachePath = resolve(join(CACHE_ROOT, "jar-extract", mod.modId, path));
-        if (!cachePath.startsWith(jarExtractRoot + require("path").sep)) {
+        if (!cachePath.startsWith(jarExtractRoot + sep)) {
             return { error: `Path traversal rejected: ${path}` };
         }
         await mkdir(dirname(cachePath), { recursive: true });

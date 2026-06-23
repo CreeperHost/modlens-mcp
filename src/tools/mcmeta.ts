@@ -18,7 +18,7 @@
  * All fetched files are cached to ~/.modlens-cache/mcmeta/{version}/{branch}/...
  */
 import { readFile, writeFile, readdir, mkdir } from "fs/promises";
-import { join, dirname, extname, resolve } from "path";
+import { join, dirname, extname, resolve, sep } from "path";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ function validateMcComponent(value: string, label: string): void {
 function mcmetaCachePath(version: string, branch: string, filePath: string): string {
     const result = resolve(join(MCMETA_CACHE, version, branch, filePath));
     const resolvedCache = resolve(MCMETA_CACHE);
-    if (!result.startsWith(resolvedCache + require("path").sep) && result !== resolvedCache) {
+    if (!result.startsWith(resolvedCache + sep) && result !== resolvedCache) {
         throw new Error(`Path traversal rejected in mcmeta cache: ${filePath}`);
     }
     return result;

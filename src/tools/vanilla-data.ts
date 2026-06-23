@@ -9,7 +9,7 @@
  *   assets-json  → assets/minecraft/<type>/<id>.json
  */
 import { readFile, writeFile, readdir } from "fs/promises";
-import { join, resolve } from "path";
+import { join, resolve, sep } from "path";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
 import { resolveModRef } from "../repositories/mod.js";
 import { searchSource } from "./source.js";
@@ -31,7 +31,7 @@ function validateMcComponent(value: string, label: string): void {
 function mcmetaCachePath(version: string, branch: string, filePath: string): string {
     const result = resolve(join(MCMETA_CACHE, version, branch, filePath));
     const resolvedCache = resolve(MCMETA_CACHE);
-    if (!result.startsWith(resolvedCache + require("path").sep) && result !== resolvedCache) {
+    if (!result.startsWith(resolvedCache + sep) && result !== resolvedCache) {
         throw new Error(`Path traversal rejected in mcmeta cache: ${filePath}`);
     }
     return result;

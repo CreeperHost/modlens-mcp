@@ -19,7 +19,7 @@
  *   search_ftb_mods — search the FTB mod index (returns mixed CF int / MR
  *                     string IDs)
  */
-import { join, resolve } from "path";
+import { join, resolve, sep } from "path";
 import { createHash } from "crypto";
 import { rename, mkdir } from "fs/promises";
 import AdmZip from "adm-zip";
@@ -601,7 +601,7 @@ export async function downloadOverridesAction(opts: {
     const resolvedExtractDir = resolve(extractDir);
     for (const entry of zip.getEntries()) {
         const target = resolve(extractDir, entry.entryName);
-        if (!target.startsWith(resolvedExtractDir + require("path").sep) && target !== resolvedExtractDir) {
+        if (!target.startsWith(resolvedExtractDir + sep) && target !== resolvedExtractDir) {
             throw new Error(`Zip-slip detected: entry "${entry.entryName}" escapes extract dir`);
         }
     }
