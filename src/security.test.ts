@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validatePath, safeRegex, fileSha512, verifyFileHash, HashMismatchError, normalizeJarPath, validateGraphBundle, validateGraphEntries, validateEmbeddingBundle, decodeTagChars, stripInvisibleUnicode, containsInvisibleUnicode, assertJarPath, validateEmbedRegistryIndex, validateGraphRegistryIndex } from "./security.js";
+import { validatePath, safeRegex, fileSha512, verifyFileHash, HashMismatchError, normalizeJarPath, validateGraphBundle, validateGraphEntries, validateEmbeddingBundle, decodeTagChars, stripInvisibleUnicode, containsInvisibleUnicode, assertJarPath, assertHostAccessiblePath, validateEmbedRegistryIndex, validateGraphRegistryIndex } from "./security.js";
 import { tmpdir } from "os";
 import { writeFile, unlink } from "fs/promises";
 import { join } from "path";
@@ -64,6 +64,25 @@ describe("assertJarPath", () => {
 
     it("rejects an empty string", () => {
         expect(() => assertJarPath("")).toThrow("Invalid JAR path");
+    });
+});
+
+// ── assertHostAccessiblePath ───────────────────────────────────────────────────
+
+describe("assertHostAccessiblePath", () => {
+    it("flags a Windows path only when not running on Windows", () => {
+        const check = () => assertHostAccessiblePath("C:\\mods\\foo.jar");
+        if (process.platform === "win32") {
+            expect(check).not.toThrow();
+        } else {
+            expect(check).toThrow(/Windows path/);
+        }
+    });
+
+    it("never flags a POSIX-style path", () => {
+        expect(() => assertHostAccessiblePath("/mnt/c/mods/foo.jar")).not.toThrow();
+        expect(() => assertHostAccessiblePath("/home/user/foo.jar")).not.toThrow();
+        expect(() => assertHostAccessiblePath("relative/foo.jar")).not.toThrow();
     });
 });
 
