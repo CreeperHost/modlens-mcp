@@ -93,5 +93,7 @@ jobs:
 
       # Publishes the prebuilt tarball. Tarball publishes run no package lifecycle
       # scripts, so no untrusted code executes while the OIDC token is present.
+      # The ./ prefix is required: without it npm parses "dist-pack/<file>.tgz"
+      # as a GitHub repo shorthand (owner/repo) instead of a local tarball.
       - name: Publish
-        run: npm publish dist-pack/*.tgz --access public --provenance
+        run: npm publish ./dist-pack/*.tgz --access public --provenance
