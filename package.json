@@ -2,6 +2,7 @@
   "name": "@creeperhost/modlens-mcp",
   "version": "0.0.0",
   "description": "MCP server for browsing, decompiling, and analyzing Minecraft mod JARs",
+  "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
@@ -20,7 +21,9 @@
     "prisma/",
     "scripts/",
     "package.json",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "ATTRIBUTION.md"
   ],
   "scripts": {
     "postinstall": "prisma generate",
