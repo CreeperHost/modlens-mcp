@@ -1040,19 +1040,34 @@ export async function remapMcJar(jarPath: string, version: string): Promise<stri
  * Post-decompile: replace SRG method/field names (func_12345/field_12345) with MCP names.
  * Modifies .java files in-place in the given directory.
  */
-export async function applyMcpNamesToSource(sourceDir: string, version: string): Promise<{ replaced: number; files: number }> {
-    const mcpNames = await getMcpNames(version);
-    if (!mcpNames) return { replaced: 0, files: 0 };
+// Matches any SRG method/field identifier in one pass.
+const SRG_IDENT_PATTERN = /\b(func_\d+_[a-zA-Z_]+|field_\d+_[a-zA-Z_]+)\b/g;
 
-    // Build a combined replacement map (srg→mcp for both methods and fields)
+/** Build the combined srg→mcp replacement map for a version, or null if none. */
+async function buildMcpReplacements(version: string): Promise<Map<string, string> | null> {
+    const mcpNames = await getMcpNames(version);
+    if (!mcpNames) return null;
     const replacements = new Map<string, string>();
     for (const [srg, mcp] of mcpNames.methods) replacements.set(srg, mcp);
     for (const [srg, mcp] of mcpNames.fields) replacements.set(srg, mcp);
+    return replacements.size === 0 ? null : replacements;
+}
 
-    if (replacements.size === 0) return { replaced: 0, files: 0 };
+/** Replace SRG identifiers in `content` using the given map; returns text + hit count. */
+function replaceSrgIdentifiers(content: string, replacements: Map<string, string>): { text: string; count: number } {
+    let count = 0;
+    const text = content.replace(SRG_IDENT_PATTERN, (match) => {
+        const mcp = replacements.get(match);
+        if (mcp) { count++; return mcp; }
+        return match;
+    });
+    return { text, count };
+}
 
-    // Build a regex that matches any SRG identifier in one pass
-    const srgPattern = /\b(func_\d+_[a-zA-Z_]+|field_\d+_[a-zA-Z_]+)\b/g;
+export async function applyMcpNamesToSource(sourceDir: string, version: string): Promise<{ replaced: number; files: number }> {
+    const replacements = await buildMcpReplacements(version);
+    if (!replacements) return { replaced: 0, files: 0 };
+    const repl = replacements; // non-null binding for the nested closure
 
     const { readdir, readFile: rf, writeFile: wf } = await import("fs/promises");
     const { join: pjoin } = await import("path");
@@ -1068,14 +1083,9 @@ export async function applyMcpNamesToSource(sourceDir: string, version: string):
                 await walkAndReplace(fullPath);
             } else if (entry.name.endsWith(".java")) {
                 const content = await rf(fullPath, "utf8");
-                let count = 0;
-                const replaced = content.replace(srgPattern, (match) => {
-                    const mcp = replacements.get(match);
-                    if (mcp) { count++; return mcp; }
-                    return match;
-                });
+                const { text, count } = replaceSrgIdentifiers(content, repl);
                 if (count > 0) {
-                    await wf(fullPath, replaced);
+                    await wf(fullPath, text);
                     totalReplaced += count;
                     totalFiles++;
                 }
@@ -1085,4 +1095,20 @@ export async function applyMcpNamesToSource(sourceDir: string, version: string):
 
     await walkAndReplace(sourceDir);
     return { replaced: totalReplaced, files: totalFiles };
+}
+
+/**
+ * Apply MCP human-readable names to a single decompiled .java file in place.
+ * Used by the on-demand single-class path so it doesn't have to re-scan the
+ * whole (growing) decompiled tree the way applyMcpNamesToSource does.
+ */
+export async function applyMcpNamesToFile(filePath: string, version: string): Promise<{ replaced: number }> {
+    const replacements = await buildMcpReplacements(version);
+    if (!replacements) return { replaced: 0 };
+
+    const { readFile: rf, writeFile: wf } = await import("fs/promises");
+    const content = await rf(filePath, "utf8");
+    const { text, count } = replaceSrgIdentifiers(content, replacements);
+    if (count > 0) await wf(filePath, text);
+    return { replaced: count };
 }

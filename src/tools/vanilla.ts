@@ -19,7 +19,27 @@ import { formatClassMembers } from "../access-flags.js";
 import { ensureMcVersion, updateMcVersion } from "../repositories/mcVersion.js";
 import { findModByModIdLike } from "../repositories/mod.js";
 import { searchSource } from "./source.js";
-import { hasSrgMappings, remapMcJar, applyMcpNamesToSource, hasRetroMcpMappings, remapMcJarTiny } from "../mappings.js";
+import { hasSrgMappings, remapMcJar, applyMcpNamesToSource, applyMcpNamesToFile, hasRetroMcpMappings, remapMcJarTiny } from "../mappings.js";
+
+/**
+ * Resolve the jar to feed Vineflower for a version. Legacy versions are remapped
+ * to readable net/minecraft names first (cached as <jar>-mapped.jar by the remap
+ * helpers); modern versions decompile from the raw jar. Shared by the bulk and
+ * single-class decompile paths so both produce the same class names.
+ */
+async function resolveMcDecompileJar(
+    version: string,
+    rawJarPath: string,
+): Promise<{ jarPath: string; remapType: "srg" | "retromcp" | "none" }> {
+    if (hasSrgMappings(version)) {
+        const mapped = await remapMcJar(rawJarPath, version);
+        if (mapped) return { jarPath: mapped, remapType: "srg" };
+    } else if (hasRetroMcpMappings(version)) {
+        const mapped = await remapMcJarTiny(rawJarPath, version);
+        if (mapped) return { jarPath: mapped, remapType: "retromcp" };
+    }
+    return { jarPath: rawJarPath, remapType: "none" };
+}
 
 // ── Index cache (disk-backed per version, mirroring mcsrc's index-manager) ───
 
@@ -100,8 +120,19 @@ export async function getMinecraftSource(
     if (await exists(cached)) {
         source = await readFile(cached, "utf8");
     } else {
-        const jarPath = await getMcJarPath(version);
+        const rawJarPath = await getMcJarPath(version);
+        // Legacy versions must be remapped to readable net/minecraft names before
+        // decompiling — otherwise the requested class won't exist in the obfuscated
+        // jar. Mirrors the bulk decompile path; the remapped jar is cached on disk,
+        // so only the first single-class request for a legacy version pays for it.
+        const { jarPath, remapType } = await resolveMcDecompileJar(version, rawJarPath);
         source = await decompileClass(jarPath, internal, outDir);
+        if (remapType === "srg") {
+            // SRG remap gives readable class names but srg member names; layer MCP
+            // method/field names onto just this file (RetroMCP already has final names).
+            await applyMcpNamesToFile(cached, version);
+            source = await readFile(cached, "utf8");
+        }
     }
 
     if (startLine === undefined && endLine === undefined && maxLines === undefined) {
@@ -200,25 +231,9 @@ export async function decompileMcVersion(version: string, force = false) {
         if (status === "running") return { status: "running", outDir };
     }
 
-    // For legacy versions with SRG mappings, remap the JAR before decompiling
-    let decompileJarPath = jarPath;
-    let remapped = false;
-    let remapType: "srg" | "retromcp" | "none" = "none";
-    if (hasSrgMappings(version)) {
-        const mapped = await remapMcJar(jarPath, version);
-        if (mapped) {
-            decompileJarPath = mapped;
-            remapped = true;
-            remapType = "srg";
-        }
-    } else if (hasRetroMcpMappings(version)) {
-        const mapped = await remapMcJarTiny(jarPath, version);
-        if (mapped) {
-            decompileJarPath = mapped;
-            remapped = true;
-            remapType = "retromcp";
-        }
-    }
+    // For legacy versions, remap the JAR to readable names before decompiling.
+    const { jarPath: decompileJarPath, remapType } = await resolveMcDecompileJar(version, jarPath);
+    const remapped = remapType !== "none";
 
     await decompileJar(decompileJarPath, outDir);
     await updateMcVersion(dbId, { decompPath: outDir, jarPath });
