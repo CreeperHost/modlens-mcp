@@ -16,8 +16,8 @@ env:
 # isolated from the job that runs untrusted dependency code. The image build runs
 # `npm ci` / build scripts inside the Dockerfile, so the build job holds NO
 # packages:write and never logs in to the registry. It exports the built image as
-# an artifact; the push job — which runs no dependency code — loads that artifact
-# and pushes it. A compromised dependency therefore cannot reach the push token.
+# an artifact; the push job — which runs no dependency code — copies that artifact
+# to the registry. A compromised dependency therefore cannot reach the push token.
 #
 # Publishing happens only from version tags (`v*`); pushes to master and PRs just
 # build to validate the Dockerfile. Each tag publishes the version tags plus
@@ -65,17 +65,22 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
-      # Build without pushing. On tag builds, export the image to a tarball so the
-      # push job can publish it without rebuilding (and without dependency code
-      # running while the push credential is present).
+      # Build without pushing, exporting an OCI archive. OCI (not docker) format
+      # stores the layers in their final compressed form, so the push job can
+      # skopeo-copy the blobs byte-for-byte — preserving the layer digests buildx
+      # would have pushed directly. (A docker-archive round-tripped through
+      # `docker load`/`docker push` recompresses layers, changing every digest and
+      # forcing nodes to cold-pull the whole image on each release.)
+      # A single local tag keeps the archive unambiguous for skopeo; the real
+      # registry tags are applied at publish time from steps.meta.outputs.tags.
       - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: localhost/modlens:ci
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=docker,dest=/tmp/modlens-image.tar
+          outputs: type=oci,dest=/tmp/modlens-image.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -106,38 +111,23 @@ jobs:
           name: docker-image
           path: /tmp
 
-      - name: Load image
-        id: load
-        run: |
-          out=$(docker load -i /tmp/modlens-image.tar)
-          echo "$out"
-          ref=$(echo "$out" | sed -n 's/^Loaded image: //p' | head -n1)
-          if [ -z "$ref" ]; then
-            ref=$(echo "$out" | sed -n 's/^Loaded image ID: //p' | head -n1)
-          fi
-          if [ -z "$ref" ]; then
-            echo "Could not determine loaded image reference" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Ensure skopeo
+        run: command -v skopeo || { sudo apt-get update && sudo apt-get install -y skopeo; }
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Retag every desired tag from the single loaded reference (image id or
-      # name:tag) so we don't depend on how many RepoTags the tarball carried.
-      - name: Push tags
+      # skopeo copies the compressed blobs from the OCI archive unchanged, so the
+      # published layer digests match what buildx pushes directly — nodes keep
+      # reusing their cached layers and only pull what actually changed. The first
+      # copy uploads all blobs; the remaining tags reuse them server-side.
+      - name: Publish image to GHCR
         env:
           TAGS: ${{ needs.build.outputs.tags }}
-          REF: ${{ steps.load.outputs.ref }}
+          REGISTRY: ${{ env.REGISTRY }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASS: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          skopeo login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin <<<"$REGISTRY_PASS"
           echo "$TAGS" | while read -r tag; do
             [ -z "$tag" ] && continue
-            echo "Tagging and pushing $tag"
-            docker tag "$REF" "$tag"
-            docker push "$tag"
+            echo "Copying image -> $tag"
+            skopeo copy --retry-times 3 oci-archive:/tmp/modlens-image.tar "docker://$tag"
           done
