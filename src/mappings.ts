@@ -463,8 +463,13 @@ async function getMcpNames(version: string): Promise<McpNames | null> {
     const cachedFields = join(MAPPINGS_DIR, `mcp-fields-${version}.csv`);
 
     if (!(await exists(cachedMethods)) || !(await exists(cachedFields))) {
-        const zipPath = join(MAPPINGS_DIR, `mcp_${channel}.zip`);
-        const url = `https://maven.minecraftforge.net/de/oceanlabs/mcp/mcp_stable/${channel}/mcp_stable-${channel}.zip`;
+        // MCP_CHANNELS values carry a ForgeGradle "stable_" channel-name prefix
+        // (e.g. stable_39-1.12), but the Maven artifact version omits it
+        // (39-1.12). Without stripping it the download 404s and member names
+        // silently never load.
+        const mavenVersion = channel.replace(/^stable_/, "");
+        const zipPath = join(MAPPINGS_DIR, `mcp_${mavenVersion}.zip`);
+        const url = `https://maven.minecraftforge.net/de/oceanlabs/mcp/mcp_stable/${mavenVersion}/mcp_stable-${mavenVersion}.zip`;
         try {
             await downloadToFile(url, zipPath);
             const zip = new AdmZip(zipPath);
