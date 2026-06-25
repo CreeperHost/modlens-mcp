@@ -12,13 +12,23 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# Two-stage release mirrors the npm workflow: the registry push credential is
+# isolated from the job that runs untrusted dependency code. The image build runs
+# `npm ci` / build scripts inside the Dockerfile, so the build job holds NO
+# packages:write and never logs in to the registry. It exports the built image as
+# an artifact; the push job — which runs no dependency code — loads that artifact
+# and pushes it. A compromised dependency therefore cannot reach the push token.
+#
+# Publishing happens only from version tags (`v*`); pushes to master and PRs just
+# build to validate the Dockerfile. Each tag publishes the version tags plus
+# `latest`.
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      packages: write
-
+      contents: read # no packages:write: this job runs npm/build and must never hold the push credential
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,31 +50,90 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # branch/pr tags exist only so non-tag builds have something to label;
+          # they are never pushed (the push job runs only on tags). Version tags
+          # and `latest` are applied on `v*` tag builds.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      # Build without pushing. On tag builds, export the image to a tarball so the
+      # push job can publish it without rebuilding (and without dependency code
+      # running while the push credential is present).
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=docker,dest=/tmp/modlens-image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upload image artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/modlens-image.tar
+          retention-days: 1
+
+  push:
+    needs: build
+    # Publish only from version tags. master/PR builds stop at the build job.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # only this job — which runs NO dependency code — holds it
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load image
+        id: load
+        run: |
+          out=$(docker load -i /tmp/modlens-image.tar)
+          echo "$out"
+          ref=$(echo "$out" | sed -n 's/^Loaded image: //p' | head -n1)
+          if [ -z "$ref" ]; then
+            ref=$(echo "$out" | sed -n 's/^Loaded image ID: //p' | head -n1)
+          fi
+          if [ -z "$ref" ]; then
+            echo "Could not determine loaded image reference" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # Retag every desired tag from the single loaded reference (image id or
+      # name:tag) so we don't depend on how many RepoTags the tarball carried.
+      - name: Push tags
+        env:
+          TAGS: ${{ needs.build.outputs.tags }}
+          REF: ${{ steps.load.outputs.ref }}
+        run: |
+          echo "$TAGS" | while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Tagging and pushing $tag"
+            docker tag "$REF" "$tag"
+            docker push "$tag"
+          done
