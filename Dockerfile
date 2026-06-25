@@ -58,6 +58,11 @@ COPY tools/mcsrc-indexer.jar ./tools/mcsrc-indexer.jar
 
 # Persistent data (DB, .env, tool cache) lives at /data
 ENV MODLENS_HOME=/data
+# Keep the decompile/tool cache on the same persistent, writable volume. Without
+# this it defaults to ~/.modlens-cache, which is ephemeral and — when the
+# container runs as a non-root uid (HOME unset → "/") — unwritable, making
+# Vineflower fail with "Failed to save directory".
+ENV MODLENS_CACHE_ROOT=/data/.modlens-cache
 VOLUME ["/data"]
 
 # When MCP_PORT is set the server starts the Streamable HTTP transport on this

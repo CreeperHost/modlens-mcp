@@ -2,7 +2,22 @@ import { homedir } from "os";
 import { join } from "path";
 import { mkdir, access } from "fs/promises";
 
-export const CACHE_ROOT = join(homedir(), ".modlens-cache");
+/**
+ * Root of the on-disk cache (decompiled source, downloaded tools/JARs, indexes).
+ *
+ * Resolution order:
+ *   1. MODLENS_CACHE_ROOT — explicit override. The Docker image sets this to a
+ *      path on the persistent /data volume.
+ *   2. ~/.modlens-cache — default for local CLI / npx installs.
+ *
+ * Why the override matters in containers: os.homedir() resolves to "/" (or
+ * another unwritable path) when the process runs as a non-root uid with no HOME,
+ * which makes Vineflower fail with "Failed to save directory". Pointing the cache
+ * at the mounted data volume fixes the permission error and lets expensive
+ * decompiled output survive container restarts.
+ */
+export const CACHE_ROOT =
+    process.env.MODLENS_CACHE_ROOT?.trim() || join(homedir(), ".modlens-cache");
 
 export const paths = {
     jars: (key: string) => join(CACHE_ROOT, "jars", key),
