@@ -41,9 +41,9 @@ export interface JarIndex {
     references: Record<string, string[]>;
 }
 
-function runProcess(cmd: string, args: string[]): Promise<string> {
+function runProcess(cmd: string, args: string[], opts?: { cwd?: string }): Promise<string> {
     return new Promise((resolve, reject) => {
-        const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+        const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], cwd: opts?.cwd });
         const out: Buffer[] = [];
         const err: Buffer[] = [];
         proc.stdout.on("data", (d: Buffer) => out.push(d));
@@ -169,7 +169,13 @@ export async function decompileClass(
     const vf = await ensureVineflower();
     await ensureDir(outputDir + "/");
     const java = await findJava();
-    await runProcess(java, ["-jar", vf, jarPath, outputDir, "--only", className]);
+    // Vineflower CLI form is `[options] {in}+ [out]`: options must use `=` and
+    // precede the positional args. Passing `--only <class>` as two trailing
+    // tokens makes Vineflower swallow `--only` as a boolean flag and treat the
+    // class as the *output destination* — a relative path resolved against CWD,
+    // which fails when CWD isn't writable (e.g. /app in the container). Pin cwd
+    // to the writable output dir as defense-in-depth against any future misparse.
+    await runProcess(java, ["-jar", vf, `--only=${className}`, jarPath, outputDir], { cwd: outputDir });
     const { readFile } = await import("fs/promises");
     const outFile = join(outputDir, className + ".java");
     if (await exists(outFile)) return readFile(outFile, "utf8");
