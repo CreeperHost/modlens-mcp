@@ -114,6 +114,36 @@ const pkg = JSON.parse(
     readFileSync(join(__dirname, "..", "package.json"), "utf8"),
 ) as { version: string };
 
+// ── Server-side logging ─────────────────────────────────────────────────────
+//
+// In stdio mode stderr is piped to the MCP *client's* log, so we stay quiet by
+// default to avoid polluting it. In HTTP mode the process owns its own console,
+// so verbose logging is enabled automatically — full stack traces and the exact
+// failing params land in the server log instead of having to be fished out of
+// the model's reply. MODLENS_VERBOSE forces it on (1/true/yes) or off (0/false/no).
+const VERBOSE = process.env.MODLENS_VERBOSE
+    ? !/^(0|false|no|off)$/i.test(process.env.MODLENS_VERBOSE)
+    : !!process.env.MCP_PORT;
+
+/** Best-effort, bounded JSON for logging tool params (handles circular refs). */
+function previewArgs(value: unknown): string {
+    try {
+        const json = JSON.stringify(value);
+        if (json == null) return String(value);
+        return json.length > 2000 ? json.slice(0, 2000) + "…(truncated)" : json;
+    } catch {
+        return "[unserializable params]";
+    }
+}
+
+/** Log a full error (stack + context) to stderr when verbose logging is on. */
+function logServerError(context: string, err: unknown, params?: unknown): void {
+    if (!VERBOSE) return;
+    const detail = err instanceof Error && err.stack ? err.stack : String(err);
+    const paramLine = params === undefined ? "" : `\n  params: ${previewArgs(params)}`;
+    console.error(`[modlens] error in ${context}:\n${detail}${paramLine}`);
+}
+
 /** Serialize any result to MCP text content. */
 function out(result: unknown): { content: Array<{ type: "text"; text: string }> } {
     const text =
@@ -154,6 +184,13 @@ function safe<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeof
         try {
             return await fn(...args);
         } catch (err) {
+            // Full stack + exact params go to the server log (HTTP mode / verbose);
+            // the model still gets the message plus a short stack excerpt.
+            const params = args[0];
+            const action = params && typeof params === "object" && "action" in params
+                ? `tool action=${String((params as { action: unknown }).action)}`
+                : "tool call";
+            logServerError(action, err, params);
             const msg = err instanceof Error ? err.message : String(err);
             const stack = err instanceof Error && err.stack
                 ? "\n" + err.stack.split("\n").slice(1, 4).join("\n")
@@ -1305,13 +1342,14 @@ async function startHttpServer(port: number): Promise<void> {
                     id: null,
                 });
             }
-            console.error("[mcp-http] request error:", err);
+            logServerError(`http ${req.method} ${url.pathname}`, err);
         }
     });
 
     await new Promise<void>((resolve) => {
         httpServer.listen(port, host, () => {
             console.error(`modlens-mcp listening on http://${host}:${port}${mcpPath}`);
+            console.error(`[modlens] verbose logging ${VERBOSE ? "ON" : "OFF"} (set MODLENS_VERBOSE=0 to silence, =1 to force on)`);
             resolve();
         });
     });
