@@ -13,7 +13,7 @@ import { join } from "path";
 import { getDb } from "../db.js";
 import { Prisma } from "@prisma/client";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
-import { caseInsensitive } from "../db-backend.js";
+import { caseInsensitive, deserializeArray, detectBackend, serializeArray } from "../db-backend.js";
 import { embed, isOllamaAvailable, chunkText } from "../embeddings.js";
 import { upsertPrimerEmbedding, searchPrimersByVector, countUnembedded } from "../repositories/embeddings.js";
 import { ftsSearchPrimers } from "../search-adapter.js";
@@ -63,6 +63,22 @@ function validatePrimerUrl(url: string): void {
 
 /** Exported for use in setup wizard. */
 export { DEFAULT_PRIMER_HOSTS };
+
+function normalizePrimerTags<T extends { tags: unknown }>(primer: T): Omit<T, "tags"> & { tags: string[] } {
+    return { ...primer, tags: deserializeArray<string>(primer.tags) };
+}
+
+function serializePrimerTags(tags: string[]): Prisma.PrimerCreateInput["tags"] {
+    return serializeArray(tags) as Prisma.PrimerCreateInput["tags"];
+}
+
+function primerTagSearchFilters(query: string): Prisma.PrimerWhereInput[] {
+    if (detectBackend() !== "sqlite") {
+        return [{ tags: { has: query } } as Prisma.PrimerWhereInput];
+    }
+    const tagsContains = { contains: query, ...caseInsensitive() };
+    return [{ tags: tagsContains } as Prisma.PrimerWhereInput];
+}
 
 // ── Version resolution ────────────────────────────────────────────────────────
 const VERSIONS_CACHE = join(CACHE_ROOT, "mcmeta", "_latest", "summary", "versions", "data.json");
@@ -161,7 +177,7 @@ export async function ingestPrimer(entries: {
                 summary: e.summary,
                 url: e.url,
                 content,
-                tags: e.tags ?? [],
+                tags: serializePrimerTags(e.tags ?? []),
                 source: e.source ?? "manual",
             },
             update: {
@@ -174,7 +190,7 @@ export async function ingestPrimer(entries: {
                 summary: e.summary,
                 url: e.url,
                 content: content ?? undefined,
-                tags: e.tags ?? [],
+                tags: serializePrimerTags(e.tags ?? []),
             },
         });
         results.push({ id: primer.id, title: primer.title, fromVersion: primer.fromVersion, toVersion: primer.toVersion });
@@ -189,7 +205,7 @@ export async function getPrimer(id: number): Promise<object> {
     const db = await getDb();
     const primer = await db.primer.findUnique({ where: { id } });
     if (!primer) return { found: false, id };
-    return primer;
+    return normalizePrimerTags(primer);
 }
 
 /**
@@ -253,7 +269,7 @@ export async function getPrimersByVersionRange(
     return {
         queryRange: { fromVersion, toVersion, fromDataVersion: fromDV, toDataVersion: toDV },
         count: primers.length,
-        primers,
+        primers: primers.map(normalizePrimerTags),
     };
 }
 
@@ -287,7 +303,7 @@ export async function searchPrimers(
                         { title: { contains: query, ...caseInsensitive() } },
                         { summary: { contains: query, ...caseInsensitive() } },
                         { content: { contains: query, ...caseInsensitive() } },
-                        { tags: { has: query } },
+                        ...primerTagSearchFilters(query),
                     ],
                 },
                 ...(modloader ? [{ modloader }] : []),
@@ -308,7 +324,7 @@ export async function searchPrimers(
         },
     });
 
-    return { query, count: primers.length, primers };
+    return { query, count: primers.length, primers: primers.map(normalizePrimerTags) };
 }
 
 /** List all primers with optional filters. */
@@ -331,7 +347,7 @@ export async function listPrimers(
             tags: true,
         },
     });
-    return { count: primers.length, primers };
+    return { count: primers.length, primers: primers.map(normalizePrimerTags) };
 }
 
 /** Delete a primer by ID. */
@@ -471,7 +487,11 @@ export async function semanticSearchPrimers(query: string, limit = 10): Promise<
         select: { id: true, fromVersion: true, toVersion: true, modloader: true, title: true, summary: true, url: true, tags: true },
     });
     const byId = Object.fromEntries(primers.map(p => [p.id, p]));
-    const results = rows.map(r => ({ similarity: Math.round(r.similarity * 1000) / 1000, ...byId[r.id] }));
+    const results = rows.map(r => {
+        const primer = byId[r.id];
+        const similarity = Math.round(r.similarity * 1000) / 1000;
+        return primer ? { similarity, ...normalizePrimerTags(primer) } : { similarity, id: r.id };
+    });
     return { query, semantic: true, count: results.length, results };
 }
 

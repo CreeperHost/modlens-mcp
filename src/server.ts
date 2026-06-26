@@ -665,16 +665,16 @@ server.tool(
 
 server.tool(
     "mappings",
-    "Minecraft name mappings (official/intermediary/yarn/mojmap) and Parchment parameter docs. action=find|remap|parchment|list_parchment|parchment_summary.",
+    "Minecraft name mappings and Parchment parameter docs. action=find translates one symbol between namespaces; action=remap rewrites a mod JAR and requires inputJar/outputJar/toMapping; action=parchment|list_parchment|parchment_summary reads Parchment docs.",
     {
         action:    z.enum(["find","remap","parchment","list_parchment","parchment_summary"]),
-        symbol:    z.string().optional().describe("symbol to translate"),
+        symbol:    z.string().optional().describe("Symbol to translate; use with action=find, not action=remap"),
         version:   z.string().optional(),
-        sourceNs:  z.enum(["official","intermediary","yarn","mojmap","srg","mcp"]).optional().describe("Allowed: official, intermediary, yarn, mojmap, srg, mcp"),
-        targetNs:  z.enum(["official","intermediary","yarn","mojmap","srg","mcp"]).optional().describe("Allowed: official, intermediary, yarn, mojmap, srg, mcp"),
-        inputJar:  z.string().optional(),
-        outputJar: z.string().optional(),
-        toMapping: z.enum(["yarn","mojmap"]).optional(),
+        sourceNs:  z.enum(["official","intermediary","yarn","mojmap","srg","mcp"]).optional().describe("Source namespace for action=find. Allowed: official, intermediary, yarn, mojmap, srg, mcp"),
+        targetNs:  z.enum(["official","intermediary","yarn","mojmap","srg","mcp"]).optional().describe("Target namespace for action=find. Allowed: official, intermediary, yarn, mojmap, srg, mcp"),
+        inputJar:  z.string().optional().describe("Input mod JAR for action=remap"),
+        outputJar: z.string().optional().describe("Output mod JAR for action=remap"),
+        toMapping: z.enum(["yarn","mojmap"]).optional().describe("Target JAR mapping for action=remap"),
         className: z.string().optional(),
         mcVersion: z.string().optional(),
     },
@@ -683,8 +683,23 @@ server.tool(
         const mv = mcVersion ?? version;
         let result: unknown;
         switch (action) {
-            case "find":              result = await findMapping(symbol!, v!, sourceNs!, targetNs!); break;
-            case "remap":             result = await remapModJar(inputJar!, outputJar!, v!, toMapping!); break;
+            case "find": {
+                if (!symbol || !v || !sourceNs || !targetNs) {
+                    throw new Error("symbol, version/mcVersion, sourceNs, and targetNs are required for action=find");
+                }
+                result = await findMapping(symbol, v, sourceNs, targetNs);
+                break;
+            }
+            case "remap": {
+                if (symbol && v && sourceNs && targetNs) {
+                    throw new Error("action=remap is only for JAR remapping. Use action=find with symbol, version/mcVersion, sourceNs, and targetNs to translate a symbol.");
+                }
+                if (!inputJar || !outputJar || !v || !toMapping) {
+                    throw new Error("inputJar, outputJar, version/mcVersion, and toMapping are required for action=remap JAR remapping");
+                }
+                result = await remapModJar(inputJar, outputJar, v, toMapping);
+                break;
+            }
             case "parchment":         result = await getParchment(className!, mv!); break;
             case "list_parchment":    result = await listParchmentVersions(mv!); break;
             case "parchment_summary": result = await getParchmentSummary(mv!); break;
