@@ -15,13 +15,14 @@ async function getModJar(dbId: number): Promise<string> {
     return mod.jarPath;
 }
 
-export async function searchModClass(dbId: number, query: string): Promise<string[]> {
+export async function searchModClass(dbId: number, query?: string | null): Promise<string[]> {
     validateDbId(dbId);
+    const q = query?.trim() ?? "";
     const jarPath = await getModJar(dbId);
     const classes = listClasses(jarPath)
         .map((c) => c.replace(/\.class$/, ""))
-        .filter((c) => !c.includes("$") || query.includes("$")); // hide inner classes unless explicitly searched
-    return searchClasses(classes, query);
+        .filter((c) => !c.includes("$") || q.includes("$")); // hide inner classes unless explicitly searched
+    return searchClasses(classes, q);
 }
 
 export async function getModClassMembers(dbId: number, className: string) {

@@ -180,21 +180,38 @@ export async function downloadNeoForge(version: string): Promise<string> {
     return downloadJar(url, destPath);
 }
 
+export function resolveForgeArtifactVersions(version: string, mcVersion?: string): string[] {
+    let fullVersion = version;
+    if (!version.includes("-")) {
+        if (!mcVersion) throw new Error("Forge download requires either full version (e.g. 1.20.1-47.3.22) or version + mcVersion");
+        fullVersion = `${mcVersion}-${version}`;
+    }
+
+    const candidates = [fullVersion];
+    if (mcVersion && !fullVersion.endsWith(`-${mcVersion}`)) {
+        candidates.push(`${fullVersion}-${mcVersion}`);
+    }
+    return candidates;
+}
+
 /**
  * Download the Forge universal JAR for a given version.
  * Version format: "1.20.1-47.3.22" (full artifact version) or just "47.3.22" with mcVersion.
  * Returns the local JAR path.
  */
 export async function downloadForge(version: string, mcVersion?: string): Promise<string> {
-    let fullVersion = version;
-    // If user only provided the Forge build number (no dash), we need mcVersion to construct the full version
-    if (!version.includes("-")) {
-        if (!mcVersion) throw new Error("Forge download requires either full version (e.g. 1.20.1-47.3.22) or version + mcVersion");
-        fullVersion = `${mcVersion}-${version}`;
+    const errors: string[] = [];
+    for (const artifactVersion of resolveForgeArtifactVersions(version, mcVersion)) {
+        const destPath = join(CACHE_ROOT, "loaders", "forge", `forge-${artifactVersion}-universal.jar`);
+        const url = `${FORGE_MAVEN}/${artifactVersion}/forge-${artifactVersion}-universal.jar`;
+        try {
+            return await downloadJar(url, destPath);
+        } catch (e) {
+            errors.push(e instanceof Error ? e.message : String(e));
+        }
     }
-    const destPath = join(CACHE_ROOT, "loaders", "forge", `forge-${fullVersion}-universal.jar`);
-    const url = `${FORGE_MAVEN}/${fullVersion}/forge-${fullVersion}-universal.jar`;
-    return downloadJar(url, destPath);
+
+    throw new Error(errors.join("; "));
 }
 
 /**

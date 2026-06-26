@@ -96,8 +96,9 @@ function topSimilar(query: string, candidates: string[], n = 5): string[] {
 // ── Exported tool implementations ────────────────────────────────────────────
 
 /** search_minecraft_class */
-export async function searchMinecraftClass(version: string, query: string): Promise<string[]> {
-    const jarPath = await getMcJarPath(version);
+export async function searchMinecraftClass(version: string, query?: string | null): Promise<string[]> {
+    const rawJarPath = await getMcJarPath(version);
+    const { jarPath } = await resolveMcDecompileJar(version, rawJarPath);
     const classes = listClasses(jarPath).map((c) => c.replace(/\.class$/, ""));
     return searchClasses(classes, query);
 }
@@ -149,7 +150,8 @@ export async function getMinecraftSource(
 export async function getMcClassBytecode(version: string, className: string): Promise<string> {
     validateVersion(version);
     validateClassName(className);
-    const jarPath = await getMcJarPath(version);
+    const rawJarPath = await getMcJarPath(version);
+    const { jarPath } = await resolveMcDecompileJar(version, rawJarPath);
     return getBytecode(jarPath, className.replace(/\./g, "/"));
 }
 
@@ -157,7 +159,8 @@ export async function getMcClassBytecode(version: string, className: string): Pr
 export async function getMcClassMembers(version: string, className: string) {
     validateVersion(version);
     validateClassName(className);
-    const jarPath = await getMcJarPath(version);
+    const rawJarPath = await getMcJarPath(version);
+    const { jarPath } = await resolveMcDecompileJar(version, rawJarPath);
     const info = await inspectClass(jarPath, className.replace(/\./g, "/"));
     return formatClassMembers(info);
 }
@@ -631,35 +634,36 @@ export async function analyzeMixin(source: string, mcVersion: string) {
  * Returns class names + file paths for all classes that extend a known Event base.
  *
  * query: optional name filter, e.g. "Living", "Player", "Block"
- * modloader: "neoforge" searches NeoForge-specific events (needs NeoForge ingested + decompiled)
+ * modloader: "forge"/"neoforge" searches loader-specific events (needs loader ingested + decompiled)
  *            "minecraft" (default) searches vanilla source for event-like classes
  */
 export async function searchEvents(
     version: string,
     query?: string,
-    modloader: "minecraft" | "neoforge" | "fabric" | "fabric-api" = "minecraft",
+    modloader: "minecraft" | "neoforge" | "forge" | "fabric" | "fabric-api" = "minecraft",
 ): Promise<object> {
     // ── NeoForge / Fabric: search the ingested loader mod's decompiled source ─
     const isFabric = modloader === "fabric" || modloader === "fabric-api";
-    if (modloader === "neoforge" || isFabric) {
+    if (modloader === "neoforge" || modloader === "forge" || isFabric) {
         // Fabric API may be ingested under modId "fabric-api" or "fabric"; try both
-        const candidateIds = isFabric ? ["fabric-api", "fabric"] : ["neoforge"];
+        const candidateIds = isFabric ? ["fabric-api", "fabric"] : [modloader];
         let mod = null;
         for (const id of candidateIds) {
             mod = await findModByModIdLike(id);
             if (mod) break;
         }
         if (!mod) {
+            const loaderName = modloader === "neoforge" ? "NeoForge" : modloader === "forge" ? "Forge" : "Fabric API";
             throw new Error(
-                `${modloader === "neoforge" ? "NeoForge" : "Fabric API"} has not been ingested. ` +
-                `Run mc_versions ingest_${modloader === "neoforge" ? "neoforge" : "fabric"} first.`
+                `${loaderName} has not been ingested. ` +
+                `Run mc_versions ingest_${isFabric ? "fabric" : modloader} first.`
             );
         }
 
         // Pattern differs per loader:
-        //   NeoForge: classes extending Event (class-based event bus)
+        //   Forge/NeoForge: classes extending Event (class-based event bus)
         //   Fabric:   static Event<T> field declarations (callback-based)
-        const searchPattern = modloader === "neoforge"
+        const searchPattern = !isFabric
             ? (query ? `class\\s+\\w*${query}\\w*\\s+extends\\s+[\\w.]*Event\\b` : `extends\\s+[\\w.]*Event\\b`)
             : (query ? `Event<.*${query}` : `public\\s+static\\s+final\\s+Event<`);
 
@@ -690,8 +694,8 @@ export async function searchEvents(
             }
         }
 
-        const note = modloader === "neoforge"
-            ? "extends net.neoforged.bus.api.Event"
+        const note = !isFabric
+            ? `extends ${modloader === "forge" ? "net.minecraftforge.fml.common.eventhandler.Event / net.minecraftforge.event.*" : "net.neoforged.bus.api.Event"}`
             : "public static final Event<T> (Fabric callback pattern)";
         return {
             version,

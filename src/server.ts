@@ -366,7 +366,7 @@ server.tool(
         let result: unknown;
         const autoCache = !!(process.env.AUTO_CACHE_MOD_DIFFS);
         switch (action) {
-            case "search_class":     result = await searchModClass(dbId!, query!); break;
+            case "search_class":     result = await searchModClass(dbId!, query ?? className); break;
             case "class_members":    result = await getModClassMembers(dbId!, className!); break;
             case "bytecode":         result = await getModClassBytecode(dbId!, className!); break;
             case "find_refs":        result = await findModReferences(dbId!, target!); break;
@@ -627,7 +627,7 @@ server.tool(
         const v = version ?? mcVersion;
         let result: unknown;
         switch (action) {
-            case "search_class":    result = await searchMinecraftClass(v!, query!); break;
+            case "search_class":    result = await searchMinecraftClass(v!, query ?? className); break;
             case "get_source":      result = await getMinecraftSource(v!, className!, startLine, endLine, maxLines); break;
             case "bytecode":        result = await getMcClassBytecode(v!, className!); break;
             case "class_members":   result = await getMcClassMembers(v!, className!); break;

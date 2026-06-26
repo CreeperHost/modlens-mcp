@@ -2,8 +2,8 @@
  * Class name search — CamelCase acronym, prefix, and substring matching.
  * Ported from the mcsrc web app search algorithm.
  */
-export function searchClasses(classes: string[], query: string): string[] {
-    const q = query.trim();
+export function searchClasses(classes: string[], query?: string | null): string[] {
+    const q = query?.trim() ?? "";
     if (!q) return [];
 
     const simpleNames = classes.map((c) => {
