@@ -80,7 +80,7 @@ import {
 import { generateReport } from "./tools/reports.js";
 import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog, findDataConflicts, buildPackGraph, diffPackConfigs, packHealth } from "./tools/packtools.js";
 import { indexKubeJsScripts, searchKubeJsScripts, semanticSearchKubeJsScripts } from "./tools/kubejs.js";
-import { searchPacksAction, featuredPacksAction, packInfoAction, packManifestAction, syncPackModsAction, searchFtbModsAction, ftbModInfoAction, downloadModAction, downloadOverridesAction, listPackVersionsAction, listPackFilesAction, findModInPacksAction } from "./tools/modpacks-ch.js";
+import { searchPacksAction, featuredPacksAction, packInfoAction, packManifestAction, syncPackModsAction, resolvePackAction, listRemotePackVersionsAction, ingestPackAction, searchFtbModsAction, ftbModInfoAction, downloadModAction, downloadOverridesAction, listPackVersionsAction, listPackFilesAction, findModInPacksAction } from "./tools/modpacks-ch.js";
 import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
 import { checkModCompat } from "./tools/compat-check.js";
 import { disconnect } from "./db.js";
@@ -458,15 +458,18 @@ server.tool(
 
 server.tool(
     "modpacks_ch",
-    "Search and sync modpacks from the modpacks.ch API (a CreeperHost service) — covers FTB and CurseForge namespaces, no API key required. " +
-    "action=search|featured|info|manifest|sync_pack_mods|search_ftb_mods|ftb_mod_info|download_mod|download_overrides|list_pack_versions|list_pack_files|find_mod_in_packs. " +
-    "namespace=ftb|curseforge (default: ftb). " +
+    "Search, resolve, list versions for, and ingest arbitrary modpacks so other ModLens tools can analyze the exact pack contents. General workflow: when the user names a modpack and possibly a fuzzy version like 7.1, call action=list_versions with packRef/versionRef, choose the best matching version, then call action=ingest_pack before using analyze_crash_log, reports, pack_tools, dependency checks, mixin scans, source search, or other pack-aware analysis. Crash triage is one common use, not the only use. " +
+    "Backends: modpacks.ch API (CreeperHost service) for FTB/CurseForge, Modrinth API/.mrpack for Modrinth, and the official Feed The Beast API when namespace=feedthebeast. CurseForge via modpacks.ch requires no CurseForge API key. Modrinth packRef may be a slug/project ID, a modrinth.com modpack/version URL, an api.modrinth.com project/version URL, a cdn.modrinth.com .mrpack URL, or any direct HTTPS .mrpack URL. " +
+    "action=search|featured|info|manifest|resolve_pack|list_versions|ingest_pack|sync_pack_mods|search_ftb_mods|ftb_mod_info|download_mod|download_overrides|list_pack_versions|list_pack_files|find_mod_in_packs. " +
+    "namespace=ftb|curseforge|modrinth|feedthebeast (default: ftb). Use feedthebeast for api.feed-the-beast.com packs; use ftb for the modpacks.ch FTB namespace. resolve_pack/list_versions/ingest_pack accept packRef=name/slug/id and versionRef=version id/name/number/partial text. list_versions returns matches for fuzzy refs; list_pack_versions is DB-backed synced-pack history. " +
     "User-Agent is set per modpacks.ch (CreeperHost) team request for usage tracking.",
     {
-        action:           z.enum(["search", "featured", "info", "manifest", "sync_pack_mods", "search_ftb_mods", "ftb_mod_info", "download_mod", "download_overrides", "list_pack_versions", "list_pack_files", "find_mod_in_packs"]),
-        namespace:        z.enum(["ftb", "curseforge"]).optional().describe("ftb or curseforge (default: ftb)"),
-        packId:           z.number().optional().describe("Pack ID (required for info, manifest, sync_pack_mods, list_pack_files)"),
-        versionId:        z.number().optional().describe("Version ID (required for manifest, sync_pack_mods, list_pack_files)"),
+        action:           z.enum(["search", "featured", "info", "manifest", "resolve_pack", "list_versions", "ingest_pack", "sync_pack_mods", "search_ftb_mods", "ftb_mod_info", "download_mod", "download_overrides", "list_pack_versions", "list_pack_files", "find_mod_in_packs"]),
+        namespace:        z.enum(["ftb", "curseforge", "modrinth", "feedthebeast"]).optional().describe("ftb, curseforge, modrinth, or feedthebeast (default: ftb). feedthebeast uses api.feed-the-beast.com; ftb uses modpacks.ch."),
+        packId:           z.number().optional().describe("Numeric FTB/CurseForge pack ID or internal Modrinth pack key returned by resolve/list actions"),
+        versionId:        z.number().optional().describe("Numeric FTB/CurseForge version ID or internal Modrinth version key returned by resolve/list actions"),
+        packRef:          z.union([z.number(), z.string()]).optional().describe("Pack name, slug, Modrinth project ID, CurseForge pack ID, FTB/feedthebeast pack ID, Modrinth web/API/CDN URL, or direct HTTPS .mrpack URL. Use for resolve_pack/list_versions/ingest_pack."),
+        versionRef:       z.union([z.number(), z.string()]).optional().describe("Version ID, full version name, version number, or fuzzy partial text such as 7.1. Use list_versions first if ambiguous."),
         packVersionDbId:  z.number().optional().describe("Pack version DB id returned by sync_pack_mods (shortcut for list_pack_files)"),
         query:            z.string().optional().describe("Search query (required for search, search_ftb_mods)"),
         modId:            z.union([z.number(), z.string()]).optional().describe("FTB mod ID (required for ftb_mod_info, download_mod)"),
@@ -482,8 +485,9 @@ server.tool(
         skipServer:       z.boolean().optional().describe("Skip server-only files (default: false)"),
         skipOptional:     z.boolean().optional().describe("Skip optional files (default: false)"),
         concurrency:      z.number().optional().describe("Parallel downloads for sync_pack_mods (default: 3)"),
+        maxFiles:         z.number().optional().describe("Optional cap on files processed, useful for smoke tests"),
     },
-    safe(async ({ action, namespace, packId, versionId, packVersionDbId, query, modId, fileId, loader, mcVersionFilter, force, modDbId, cfProject, fileType, limit, fileTypes, skipServer, skipOptional, concurrency }) => {
+    safe(async ({ action, namespace, packId, versionId, packRef, versionRef, packVersionDbId, query, modId, fileId, loader, mcVersionFilter, force, modDbId, cfProject, fileType, limit, fileTypes, skipServer, skipOptional, concurrency, maxFiles }) => {
         const ns = namespace ?? "ftb";
         let result: unknown;
         switch (action) {
@@ -503,10 +507,20 @@ server.tool(
                 if (!versionId) throw new Error("versionId is required for action=manifest");
                 result = await packManifestAction(packId, versionId, ns);
                 break;
+            case "resolve_pack":
+                result = await resolvePackAction({ namespace: ns, packId, versionId, packRef, versionRef });
+                break;
+            case "list_versions":
+                result = await listRemotePackVersionsAction({ namespace: ns, packId, versionId, packRef, versionRef });
+                break;
+            case "ingest_pack":
+                result = await ingestPackAction({ namespace: ns, packId, versionId, packRef, versionRef, fileTypes, skipServer, skipOptional, concurrency, maxFiles });
+                break;
             case "sync_pack_mods":
                 if (!packId)    throw new Error("packId is required for action=sync_pack_mods");
                 if (!versionId) throw new Error("versionId is required for action=sync_pack_mods");
-                result = await syncPackModsAction({ packId, versionId, namespace: ns, fileTypes, skipServer, skipOptional, concurrency });
+                if (ns === "modrinth") throw new Error("Use action=ingest_pack for Modrinth packs");
+                result = await syncPackModsAction({ packId, versionId, namespace: ns, fileTypes, skipServer, skipOptional, concurrency, maxFiles });
                 break;
             case "search_ftb_mods":
                 if (!query) throw new Error("query is required for action=search_ftb_mods");

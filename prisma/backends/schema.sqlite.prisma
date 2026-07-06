@@ -49,6 +49,7 @@ model Mod {
   classes       ModClass[]
   modTags       ModTag[]
   sourceFiles   ModSourceFile[]
+  packFiles     PackFile[]
 
   @@unique([modId, version, mcVersion, loader])
   @@index([modId])
@@ -138,6 +139,47 @@ model ModTag {
   @@index([registry, tagPath])
   @@index([namespace])
   @@map("mod_tags")
+}
+
+model PackVersion {
+  id          Int      @id @default(autoincrement())
+  namespace   String
+  packId      Int      @map("pack_id")
+  versionId   Int      @map("version_id")
+  packName    String   @map("pack_name")
+  versionName String   @map("version_name")
+  mcVersion   String?  @map("mc_version")
+  modloader   String?
+  syncedAt    DateTime @default(now()) @map("synced_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  files       PackFile[]
+
+  @@unique([namespace, packId, versionId])
+  @@index([namespace, packId])
+  @@map("pack_versions")
+}
+
+model PackFile {
+  id             Int          @id @default(autoincrement())
+  packVersionId  Int          @map("pack_version_id")
+  packVersion    PackVersion  @relation(fields: [packVersionId], references: [id], onDelete: Cascade)
+  manifestFileId Int?         @map("manifest_file_id")
+  fileType       String       @map("file_type")
+  fileName       String       @map("file_name")
+  filePath       String?      @map("file_path")
+  cfProject      Int?         @map("cf_project")
+  cfFile         Int?         @map("cf_file")
+  sha1           String?
+  status         String       @default("not_synced")
+  modId          Int?         @map("mod_id")
+  mod            Mod?         @relation(fields: [modId], references: [id], onDelete: SetNull)
+
+  @@unique([packVersionId, manifestFileId])
+  @@index([packVersionId])
+  @@index([modId])
+  @@index([cfProject])
+  @@map("pack_files")
 }
 
 model McSourceFile {

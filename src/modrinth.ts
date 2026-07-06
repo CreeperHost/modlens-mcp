@@ -14,9 +14,19 @@ export interface ModrinthVersion {
     project_id: string;
     name: string;
     version_number: string;
+    version_type?: string;
+    game_versions?: string[];
+    loaders?: string[];
     date_published: string;
     downloads: number;
-    files: Array<{ url: string; filename: string; primary: boolean; hashes: { sha512: string; }; }>;
+    files: Array<{
+        url: string;
+        filename: string;
+        primary: boolean;
+        size?: number;
+        file_type?: string | null;
+        hashes: { sha512: string; sha1?: string; };
+    }>;
 }
 
 export interface ModrinthProject {
@@ -24,6 +34,7 @@ export interface ModrinthProject {
     slug: string;
     title: string;
     description: string;
+    project_type?: string;
     source_url: string | null;
     issues_url: string | null;
 }
@@ -108,9 +119,37 @@ export async function getProjectVersions(
     const params = new URLSearchParams();
     if (opts.loader)    params.set("loaders", JSON.stringify([opts.loader]));
     if (opts.mcVersion) params.set("game_versions", JSON.stringify([opts.mcVersion]));
+    params.set("include_changelog", "false");
     const res = await fetchWithRetry(`${MODRINTH_BASE}/project/${projectId}/version?${params}`, { headers });
     if (!res.ok) return [];
     return safeJson<ModrinthVersion[]>(res, "Modrinth project versions");
+}
+
+export async function getProjectVersion(
+    projectId: string,
+    versionRef: string,
+): Promise<ModrinthVersion | null> {
+    const res = await fetchWithRetry(
+        `${MODRINTH_BASE}/project/${projectId}/version/${encodeURIComponent(versionRef)}`,
+        { headers },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Modrinth version fetch failed: ${res.status}`);
+    return safeJson<ModrinthVersion>(res, "Modrinth project version");
+}
+
+export async function getVersion(versionId: string): Promise<ModrinthVersion | null> {
+    const res = await fetchWithRetry(
+        `${MODRINTH_BASE}/version/${encodeURIComponent(versionId)}`,
+        { headers },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Modrinth version fetch failed: ${res.status}`);
+    return safeJson<ModrinthVersion>(res, "Modrinth version");
+}
+
+export function getPrimaryFile(version: ModrinthVersion): ModrinthVersion["files"][number] | null {
+    return version.files.find((f) => f.primary) ?? version.files[0] ?? null;
 }
 
 export const modrinthPlatformAdapter: PlatformAdapter = {
