@@ -454,6 +454,9 @@ Run without arguments (or `--help`) to print the full command list. Every MCP to
 | `modpacks featured` | Featured packs |
 | `modpacks info <packId>` | Pack metadata |
 | `modpacks manifest <packId> <verId>` | Pack manifest |
+| MCP `modpacks_ch action=resolve_pack` | Resolve FTB/CurseForge/Modrinth/Feed The Beast pack names, IDs, version IDs, or version names |
+| MCP `modpacks_ch action=list_versions` | List remote pack versions and optionally mark matches for a short `versionRef` like `7.1` |
+| MCP `modpacks_ch action=ingest_pack` | Download and ingest a resolved pack version from modpacks.ch, Modrinth, or the official Feed The Beast API |
 | `modpacks list-versions` | Pack version list |
 | `modpacks list-files` | Pack file list |
 | `modpacks ftb-mod-info <modId>` | FTB mod info |
@@ -505,7 +508,7 @@ All tool actions have been consolidated into **24 grouped tools** to stay within
 | 18 | `reports` | 10 report types | Markdown report generation |
 | 19 | `pack_tools` | 7 | Modpack asset/data conflict analysis |
 | 20 | `kubejs` | 2 | KubeJS script indexing + search |
-| 21 | `modpacks_ch` | 12 | modpacks.ch / FTB / CurseForge pack browsing |
+| 21 | `modpacks_ch` | 15 | modpacks.ch / FTB / CurseForge / Modrinth / Feed The Beast pack browsing and ingest |
 | 22 | `analyze_crash_log` | — | Triage crash logs against mod class index |
 | 23 | `find_missing_deps` | — | Find mods with missing declared dependencies |
 | 24 | `check_mod_compat` | — | Pre-flight compatibility check for a candidate JAR |
@@ -816,7 +819,28 @@ Runs a candidate JAR through 5 checks without requiring it to be ingested first:
 ### Ingest a modpack
 
 ```bash
-# 1. Ingest all mods (--replace keeps DB in sync if re-running after updates)
+# Remote MCP one-shot from modpacks.ch using CurseForge pack ID and latest/resolved version name:
+modpacks_ch  action=ingest_pack  namespace=curseforge  packRef=925200  versionRef=4.8
+
+# Or resolve names first, then ingest the returned packId/versionId:
+modpacks_ch  action=resolve_pack  namespace=curseforge  packRef="All the Mods 10"  versionRef=4.8
+modpacks_ch  action=ingest_pack    namespace=curseforge  packId=<resolved packId>  versionId=<resolved versionId>
+
+# For fuzzy user input like "7.1", list versions first and use the matching row:
+modpacks_ch  action=list_versions  namespace=curseforge  packRef="All the Mods 10"  versionRef=7.1
+
+# Modrinth packs use the same flow with a slug, project ID, name, version ID, version number,
+# modrinth.com URL, api.modrinth.com URL, CDN .mrpack URL, or direct HTTPS .mrpack URL:
+modpacks_ch  action=list_versions  namespace=modrinth  packRef=<slug-or-project-id-or-name>  versionRef=<version-number>
+modpacks_ch  action=ingest_pack  namespace=modrinth  packRef=<slug-or-project-id-or-name>  versionRef=<version-id-or-version-number>
+modpacks_ch  action=ingest_pack  namespace=modrinth  packRef="https://modrinth.com/modpack/fabulously-optimized"  versionRef=6.4.0
+
+# Official Feed The Beast API packs use namespace=feedthebeast.
+# Use namespace=ftb for the modpacks.ch FTB namespace; use feedthebeast for api.feed-the-beast.com.
+modpacks_ch  action=list_versions  namespace=feedthebeast  packRef="Architect's"  versionRef=1.1
+modpacks_ch  action=ingest_pack  namespace=feedthebeast  packRef="Architect's"  versionRef=1.1
+
+# Existing local-folder fallback if you already have a mods/ directory:
 node dist/cli.js batch-ingest /path/to/mods --index --replace
 
 # 2. Resolve mixin targets (enables conflict detection)
@@ -851,6 +875,11 @@ check_mod_compat  jarPath=/path/to/newmod-1.0.jar  loader=neoforge  mcVersion=1.
 ### Triage a crash log
 
 ```bash
+# If the pack is not already in ModLens, ingest it first so class/mod lookups
+# are grounded in the exact modpack version:
+modpacks_ch  action=list_versions  namespace=curseforge  packRef="All the Mods 10"  versionRef=7.1
+modpacks_ch  action=ingest_pack    namespace=curseforge  packRef="All the Mods 10"  versionRef=7.1
+
 # via MCP — paste the crash report, get ranked suspect mods
 analyze_crash_log  logText="<paste full crash log here>"
 ```
@@ -913,6 +942,7 @@ node dist/cli.js check-updates 2
 
 ### Services & APIs
 - **[CreeperHost](https://www.creeperhost.net)** — for the free [modpacks.ch](https://www.modpacks.ch) public API powering modpack search, sync, and mod downloads.
+- **[Feed The Beast](https://www.feed-the-beast.com)** — for the public Feed The Beast modpack API powering official FTB pack lookup and ingest.
 - **[Modrinth](https://modrinth.com)** — for the free [Modrinth API](https://docs.modrinth.com) powering mod search, metadata lookup, and version sync.
 - **[CurseForge](https://www.curseforge.com)** — for the [CurseForge API](https://docs.curseforge.com) powering mod and modpack browsing and sync.
 - **[misode](https://github.com/misode)** — for [mcmeta](https://github.com/misode/mcmeta), the version-controlled Minecraft data repository that powers the `mc_data`, `mc_files`, and `mc_registry` tools.
