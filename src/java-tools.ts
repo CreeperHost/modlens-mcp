@@ -26,8 +26,7 @@ const INDEXER_URL =
 // Fallback: local copy alongside this package (present in dev checkout)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BUNDLED_INDEXER = join(__dirname, "..", "tools", "mcsrc-indexer.jar");
-const PKG_ROOT = join(__dirname, "..");
-const LOCAL_JDK_ROOT = join(PKG_ROOT, ".jdk");
+const LOCAL_JDK_ROOT = join(CACHE_ROOT, "jdk");
 
 export interface ClassInfo {
     name: string;

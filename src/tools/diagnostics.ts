@@ -11,6 +11,7 @@ import { findModClassesByClassNames, listAllMods } from "../repositories/mod.js"
 import { searchMods, getModsBatch, type FtbMod, type FtbModVersion } from "../modpacks-ch.js";
 import { downloadModAction } from "./modpacks-ch.js";
 import { reindexClasses } from "./ingest.js";
+import { translateSymbol, type MappingNs } from "../mappings.js";
 
 // Loader-level pseudo-deps that are never in the mod DB
 const SKIP_DEP_IDS = new Set([
@@ -34,6 +35,13 @@ type ParsedFrame = {
     source: FrameSource;
     modId?: string;
     jar?: string;
+    location?: string;
+    line?: number;
+    mappedClass?: string;
+    mappedMethod?: string;
+    mappedNamespace?: MappingNs;
+    mappedOwner?: "minecraft";
+    mappingNote?: string;
 };
 
 type Candidate = {
@@ -69,9 +77,10 @@ type PopulateAttempt = {
 
 export async function analyzeCrashLog(logText: string): Promise<object> {
     const frames = parseFrames(logText);
+    const facts = parseCrashFacts(logText);
+    await enrichMappedFrames(frames, facts);
     const rawFrames = frames.map((f) => f.className);
     const uniqueClasses = [...new Set(rawFrames)];
-    const facts = parseCrashFacts(logText);
     const modsInLogSection = parseModsInLogSection(logText);
 
     let lookup = await lookupModClasses(uniqueClasses);
@@ -88,6 +97,7 @@ export async function analyzeCrashLog(logText: string): Promise<object> {
     }
 
     const recognized = frames.filter((f) => rows.some((r) => r.className === f.className)).length;
+    const mappedVanilla = frames.filter((f) => f.mappedOwner === "minecraft").length;
     const suspects = candidates.slice(0, MAX_SUSPECTS).map((s) => ({
         modId: s.modId,
         display: s.display ?? s.modId,
@@ -99,7 +109,7 @@ export async function analyzeCrashLog(logText: string): Promise<object> {
         reasons: s.reasons.slice(0, 4),
     }));
 
-    const unrecognized = rawFrames.length - recognized;
+    const unrecognized = rawFrames.length - recognized - mappedVanilla;
     const coverageWarning =
         rawFrames.length >= 5 && unrecognized / rawFrames.length > 0.5
             ? `${unrecognized}/${rawFrames.length} stack frames could not be matched to ingested mods. Fallback crash signals were used; ingest the missing jars to improve coverage.`
@@ -110,6 +120,7 @@ export async function analyzeCrashLog(logText: string): Promise<object> {
         fallbackSuspects: suspects.filter((s) => s.dbId === null),
         crashFacts: facts,
         frames: frames.slice(0, 50),
+        mappedFrames: frames.filter((f) => f.mappedOwner).slice(0, 50),
         modsInLogSection,
         totalFrames: rawFrames.length,
         recognizedFrames: recognized,
@@ -141,6 +152,8 @@ function parseFrames(logText: string): ParsedFrame[] {
                 raw: line.trim(),
                 source: "module",
                 modId: cleanModId(m[1]),
+                location: m[4],
+                line: parseSourceLine(m[4]),
                 jar: extractJar(line),
             });
             continue;
@@ -152,12 +165,58 @@ function parseFrames(logText: string): ParsedFrame[] {
                 method: m[2],
                 raw: line.trim(),
                 source: "plain",
+                location: m[3],
+                line: parseSourceLine(m[3]),
                 modId: undefined,
                 jar: extractJar(line),
             });
         }
     }
     return frames;
+}
+
+async function enrichMappedFrames(frames: ParsedFrame[], facts: CrashFacts): Promise<void> {
+    if (!facts.minecraftVersion) return;
+    const classCache = new Map<string, Awaited<ReturnType<typeof translateSymbol>>>();
+    const classNamespaceCache = new Map<string, MappingNs>();
+    const methodCache = new Map<string, Awaited<ReturnType<typeof translateSymbol>>>();
+
+    for (const frame of frames) {
+        if (!isObfuscatedVanillaFrame(frame)) continue;
+        let mapped = classCache.get(frame.className);
+        let mappedNamespace = classNamespaceCache.get(frame.className) ?? "mcp";
+        if (!mapped) {
+            mapped = await translateSymbol(frame.className, "official", "mcp", facts.minecraftVersion);
+            if (!mapped.found) {
+                mapped = await translateSymbol(frame.className, "official", "srg", facts.minecraftVersion);
+                mappedNamespace = "srg";
+            }
+            classCache.set(frame.className, mapped);
+            classNamespaceCache.set(frame.className, mappedNamespace);
+        }
+        if (!mapped.found || !mapped.target) continue;
+
+        frame.mappedClass = normalizeClassName(mapped.target);
+        frame.mappedNamespace = mappedNamespace;
+        frame.mappedOwner = "minecraft";
+        if (mapped.note) frame.mappingNote = mapped.note;
+
+        const methodKey = `${frame.className}/${frame.method}`;
+        let mappedMethod = methodCache.get(methodKey);
+        if (!mappedMethod) {
+            mappedMethod = await translateSymbol(methodKey, "official", "mcp", facts.minecraftVersion);
+            if (!mappedMethod.found) mappedMethod = await translateSymbol(methodKey, "official", "srg", facts.minecraftVersion);
+            methodCache.set(methodKey, mappedMethod);
+        }
+        if (mappedMethod.found && mappedMethod.target) frame.mappedMethod = mappedMethod.target.split("/").pop();
+    }
+}
+
+function isObfuscatedVanillaFrame(frame: ParsedFrame): boolean {
+    if (frame.source !== "plain" || frame.jar || frame.modId) return false;
+    if (frame.className.includes("/") || frame.className.includes(".")) return false;
+    if (!/^[a-z]{1,4}$/i.test(frame.className)) return false;
+    return !frame.location || /^SourceFile(?::\d+)?$/i.test(frame.location);
 }
 
 function parseCrashFacts(logText: string): CrashFacts {
@@ -271,6 +330,7 @@ function buildCandidates(
     };
 
     for (const frame of frames) {
+        if (frame.mappedOwner === "minecraft") continue;
         const row = byClass.get(frame.className);
         if (row) {
             add(row.mod.modId, "class matched ingested mod", frame, row.mod.displayName, row.modId, "indexed");
@@ -390,6 +450,11 @@ function scoreCandidate(c: Candidate): number {
     return score;
 }
 
+function parseSourceLine(location: string | undefined): number | undefined {
+    const match = location?.match(/:(\d+)\)?$/);
+    return match ? Number(match[1]) : undefined;
+}
+
 function extractJar(line: string): string | undefined {
     const match = line.match(/\[([^\]\r\n]*?\.jar)(?:[!%\]\s:/?].*)?\]/i);
     if (!match) return undefined;
@@ -409,7 +474,7 @@ function stripJarVersion(jar: string): string {
 function modIdFromClass(className: string): string | undefined {
     const parts = className.split("/").map(cleanModId).filter(Boolean);
     if (parts.length === 0) return undefined;
-    if (["net/minecraft", "com/mojang", "org/spongepowered", "cpw/mods", "java/", "javax/"].some((p) => className.startsWith(p))) return undefined;
+    if (["net/minecraft", "com/mojang", "org/spongepowered", "cpw/mods", "java/", "javax/", "sun/", "com/sun/", "jdk/", "net/minecraft/launchwrapper", "magic/launcher"].some((p) => className.startsWith(p))) return undefined;
     if (["com", "org", "net", "io", "me", "dev"].includes(parts[0]) && parts[1]) return parts[1];
     if (["mcjty"].includes(parts[0]) && parts[1]) return parts[1];
     return parts[0];

@@ -345,6 +345,7 @@ interface McpNames {
 
 const srgCache = new Map<string, SrgIndex | null>();
 const mcpCache = new Map<string, McpNames | null>();
+const SRG_ONLY_VERSIONS = new Set(["1.7.2"]);
 
 function parseSrg(content: string): SrgIndex {
     const classes = new Map<string, string>();
@@ -905,7 +906,7 @@ function remapDescriptor(desc: string, classMap: Map<string, string>): string {
  * Versions that have SRG+MCP mappings available (legacy Forge era 1.7.10–1.15).
  */
 export function hasSrgMappings(version: string): boolean {
-    return version in MCP_CHANNELS;
+    return version in MCP_CHANNELS || SRG_ONLY_VERSIONS.has(version);
 }
 
 // ── RetroMCP (pre-1.7.10 Tiny v2 mappings from MCPHackers) ──────────────────
