@@ -25,6 +25,7 @@ const SKIP_DEP_IDS = new Set([
 
 const MAX_SUSPECTS = 10;
 const MAX_POPULATE_ATTEMPTS = 3;
+const OBFUSCATED_WORD_STOPLIST = new Set(["a", "an", "as", "at", "be", "by", "can", "cast", "for", "if", "in", "is", "it", "new", "not", "of", "on", "or", "the", "to"]);
 
 type FrameSource = "module" | "plain";
 
@@ -62,6 +63,9 @@ type CrashFacts = {
     modLoadingIssues: Array<{ modId: string; modFile?: string; failure?: string; exception?: string }>;
     missingDependencies: Array<{ requiredBy?: string; depModId: string; version?: string }>;
     tickContext: Record<string, string>;
+    mappedException?: string;
+    mappedCausedBy?: string[];
+    mappedExceptionClasses?: Array<{ raw: string; mappedClass: string; namespace: MappingNs }>;
     minecraftVersion?: string;
     loader?: string;
 };
@@ -78,6 +82,7 @@ type PopulateAttempt = {
 export async function analyzeCrashLog(logText: string): Promise<object> {
     const frames = parseFrames(logText);
     const facts = parseCrashFacts(logText);
+    await enrichMappedCrashFacts(facts);
     await enrichMappedFrames(frames, facts);
     const rawFrames = frames.map((f) => f.className);
     const uniqueClasses = [...new Set(rawFrames)];
@@ -217,6 +222,40 @@ function isObfuscatedVanillaFrame(frame: ParsedFrame): boolean {
     if (frame.className.includes("/") || frame.className.includes(".")) return false;
     if (!/^[a-z]{1,4}$/i.test(frame.className)) return false;
     return !frame.location || /^SourceFile(?::\d+)?$/i.test(frame.location);
+}
+
+async function enrichMappedCrashFacts(facts: CrashFacts): Promise<void> {
+    if (!facts.minecraftVersion) return;
+    const mappedExceptionClasses: Array<{ raw: string; mappedClass: string; namespace: MappingNs }> = [];
+    const classCache = new Map<string, { mappedClass: string; namespace: MappingNs } | null>();
+
+    const mapText = async (text: string): Promise<string> => {
+        let mappedText = text;
+        const names = [...new Set([...text.matchAll(/\b[a-z]{1,4}\b/g)].map((m) => m[0]).filter((name) => !OBFUSCATED_WORD_STOPLIST.has(name.toLowerCase())))];
+        for (const name of names) {
+            let mapped = classCache.get(name);
+            if (mapped === undefined) {
+                let result = await translateSymbol(name, "official", "mcp", facts.minecraftVersion!);
+                let namespace: MappingNs = "mcp";
+                if (!result.found) {
+                    result = await translateSymbol(name, "official", "srg", facts.minecraftVersion!);
+                    namespace = "srg";
+                }
+                mapped = result.found && result.target && normalizeClassName(result.target).startsWith("net/minecraft/")
+                    ? { mappedClass: normalizeClassName(result.target), namespace }
+                    : null;
+                classCache.set(name, mapped);
+            }
+            if (!mapped) continue;
+            if (!mappedExceptionClasses.some((entry) => entry.raw === name)) mappedExceptionClasses.push({ raw: name, mappedClass: mapped.mappedClass, namespace: mapped.namespace });
+            mappedText = mappedText.replace(new RegExp(`\\b${escapeRegExp(name)}\\b`, "g"), simpleClassName(mapped.mappedClass));
+        }
+        return mappedText;
+    };
+
+    if (facts.exception) facts.mappedException = await mapText(facts.exception);
+    if (facts.causedBy.length > 0) facts.mappedCausedBy = await Promise.all(facts.causedBy.map(mapText));
+    if (mappedExceptionClasses.length > 0) facts.mappedExceptionClasses = mappedExceptionClasses;
 }
 
 function parseCrashFacts(logText: string): CrashFacts {
@@ -482,6 +521,10 @@ function modIdFromClass(className: string): string | undefined {
 
 function normalizeClassName(value: string): string {
     return value.replace(/\./g, "/");
+}
+
+function simpleClassName(value: string): string {
+    return value.replace(/[\\/]/g, ".").split(".").pop() ?? value;
 }
 
 function cleanModId(value: string | undefined): string {
