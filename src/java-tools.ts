@@ -26,6 +26,8 @@ const INDEXER_URL =
 // Fallback: local copy alongside this package (present in dev checkout)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BUNDLED_INDEXER = join(__dirname, "..", "tools", "mcsrc-indexer.jar");
+const PKG_ROOT = join(__dirname, "..");
+const LOCAL_JDK_ROOT = join(PKG_ROOT, ".jdk");
 
 export interface ClassInfo {
     name: string;
@@ -56,8 +58,73 @@ function runProcess(cmd: string, args: string[], opts?: { cwd?: string }): Promi
     });
 }
 
+async function findJavaInDir(base: string, exe: string): Promise<string | false> {
+    const { readdir } = await import("fs/promises");
+    const entries = await readdir(base, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+        const p = join(base, entry.name);
+        if (entry.isDirectory()) {
+            if (entry.name === "bin") {
+                const java = join(p, exe);
+                if (await exists(java)) return java;
+            }
+            const found = await findJavaInDir(p, exe);
+            if (found) return found;
+        }
+    }
+    return false;
+}
+
+function adoptiumPlatform(): string {
+    if (process.platform === "win32") return "windows";
+    if (process.platform === "darwin") return "mac";
+    return "linux";
+}
+
+function adoptiumArch(): string {
+    if (process.arch === "arm64") return "aarch64";
+    return "x64";
+}
+
+async function ensureAdoptiumJdk(major = 21): Promise<string> {
+    const exe = process.platform === "win32" ? "java.exe" : "java";
+    const target = join(LOCAL_JDK_ROOT, "jdk-" + major);
+    const cached = await findJavaInDir(target, exe);
+    if (cached) return cached;
+
+    const { rm, mkdir, chmod } = await import("fs/promises");
+    await mkdir(target, { recursive: true });
+
+    const platform = adoptiumPlatform();
+    const archive = join(LOCAL_JDK_ROOT, "jdk-" + major + (process.platform === "win32" ? ".zip" : ".tar.gz"));
+    const url = "https://api.adoptium.net/v3/binary/latest/" + major + "/ga/" + platform + "/" + adoptiumArch() + "/jdk/hotspot/normal/eclipse?project=jdk";
+    console.error("[modlens] Downloading JDK " + major + " from Adoptium for decompiling/indexing...");
+    const res = await fetch(url);
+    if (!res.ok || !res.body) throw new Error("Failed to download JDK " + major + " from Adoptium: HTTP " + res.status);
+    await pipeline(res.body as unknown as NodeJS.ReadableStream, createWriteStream(archive));
+
+    await rm(target, { recursive: true, force: true });
+    await mkdir(target, { recursive: true });
+    if (process.platform === "win32") {
+        const AdmZip = (await import("adm-zip")).default;
+        new AdmZip(archive).extractAllTo(target, true);
+    } else {
+        await runProcess("tar", ["-xzf", archive, "-C", target]);
+    }
+
+    const java = await findJavaInDir(target, exe);
+    if (!java) throw new Error("Downloaded JDK " + major + " but could not find java executable in " + target);
+    if (process.platform !== "win32") await chmod(java, 0o755).catch(() => {});
+    console.error("[modlens] Cached JDK " + major + " at " + target);
+    return java;
+}
+
 async function findJava(): Promise<string> {
     const exe = process.platform === "win32" ? "java.exe" : "java";
+
+    const bundled = await findJavaInDir(LOCAL_JDK_ROOT, exe);
+    if (bundled) return bundled;
+
     const searchDirs = [
         "C:/Program Files/Eclipse Adoptium",
         "C:/Program Files/Java",
@@ -90,7 +157,12 @@ async function findJava(): Promise<string> {
         if (await exists(p)) return p;
     }
 
-    return exe; // fall back to PATH
+    try {
+        return await ensureAdoptiumJdk(21);
+    } catch (err) {
+        console.error("[modlens] Failed to provision JDK 21, falling back to PATH java: " + String(err));
+        return exe;
+    }
 }
 
 async function runJava(args: string[]): Promise<string> {

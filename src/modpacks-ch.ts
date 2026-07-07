@@ -10,6 +10,7 @@ import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 
 export const FTBAPI = "https://api.modpacks.ch/public";
+const CURSEFORGE_API_KEY = process.env.CURSEFORGE_API_KEY ?? "";
 
 /** User-Agent as requested by the modpacks.ch (CreeperHost) team for usage tracking. */
 export const USER_AGENT = "modlens-mcp/1.0 (github.com/CreeperHost/modlens-mcp)";
@@ -234,9 +235,9 @@ export async function getModsBatch(ids: (number | string)[]): Promise<FtbMod[]> 
  * the file ID using the same cfCdnUrl pattern as pack manifests.
  */
 export function resolveModVersionUrl(version: FtbModVersion): string | null {
-    if (version.url) return version.url;
+    if (version.url) return withCurseForgeApiKey(version.url);
     if (version.id)  return cfCdnUrl(version.id, version.name);
-    if (version.mirrors?.length) return version.mirrors[0];
+    if (version.mirrors?.length) return withCurseForgeApiKey(version.mirrors[0]);
     return null;
 }
 
@@ -288,7 +289,25 @@ export async function getCfPackManifest(packId: number, versionId: number): Prom
 export function cfCdnUrl(fileId: number, filename: string): string {
     const hi  = Math.floor(fileId / 1000);
     const lo  = fileId % 1000;
-    return `https://edge.forgecdn.net/files/${hi}/${lo}/${encodeURIComponent(filename)}`;
+    return withCurseForgeApiKey(`https://edge.forgecdn.net/files/${hi}/${lo}/${encodeURIComponent(filename)}`);
+}
+
+/**
+ * CurseForge CDN downloads require the API key as an apiKey query parameter.
+ * Keep non-CurseForge URLs untouched so Modrinth/FTB mirrors are not polluted.
+ */
+export function withCurseForgeApiKey(rawUrl: string): string {
+    if (!CURSEFORGE_API_KEY || !rawUrl) return rawUrl;
+    let url: URL;
+    try {
+        url = new URL(rawUrl);
+    } catch {
+        return rawUrl;
+    }
+    const host = url.hostname.toLowerCase();
+    if (!host.endsWith("forgecdn.net") && !host.endsWith("curseforge.com")) return rawUrl;
+    if (!url.searchParams.has("apiKey")) url.searchParams.set("apiKey", CURSEFORGE_API_KEY);
+    return url.toString();
 }
 
 /**
@@ -301,9 +320,9 @@ export function cfCdnUrl(fileId: number, filename: string): string {
  * returns null if there is genuinely no URL to construct).
  */
 export function resolveFileUrl(file: FtbManifestFile): string | null {
-    if (file.url) return file.url;
+    if (file.url) return withCurseForgeApiKey(file.url);
     if (file.curseforge) return cfCdnUrl(file.curseforge.file, file.name);
-    if (file.mirror)     return file.mirror;
+    if (file.mirror)     return withCurseForgeApiKey(file.mirror);
     // cf-extract overrides ZIPs use the version ID as their file ID
     if (file.type === "cf-extract" && file.id) return cfCdnUrl(file.id, file.name);
     return null;

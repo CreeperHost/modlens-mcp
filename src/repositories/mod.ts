@@ -320,7 +320,13 @@ export async function countModClasses(modId: number): Promise<number> {
 
 export async function createModClasses(data: Prisma.ModClassCreateManyInput[]): Promise<void> {
     const db = await getDb();
-    await db.modClass.createMany({ data, skipDuplicates: true });
+    try {
+        await db.modClass.createMany({ data, skipDuplicates: true });
+    } catch {
+        for (const row of data) {
+            await db.modClass.create({ data: row }).catch(() => {});
+        }
+    }
 }
 
 export async function findModClassesForCrossModSearch(

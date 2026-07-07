@@ -7,6 +7,7 @@ import { paths } from "../cache.js";
 import { findModById, listMods } from "../repositories/mod.js";
 import { validatePath, safeRegex } from "../security.js";
 import { validateDbId } from "../validate.js";
+import { getDb } from "../db.js";
 
 async function getDecompPath(dbId: number): Promise<string> {
     const mod = await findModById(dbId);
@@ -103,5 +104,12 @@ export async function decompileModClass(dbId: number, className: string): Promis
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     const internal = className.replace(/\./g, "/");
     const outDir = join(paths.decompiled(mod.modId, mod.version), "classes");
-    return decompileClassJava(mod.jarPath, internal, outDir);
+    const source = await decompileClassJava(mod.jarPath, internal, outDir);
+    const db = await getDb();
+    await db.modSourceFile.upsert({
+        where: { modId_className: { modId: mod.id, className } },
+        update: { content: source },
+        create: { modId: mod.id, className, content: source },
+    }).catch(() => {});
+    return source;
 }

@@ -271,19 +271,46 @@ server.tool(
             case "dep_graph":        result = await getDependencyGraph(mcVersion); break;
             case "version_conflicts":result = await findVersionConflicts(); break;
             case "source_urls":      result = await listModSourceUrls(query); break;
-            case "decompile":        result = await decompileMod(dbId!); break;
-            case "decompile_status": result = await decompileModStatus(dbId!, { autoEmbed, autoGraph }); break;
-            case "decompile_class":  result = await decompileModClass(dbId!, className!); break;
-            case "source":           result = await getModSource(dbId!, path); break;
+            case "decompile":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await decompileMod(dbId);
+                break;
+            case "decompile_status":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await decompileModStatus(dbId, { autoEmbed, autoGraph });
+                break;
+            case "decompile_class":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await decompileModClass(dbId, className!);
+                break;
+            case "source":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await getModSource(dbId, path);
+                break;
             case "search_source":    result = await searchSource(query!, dbId, isRegex ?? false, limit ?? 50); break;
-            case "reindex":          result = await reindexClasses(dbId); break;
+            case "reindex":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await reindexClasses(dbId);
+                break;
             case "batch_ingest":     result = await batchIngest(directory!, skipSource ?? true, indexClasses ?? false, replace ?? false); break;
             case "batch_decompile":  result = await batchDecompileMods({ concurrency: (limit ?? 2), autoEmbed, autoGraph }); break;
             case "refresh_metadata": result = await refreshDegradedMetadata({ loader: loader as any, mcVersion }); break;
-            case "index_semantic":   result = await indexModSourceSemantic(dbId!, 50, limit); break;
-            case "search_semantic":  result = await searchModSourceSemantic(query!, dbId!, limit ?? 10, provenance); break;
-            case "index_fts":        result = await indexModSourceFts(dbId!); break;
-            case "search_indexed":   result = await searchModSourceIndexed(dbId!, query!, limit ?? 20); break;
+            case "index_semantic":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await indexModSourceSemantic(dbId, 50, limit);
+                break;
+            case "search_semantic":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await searchModSourceSemantic(query!, dbId, limit ?? 10, provenance);
+                break;
+            case "index_fts":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await indexModSourceFts(dbId);
+                break;
+            case "search_indexed":
+                if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
+                result = await searchModSourceIndexed(dbId, query!, limit ?? 20);
+                break;
             case "get_paths": {
                 const mod = await findModById(dbId!);
                 if (!mod) throw new Error(`Mod #${dbId} not found`);

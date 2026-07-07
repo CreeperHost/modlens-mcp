@@ -19,6 +19,7 @@ import {
     listModsSlim, mcVersionWhere,
 } from "../repositories/mod.js";
 import { getDb } from "../db.js";
+import { serializeArray } from "../db-backend.js";
 import { validateDbId } from "../validate.js";
 
 // ── IngestResult discriminated union ─────────────────────────────────────────
@@ -189,9 +190,9 @@ export async function ingestMod(jarPath: string, skipSource = false, replace = f
                 modId: mod.id,
                 className: c.name,
                 superClass: c.superName || null,
-                interfaces: c.interfaces,
+                interfaces: serializeArray(c.interfaces),
                 accessFlags: c.accessFlags,
-            })));
+            } as any)));
         })
         .catch(() => { /* non-fatal — class index can be retried */ });
 
@@ -326,9 +327,9 @@ export async function reindexClasses(dbId?: number): Promise<{ indexed: number; 
                     modId: mod.id,
                     className: c.name,
                     superClass: c.superName || null,
-                    interfaces: c.interfaces,
+                    interfaces: JSON.stringify(c.interfaces),
                     accessFlags: c.accessFlags,
-                })));
+                } as any)));
             indexed++;
         } catch {
             failed++;
