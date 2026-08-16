@@ -10,7 +10,7 @@
  * so its schema is always in sync with `prisma/backends/schema.sqlite.prisma`.
  */
 import { execSync } from "child_process";
-import { existsSync, rmSync } from "fs";
+import { existsSync, rmSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -19,6 +19,7 @@ const dbFile = join(ROOT, "prisma", "backends", "template.db");
 
 // Start from a clean slate so the template never carries stale tables/rows.
 if (existsSync(dbFile)) rmSync(dbFile);
+writeFileSync(dbFile, "");
 
 // Prisma resolves a relative `file:` URL relative to the schema file's directory
 // (prisma/backends/), so `file:./template.db` lands the db next to the schema.
