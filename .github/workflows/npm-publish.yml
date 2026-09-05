@@ -64,8 +64,38 @@ jobs:
           path: dist-pack/*.tgz
           retention-days: 7
 
-  publish:
+  package-test:
     needs: build
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24, 26]
+    steps:
+      - name: Checkout package test
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Download the release tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: dist-pack
+
+      # The test uses only Node built-ins. It installs this exact tarball through
+      # npx with an empty cache/home, then checks setup and database-backed MCP.
+      - name: Test the installed package
+        run: npm run test:package -- ./dist-pack
+
+  publish:
+    needs: [build, package-test]
     runs-on: ubuntu-latest
     # Manual approval gate: configure "Required reviewers" on the `release`
     # environment (repo Settings → Environments). This job holds the OIDC

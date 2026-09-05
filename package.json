@@ -32,6 +32,7 @@
     "start": "node dist/server.js",
     "setup": "npm run build && node dist/setup.js",
     "test": "vitest run",
+    "test:package": "node scripts/test-package.mjs",
     "test:watch": "vitest",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
@@ -50,7 +51,7 @@
   "dependencies": {
     "@clack/prompts": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.10.0",
-    "@prisma/adapter-better-sqlite3": "^6.0.0",
+    "@prisma/adapter-better-sqlite3": "7.9.1",
     "@prisma/client": "^6.0.0",
     "adm-zip": "^0.5.16",
     "better-sqlite3": "^12.11.1",
@@ -69,8 +70,5 @@
     "@electric-sql/pglite": "^0.2.0",
     "@prisma/adapter-pglite": "^6.0.0",
     "sqlite-vec": "^0.1.0"
-  },
-  "overrides": {
-    "better-sqlite3": "$better-sqlite3"
   }
 }

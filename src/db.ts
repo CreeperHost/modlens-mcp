@@ -14,8 +14,9 @@ export async function getDb(): Promise<PrismaClient> {
 
     if (backend === "sqlite") {
         const url = process.env.DATABASE_URL ?? "";
-        const { PrismaBetterSQLite3 } = await import("@prisma/adapter-better-sqlite3");
-        const adapter = new PrismaBetterSQLite3({ url });
+        // Adapter v7 declares SQLite v12 support; test:package covers this pairing with client v6.
+        const { PrismaBetterSqlite3 } = await import("@prisma/adapter-better-sqlite3");
+        const adapter = new PrismaBetterSqlite3({ url });
         const { PrismaClient: SQLiteClient } = await import("./generated/sqlite/client.js");
         _client = new SQLiteClient({ adapter }) as unknown as PrismaClient;
         return _client;
