@@ -78,6 +78,7 @@ import {
 import { mcPaths } from "./minecraft.js";
 import { findModById } from "./repositories/mod.js";
 import { CACHE_ROOT } from "./cache.js";
+import { projectAction, type ProjectRequest } from "./tools/project.js";
 import { getDb, disconnect } from "./db.js";
 import { readdir, readFile } from "fs/promises";
 import { join, resolve } from "path";
@@ -346,6 +347,10 @@ MOD TAGS (cross-mod data-pack tags)
   mod-tags search <query>            Search tags  [--registry=] [--limit=]
 
 GRADLE
+  project import-local <bundle.zip> --key-file=<file>  Import a private Gradle environment
+  project list --key-file=<file>                      List this project's snapshots
+  project info|classes|source|search|members|bytecode --key-file=<file> --environment-id=<id>
+      [--class-name=<name>] [--query=<text>] [--limit=20] [--offset=0] [--start-line=1] [--max-lines=200]
   gradle get-files <modId>           Extract Gradle build files
   gradle search <query>              Search Gradle files across mods  [--mod-id-filter=] [--limit=]
   gradle compare-deps                Compare dependency versions across mods  [--group-filter=] [--mod-id-filter=]
@@ -1270,6 +1275,16 @@ try {
         }
 
         // ── Gradle ────────────────────────────────────────────────────────────
+        case "project": {
+            const action = requireArg(positional[0], "project action").replace(/-/g, "_");
+            const keyFile = requireArg(typeof flags.keyFile === "string" ? flags.keyFile : undefined, "--key-file=/path/to/project-key.txt");
+            const projectKey = (await readFile(resolve(keyFile), "utf8")).trim();
+            const { keyFile: ignored, ...options } = flags;
+            out(await projectAction({ ...options, action, projectKey,
+                ...(action === "import_local" ? { bundlePath: resolve(requireArg(positional[1], "bundle.zip")) } : {}),
+            } as ProjectRequest));
+            break;
+        }
         case "gradle": {
             const sub = requireArg(positional[0], "gradle action");
             switch (sub) {

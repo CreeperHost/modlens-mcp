@@ -49,6 +49,78 @@ npm run start   # start the server
 
 ---
 
+## Gradle project environments
+
+ModLens can import the **actual compile classpath** of a Gradle project. The ModDevGradle adapter also exports the matching prepared Minecraft sources and hashes of the AT files used by its artifact task. This lets the AI see project-specific access changes, loader patches and mapped names.
+
+Imports are private, immutable snapshots, separate from the shared vanilla/mod caches and database. Re-export and import after changing ATs, dependencies or mappings. The returned `environmentId` selects the new snapshot; earlier IDs still describe their original inputs. This is compile-time context, not a simulation of runtime mixins/coremods.
+
+### Export from Gradle
+
+In a checkout, run your mod project's wrapper with the supplied init script:
+
+```bash
+./gradlew -I /path/to/modlens-mcp/scripts/gradle/modlens.init.gradle :modlensExport
+```
+
+For an installed package, locate its script first:
+
+```bash
+npx @creeperhost/modlens-mcp --gradle-init-script
+# Pass the printed path to your project's ./gradlew -I command.
+```
+
+On Windows, use `gradlew.bat -I "H:\Git\modlens-mcp\scripts\gradle\modlens.init.gradle" :modlensExport`.
+
+The task produces `build/modlens/main/environment.zip` and creates a persistent private key at `.gradle/modlens/project-key.txt` in the selected project. The key is not included in the bundle or printed. Keep it out of source control and share it only with clients that should access this project.
+
+Use `:subproject:modlensExport` for a module, and `-PmodlensSourceSet=client` to select a different source set. The task runs the classpath's prerequisite tasks, including Minecraft artifact preparation, without launching the game. Referenced project/source-set outputs may need compilation. It does not support Gradle's configuration cache; use `--no-configuration-cache` if necessary.
+
+Supported adapter: **ModDevGradle 2.x**, exercised with 2.0.141 / NeoForge 21.1.209 / Minecraft 1.21.1 and Gradle 8.14. Other Java projects can export their resolved compile classpath, including directory dependencies. Automatic source discovery for ForgeGradle/NeoGradle/Loom is not implemented; absent supplied sources, individual classes are decompiled from the exported binaries on demand. Do not interpret generic exports as proof that runtime-only transformations have been applied.
+
+Optional metadata overrides: `-PmodlensMinecraftVersion=...`, `-PmodlensMappings=...`. The exporter also reads the common `minecraft_version`, `neo_version` and `forge_version` properties. It exports artifact names/content hashes and selected version metadata, not the project's entire Gradle configuration, repository credentials or absolute dependency paths.
+
+### Import locally or remotely
+
+Local import and query examples:
+
+```bash
+npx @creeperhost/modlens-mcp --project import-local build/modlens/main/environment.zip --key-file=.gradle/modlens/project-key.txt
+npx @creeperhost/modlens-mcp --project list --key-file=.gradle/modlens/project-key.txt
+npx @creeperhost/modlens-mcp --project members --environment-id=<returned-id> --class-name=net.minecraft.world.level.Level --key-file=.gradle/modlens/project-key.txt
+```
+
+From a checkout, the equivalent is `node dist/cli.js project ...`.
+
+For a remote server, run the uploader **on the developer's machine**, where the bundle exists:
+
+```bash
+npx @creeperhost/modlens-mcp --project-upload https://modlens.example/mcp build/modlens/main/environment.zip .gradle/modlens/project-key.txt
+# Checkout equivalent:
+node /path/to/modlens-mcp/scripts/project-upload.mjs https://modlens.example/mcp build/modlens/main/environment.zip .gradle/modlens/project-key.txt
+```
+
+Set `MODLENS_AUTH_TOKEN` if the deployment's reverse proxy requires a bearer token. Remote uploads require HTTPS; loopback HTTP is supported for local testing. The uploader transfers 1 MiB chunks, verifies the full bundle hash, retries acknowledged chunks safely and prints the imported snapshot metadata. The remote server never runs Gradle or needs the developer's local paths. Host-local import is disabled when `MCP_PORT` is set.
+
+Configure the AI to use the MCP **`project` tool** with `projectKey` (the key file's contents) and `environmentId`. Use `project` source/member/search queries for this environment; the existing `mc_source` and `mod` tools continue to describe their shared inputs. Key possession grants access to that project's snapshots; use the deployment's normal authentication to control access to the service and its upload resources.
+
+| Action | Additional arguments | Result |
+| --- | --- | --- |
+| `list` | none | Snapshots belonging to this project key only |
+| `info` | `environmentId` | Versions, artifacts, counts and snapshot provenance |
+| `classes` | `environmentId`, optional `query`, `offset`, `limit` | Classes in compile classpath order of precedence |
+| `source` | `environmentId`, `className`, optional `startLine`, `maxLines` | Supplied Gradle source or an on-demand binary decompile |
+| `members` / `bytecode` | `environmentId`, `className` | Inspection of the project's prepared binary |
+| `search` | `environmentId`, `query`, optional `limit` | Literal, case-insensitive search of supplied sources and cached decompiles |
+| `import_local` | `bundlePath` | Import an absolute host-local ZIP path (stdio only) |
+| `upload_begin` | `size`, `sha256` | Upload ID and chunk size |
+| `upload_chunk` | `uploadId`, `offset`, `data` | Next offset; `data` is base64 |
+| `upload_finish` / `upload_abort` | `uploadId` | Commit a complete upload or remove upload state |
+
+Search reports its coverage: a missing match does not prove absence from binaries without sources. Duplicate classes follow the first compile classpath entry; sources from shadowed dependencies are excluded. Multi-release JARs use the compile Java release, with stale base sources excluded when a versioned class overrides them. Limits are 512 MiB per bundle, 1 GiB expanded content, 2 MiB per Java source, and four unfinished uploads per project. Abandoned uploads expire after 24 hours and are cleaned up when the next upload begins. Snapshot files live under `MODLENS_CACHE_ROOT/projects` and work with all database backends.
+
+Contributor validation: `npm run test:project:http` exercises the real uploader and HTTP transport. Set `JAVA_HOME` and `MODLENS_TEST_GRADLE_HOME`, then run `npm run test:project:gradle` for a Java dependency fixture, or `npm run test:project:gradle -- moddev` for a real AT before/after check. The Gradle tests use disposable projects and may download build dependencies; they never launch Minecraft.
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -977,4 +1049,3 @@ node dist/cli.js check-updates 2
 ### Special thanks
 
 A heartfelt thank you to all the members of the **ForgeCraft Discord and Minecraft server** for being a genuinely great community, for your feedback, and for supporting my development endeavours over the years. This project wouldn't be what it is without you.
-

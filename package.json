@@ -33,6 +33,8 @@
     "setup": "npm run build && node dist/setup.js",
     "test": "vitest run",
     "test:package": "node scripts/test-package.mjs",
+    "test:project:gradle": "node scripts/test-project-gradle.mjs",
+    "test:project:http": "node scripts/test-project-http.mjs",
     "test:watch": "vitest",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",

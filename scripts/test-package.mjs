@@ -109,6 +109,13 @@ try {
         .filter(dir => existsSync(join(dir, "package.json")));
     assert.equal(installs.length, 1);
     const installed = installs[0];
+    const initScript = execFileSync(process.execPath, [join(installed, "dist/launcher.js"), "--gradle-init-script"], { env, encoding: "utf8" }).trim();
+    assert.equal(initScript, join(installed, "scripts/gradle/modlens.init.gradle"));
+    assert.ok(statSync(initScript).size > 0, "Gradle exporter must ship in the npm package");
+    assert.ok(statSync(join(installed, "scripts/project-upload.mjs")).size > 0, "Remote uploader must ship in the npm package");
+    const keyFile = join(root, "project-key.txt");
+    writeFileSync(keyFile, "a".repeat(64));
+    assert.deepEqual(JSON.parse(execFileSync(process.execPath, [join(installed, "dist/launcher.js"), "--project", "list", `--key-file=${keyFile}`], { env, encoding: "utf8" })), []);
     const require = createRequire(join(installed, "package.json"));
     const adapterRequire = createRequire(require.resolve("@prisma/adapter-better-sqlite3"));
     assert.equal(require.resolve("better-sqlite3"), adapterRequire.resolve("better-sqlite3"), "Prisma must share the v12 driver");
@@ -155,6 +162,7 @@ try {
             send({ method: "notifications/initialized" });
             const list = await request("tools/list", {});
             assert.ok(list.tools.some(tool => tool.name === "mod"));
+            assert.ok(list.tools.some(tool => tool.name === "project"));
             const stats = await request("tools/call", { name: "mod", arguments: { action: "stats" } });
             assert.ok(!stats.isError, JSON.stringify(stats));
             assert.equal(JSON.parse(stats.content.find(item => item.type === "text").text).total, 0);

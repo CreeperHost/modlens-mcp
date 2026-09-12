@@ -1,0 +1,154 @@
+// Apply without modifying a project: ./gradlew -I /path/to/modlens.init.gradle :modlensExport
+// ModDevGradle 2.x adapter plus a generic Java source-set compile-classpath exporter.
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import java.nio.file.FileAlreadyExistsException
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import org.gradle.api.GradleException
+import org.gradle.api.plugins.JavaPluginExtension
+import org.gradle.api.provider.Provider
+
+def sha256 = { File file ->
+    def md = MessageDigest.getInstance('SHA-256')
+    file.withInputStream { input ->
+        byte[] buffer = new byte[65536]
+        int count
+        while ((count = input.read(buffer)) != -1) md.update(buffer, 0, count)
+    }
+    md.digest().encodeHex().toString()
+}
+
+gradle.projectsEvaluated {
+    allprojects { p ->
+        def javaExtension = p.extensions.findByType(JavaPluginExtension)
+        if (javaExtension == null) return
+        String selected = p.findProperty('modlensSourceSet')?.toString() ?: 'main'
+        def sourceSet = javaExtension.sourceSets.findByName(selected)
+        if (sourceSet == null) {
+            // A sibling module may not have the source set selected for the requested module.
+            p.tasks.register('modlensExport') {
+                doLast { throw new GradleException("Unknown ModLens source set '${selected}' in ${p.path}") }
+            }
+            return
+        }
+        boolean moddev = p.plugins.hasPlugin('net.neoforged.moddev') || p.plugins.hasPlugin('net.neoforged.moddev.legacyforge')
+        def artifactsTask = moddev ? p.tasks.findByName('createMinecraftArtifacts') : null
+        if (moddev && artifactsTask == null) throw new GradleException('ModLens requires a ModDevGradle version with createMinecraftArtifacts (2.x).')
+
+        p.tasks.register('modlensExport') { task ->
+            group = 'modlens'
+            description = 'Export the resolved compile environment for local or remote ModLens.'
+            // Gradle resolves/builds the actual compilation inputs, including AT processing.
+            dependsOn(sourceSet.compileClasspath)
+            if (artifactsTask != null) dependsOn(artifactsTask)
+            // This task accesses the evaluated model and is intentionally not configuration-cache compatible.
+            notCompatibleWithConfigurationCache('ModLens exports the evaluated compile classpath and modding task outputs.')
+            doLast {
+                File output = p.layout.buildDirectory.dir("modlens/${selected}").get().asFile
+                output.mkdirs()
+                def artifacts = []
+                def files = []
+                def byFile = [:]
+                def addArtifact = { File file, String kind, String sourceFor ->
+                    if (!file.isFile()) throw new GradleException("Missing ModLens artifact: ${file.name}")
+                    String path = "artifacts/${artifacts.size()}.jar"
+                    def info = [path: path, name: file.name, sha256: sha256(file), size: file.length(), kind: kind]
+                    if (sourceFor != null) info.sourceFor = sourceFor
+                    artifacts.add(info)
+                    files.add(file)
+                    if (kind == 'classpath') byFile[file.canonicalPath] = path
+                    path
+                }
+                sourceSet.compileClasspath.files.eachWithIndex { File file, int index ->
+                    if (!file.exists()) throw new GradleException("Compile classpath entry does not exist: ${file.name}")
+                    if (file.isDirectory()) {
+                        // Project dependencies often expose class directories instead of JARs.
+                        File jar = new File(output, "directory-${index}.jar")
+                        def entries = p.fileTree(file).matching { include '**/*.class'; include '**/*.java' }.files.sort { a, b ->
+                            file.toPath().relativize(a.toPath()).toString() <=> file.toPath().relativize(b.toPath()).toString()
+                        }
+                        jar.withOutputStream { stream ->
+                            def zip = new ZipOutputStream(stream)
+                            entries.each { entry ->
+                                def name = file.toPath().relativize(entry.toPath()).toString().replace('\\', '/')
+                                def ze = new ZipEntry(name); ze.time = 0
+                                zip.putNextEntry(ze); entry.withInputStream { zip << it }; zip.closeEntry()
+                            }
+                            zip.finish()
+                        }
+                        addArtifact(jar, 'classpath', null)
+                    } else if (file.name.endsWith('.jar')) {
+                        addArtifact(file, 'classpath', null)
+                    } else {
+                        throw new GradleException("Unsupported compile classpath entry: ${file.name}")
+                    }
+                }
+                if (artifacts.empty) throw new GradleException('Compile classpath is empty; there is no dependency environment to export.')
+
+                def transforms = []
+                if (artifactsTask != null) {
+                    // Bind sources to the binary actually selected by the compile classpath, not a guessed cache path.
+                    def binaryPaths = ['gameJarArtifact', 'gameJarWithSourcesArtifact'].collect { property ->
+                        artifactsTask.hasProperty(property) ? artifactsTask.property(property).orNull?.asFile?.canonicalPath : null
+                    }.findAll { it != null && byFile.containsKey(it) }
+                    if (binaryPaths.empty) throw new GradleException('ModLens cannot locate ModDevGradle Minecraft output on this source set compile classpath. Select a mod-enabled source set.')
+                    def sourceFile = artifactsTask.hasProperty('gameSourcesArtifact') ? artifactsTask.gameSourcesArtifact.orNull?.asFile : null
+                    if (sourceFile?.isFile()) binaryPaths.each { path -> addArtifact(sourceFile, 'sources', byFile[path]) }
+                    if (artifactsTask.hasProperty('accessTransformers')) {
+                        artifactsTask.accessTransformers.files.each { File file -> transforms.add([name: file.name, sha256: sha256(file)]) }
+                    }
+                }
+                def neo = p.extensions.findByName('neoForge') ?: p.extensions.findByName('legacyForge')
+                def propertyText = { String name -> p.findProperty(name)?.toString() ?: '' }
+                String loaderVersion = propertyText('neo_version') ?: propertyText('forge_version')
+                if (neo != null && neo.hasProperty('version')) {
+                    def version = neo.version
+                    loaderVersion = (version instanceof Provider ? version.orNull : version)?.toString() ?: loaderVersion
+                }
+                String mappings = propertyText('modlensMappings')
+                if (!mappings && neo != null && neo.hasProperty('parchment') && neo.parchment.enabled.getOrElse(false)) {
+                    mappings = "parchment:${neo.parchment.minecraftVersion.orNull ?: ''}:${neo.parchment.mappingsVersion.orNull ?: ''}"
+                }
+                if (!mappings) mappings = moddev ? 'toolchain-prepared (official names where applicable)' : 'compile-classpath'
+                def manifest = [format: 'modlens-project-v1', project: "${p.rootProject.name}${p.path}", sourceSet: selected,
+                    toolchain: moddev ? 'moddevgradle' : 'gradle-compile-classpath',
+                    minecraftVersion: propertyText('minecraft_version') ?: propertyText('modlensMinecraftVersion'),
+                    loaderVersion: loaderVersion, mappings: mappings,
+                    javaVersion: p.tasks.named(sourceSet.compileJavaTaskName).get().options.release.orNull ?: javaExtension.toolchain.languageVersion.orNull?.asInt() ?: Integer.parseInt(org.gradle.api.JavaVersion.current().majorVersion),
+                    transformations: transforms, artifacts: artifacts]
+                File temporary = new File(output, 'environment.zip.tmp')
+                temporary.withOutputStream { stream ->
+                    def zip = new ZipOutputStream(stream)
+                    def metadata = new ZipEntry('manifest.json'); metadata.time = 0
+                    zip.putNextEntry(metadata); zip.write(JsonOutput.toJson(manifest).getBytes('UTF-8')); zip.closeEntry()
+                    artifacts.eachWithIndex { artifact, index ->
+                        def entry = new ZipEntry(artifact.path); entry.time = 0
+                        zip.putNextEntry(entry); files[index].withInputStream { zip << it }; zip.closeEntry()
+                    }
+                    zip.finish()
+                }
+                File destination = new File(output, 'environment.zip')
+                Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                File keyFile = new File(p.projectDir, '.gradle/modlens/project-key.txt')
+                keyFile.parentFile.mkdirs()
+                if (!keyFile.exists()) {
+                    byte[] key = new byte[32]; new SecureRandom().nextBytes(key)
+                    // CREATE_NEW prevents concurrent exports from silently replacing a project key.
+                    try { Files.write(keyFile.toPath(), (key.encodeHex().toString() + '\n').getBytes('UTF-8'), StandardOpenOption.CREATE_NEW) }
+                    catch (FileAlreadyExistsException ignored) { }
+                    keyFile.setReadable(false, false); keyFile.setWritable(false, false)
+                    keyFile.setReadable(true, true); keyFile.setWritable(true, true)
+                }
+                if (!(keyFile.text.trim() ==~ /[a-f0-9]{64}/)) throw new GradleException('Invalid existing ModLens project key; expected 64 lowercase hex characters.')
+                logger.lifecycle("ModLens bundle: ${destination}")
+                logger.lifecycle("ModLens private key file: ${keyFile}")
+                logger.lifecycle('Re-export and import after changing dependencies, mappings or access transformers.')
+            }
+        }
+    }
+}

@@ -44,6 +44,21 @@ for (const ep of [ENV_FILE, join(PKG_ROOT, ".env")]) {
 }
 
 const args = process.argv.slice(2);
+// Project utilities do not need a database or first-run bootstrap.
+if (args[0] === "--gradle-init-script") {
+    console.log(join(PKG_ROOT, "scripts", "gradle", "modlens.init.gradle"));
+    process.exit(0);
+}
+if (args[0] === "--project-upload") {
+    process.argv = [process.argv[0], join(PKG_ROOT, "scripts", "project-upload.mjs"), ...args.slice(1)];
+    await import(new URL("../scripts/project-upload.mjs", import.meta.url).href);
+    process.exit(process.exitCode ?? 0);
+}
+if (args[0] === "--project") {
+    process.argv = [process.argv[0], join(PKG_ROOT, "dist", "cli.js"), "project", ...args.slice(1)];
+    await import("./cli.js");
+    process.exit(process.exitCode ?? 0);
+}
 const wantSetup = args.includes("--setup");
 // Bootstrap embedded SQLite only when nothing else is configured. A
 // pre-supplied DATABASE_URL (e.g. Postgres via a container env var) opts out, so

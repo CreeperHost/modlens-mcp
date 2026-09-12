@@ -87,6 +87,7 @@ import { disconnect } from "./db.js";
 import { mcPaths } from "./minecraft.js";
 import { findModById, resolveModRefSlim } from "./repositories/mod.js";
 import { CACHE_ROOT } from "./cache.js";
+import { projectAction, projectToolSchema } from "./tools/project.js";
 
 // Load .env — try ~/.modlens/.env first (npx/installed users), then local .env (git-clone users)
 import { readFileSync, existsSync } from "fs";
@@ -128,7 +129,8 @@ const VERBOSE = process.env.MODLENS_VERBOSE
 /** Best-effort, bounded JSON for logging tool params (handles circular refs). */
 function previewArgs(value: unknown): string {
     try {
-        const json = JSON.stringify(value);
+        const json = JSON.stringify(value, (key, item) =>
+            ["projectKey", "data"].includes(key) ? "[redacted]" : item);
         if (json == null) return String(value);
         return json.length > 2000 ? json.slice(0, 2000) + "…(truncated)" : json;
     } catch {
@@ -201,6 +203,7 @@ function safe<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeof
 }
 
 class JsonBodyParseError extends Error {}
+class HttpBodyTooLargeError extends Error {}
 
 function createMcpServer(): McpServer {
     const server = new McpServer({ name: "modlens", version: pkg.version });
@@ -1114,6 +1117,18 @@ server.tool(
 // ── 18. reports ───────────────────────────────────────────────────────────────
 
 server.tool(
+    "project",
+    "Import and query a private Gradle compile environment, including prepared ATs, mappings and loader patches. " +
+    "Use this instead of mc_source/mod source or member tools when answering about an imported project. " +
+    "Every query requires projectKey and immutable environmentId; no shared vanilla caches are modified. " +
+    "Export with scripts/gradle/modlens.init.gradle; use scripts/project-upload.mjs for remote imports. " +
+    "action=import_local|upload_begin|upload_chunk|upload_finish|upload_abort|list|info|classes|source|search|members|bytecode. " +
+    "list is restricted to the supplied private key. Search covers provided sources and cached decompiles, not all runtime transformations.",
+    projectToolSchema,
+    safe(async (params) => out(await projectAction(params))),
+);
+
+server.tool(
     "reports",
     "Generate Markdown reports. report=mixin_conflicts|tag_conflicts|version_conflicts|mod_overview|gradle_deps|pack_compat|dep_graph|sidedness|mod_complexity|pack_changelog. savePath to write to disk.",
     {
@@ -1300,14 +1315,25 @@ async function startHttpServer(port: number): Promise<void> {
     const readBody = (req: IncomingMessage): Promise<unknown> =>
         new Promise((resolve, reject) => {
             const chunks: Buffer[] = [];
-            req.on("data", (c) => chunks.push(c as Buffer));
+            let size = 0;
+            let oversized = false;
+            req.on("data", (c: Buffer) => {
+                size += c.length;
+                if (size > 8 * 1024 * 1024) {
+                    if (!oversized) { oversized = true; chunks.length = 0; reject(new HttpBodyTooLargeError("Request body exceeds 8 MiB; use project upload chunks")); }
+                    return;
+                }
+                chunks.push(c);
+            });
             req.on("end", () => {
+                if (oversized) return;
                 const raw = Buffer.concat(chunks).toString("utf8");
                 if (!raw) return resolve(undefined);
                 try { resolve(JSON.parse(raw)); }
                 catch { reject(new JsonBodyParseError("Invalid JSON request body")); }
             });
             req.on("error", reject);
+            req.on("aborted", () => reject(new Error("Request aborted")));
         });
 
     const sendJson = (res: ServerResponse, status: number, body: unknown) => {
@@ -1385,6 +1411,7 @@ async function startHttpServer(port: number): Promise<void> {
             });
         } catch (err) {
             if (!res.headersSent) {
+                if (err instanceof HttpBodyTooLargeError) return sendJson(res, 413, { error: err.message });
                 if (err instanceof JsonBodyParseError) {
                     return sendJson(res, 400, {
                         jsonrpc: "2.0",
