@@ -17,7 +17,7 @@ function jvmErrorFlags(): string[] {
 }
 
 const VINEFLOWER_URL =
-    "https://repo1.maven.org/maven2/org/vineflower/vineflower/1.10.1/vineflower-1.10.1.jar";
+    "https://maven.creeperhost.net/org/vineflower/vineflower/1.10.1/vineflower-1.10.1.jar";
 
 // Auto-downloaded on first use, cached to ~/.modlens-cache/tools/
 const INDEXER_URL =
@@ -256,11 +256,20 @@ export async function decompileClass(
 /** Sentinel files written by the background decompile process */
 export function decompileSentinelDone(outputDir: string) { return outputDir + "/.decompile.done"; }
 export function decompileSentinelErr(outputDir: string)  { return outputDir + "/.decompile.error"; }
+export function decompileSentinelRunning(outputDir: string) { return outputDir + "/.decompile.running"; }
 
 export async function isDecompileDone(outputDir: string): Promise<"done" | "error" | "running" | "not_started"> {
     if (await exists(decompileSentinelDone(outputDir))) return "done";
     if (await exists(decompileSentinelErr(outputDir)))  return "error";
-    if (await exists(outputDir)) return "running";
+    if (await exists(decompileSentinelRunning(outputDir))) {
+        try {
+            const { readFile } = await import("fs/promises");
+            const pid = Number(await readFile(decompileSentinelRunning(outputDir), "utf8"));
+            if (!Number.isSafeInteger(pid) || pid <= 0) return "error";
+            process.kill(pid, 0);
+            return "running";
+        } catch { return "error"; }
+    }
     return "not_started";
 }
 
@@ -285,22 +294,30 @@ export async function decompileJar(jarPath: string, outputDir: string): Promise<
     const proc = spawn(java, [...jvmErrorFlags(), "-jar", vf, jarPath, outputDir], {
         stdio: "ignore",
         detached: true,
+        windowsHide: true,
     });
     proc.unref();
 
     // Write sentinel asynchronously — this promise is NOT awaited by the caller
     const pid = proc.pid;
+    const runningWritten = pid
+        ? writeFile(decompileSentinelRunning(outputDir), String(pid))
+        : Promise.resolve();
     (async () => {
         await new Promise<void>((resolve) => {
-            proc.on("close", (code) => {
+            proc.on("close", async (code) => {
+                await runningWritten;
                 const sentinel = code === 0
                     ? decompileSentinelDone(outputDir)
                     : decompileSentinelErr(outputDir);
-                writeFile(sentinel, String(code ?? "signal")).catch(() => {});
+                await writeFile(sentinel, String(code ?? "signal")).catch(() => {});
+                await unlink(decompileSentinelRunning(outputDir)).catch(() => {});
                 resolve();
             });
-            proc.on("error", () => {
-                writeFile(decompileSentinelErr(outputDir), "spawn-error").catch(() => {});
+            proc.on("error", async () => {
+                await runningWritten;
+                await writeFile(decompileSentinelErr(outputDir), "spawn-error").catch(() => {});
+                await unlink(decompileSentinelRunning(outputDir)).catch(() => {});
                 resolve();
             });
         });
@@ -343,6 +360,7 @@ export async function decompileJarJiJ(jarPath: string, outputDir: string): Promi
     await unlink(decompileSentinelErr(outputDir)).catch(() => {});
 
     // Kick off background worker that decompiles the main JAR + nested JARs sequentially
+    await writeFile(decompileSentinelRunning(outputDir), String(process.pid));
     (async () => {
         const tmpDir = join(tmpdir(), "modlens-jij-" + Date.now());
         await mkdir(tmpDir, { recursive: true });
@@ -370,6 +388,8 @@ export async function decompileJarJiJ(jarPath: string, outputDir: string): Promi
             await writeFile(decompileSentinelDone(outputDir), "0");
         } catch (err) {
             await writeFile(decompileSentinelErr(outputDir), String(err)).catch(() => {});
+        } finally {
+            await unlink(decompileSentinelRunning(outputDir)).catch(() => {});
         }
     })();
 

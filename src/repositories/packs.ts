@@ -62,6 +62,13 @@ export interface UpsertPackFileInput {
     modId?:          number | null;
 }
 
+function providerId(value: unknown): number | null {
+    if (value == null) return null;
+    const parsed = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value;
+    if (typeof parsed !== "number" || !Number.isSafeInteger(parsed) || parsed < 0) throw new Error("Invalid CurseForge project/file ID");
+    return parsed;
+}
+
 /** Upsert a single pack file record. Keyed on (packVersionId, manifestFileId). */
 export async function upsertPackFile(input: UpsertPackFileInput): Promise<void> {
     const db = await getDb();
@@ -71,8 +78,8 @@ export async function upsertPackFile(input: UpsertPackFileInput): Promise<void> 
         fileType:       input.fileType,
         fileName:       input.fileName,
         filePath:       input.filePath       ?? null,
-        cfProject:      input.cfProject      ?? null,
-        cfFile:         input.cfFile         ?? null,
+        cfProject:      providerId(input.cfProject),
+        cfFile:         providerId(input.cfFile),
         sha1:           input.sha1           ?? null,
         status:         input.status,
         modId:          input.modId          ?? null,

@@ -1,7 +1,5 @@
 /**
- * modpacks.ch tool — search and sync packs from both the FTB and
- * CurseForge namespaces exposed by the modpacks.ch public API (no API key
- * required for either).
+ * modpacks.ch tool — search and sync packs across providers and download mods.
  *
  * modpacks.ch is a service by CreeperHost (https://www.creeperhost.net).
  * Thanks to CreeperHost for providing this free public API.
@@ -16,7 +14,7 @@
  *   manifest        — get the full file manifest for a specific version
  *   sync_pack_mods  — download + ingest every mod/datapack/resourcepack JAR
  *                     from a pack version's manifest into the ModLens DB
- *   search_ftb_mods — search the FTB mod index (returns mixed CF int / MR
+ *   search_mods     — search the shared mod index (returns mixed CF int / MR
  *                     string IDs)
  */
 import { basename, extname, join, resolve, sep } from "path";
@@ -25,21 +23,21 @@ import { rename, mkdir, unlink } from "fs/promises";
 import AdmZip from "adm-zip";
 import { ensureDir, exists, CACHE_ROOT } from "../cache.js";
 import {
-    searchPacks, getFeaturedPacks, getPack, getPackManifest,
+    searchPacks, getFeaturedPacks, getPack, getPackManifest, modpacksChGet,
     getCfPack, getCfPackManifest,
-    searchMods, getMod, getModsBatch, resolveModVersionUrl,
+    searchMods, getMod, getModsBatch, resolveModVersionUrl, providerVersions,
     USER_AGENT, cfCdnUrl,
     downloadManifestFile, resolveFileUrl,
-    type FtbManifest, type FtbManifestFile, type FtbModVersion, type FtbPack,
+    type PackManifest, type ManifestFile, type ModVersion, type PackMetadata,
 } from "../modpacks-ch.js";
 import { fetchWithRetry, DOWNLOAD_OPTS } from "../fetch-utils.js";
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import {
     searchProjects as searchModrinthProjects,
-    getProject as getModrinthProject,
-    getProjectVersions as getModrinthProjectVersions,
-    getProjectVersion as getModrinthProjectVersion,
+    getPackProject as getModrinthProject,
+    getPackVersions as getModrinthProjectVersions,
+    getPackVersion as getModrinthProjectVersion,
     getVersion as getModrinthVersion,
     getPrimaryFile as getModrinthPrimaryFile,
     type ModrinthProject,
@@ -57,6 +55,8 @@ import {
 
 const MOD_HEADERS = { "User-Agent": USER_AGENT };
 import { ingestMod } from "./ingest.js";
+import { updateMod } from "../repositories/mod.js";
+import { downloadModVersion } from "../mod-artifacts.js";
 import {
     upsertPackVersion, upsertPackFile,
     listPackVersions, listPackFiles,
@@ -186,7 +186,7 @@ export async function searchPacksAction(term: string, namespace: PackNamespace =
 
     // Always call the unified FTB search endpoint — it returns both FTB pack IDs
     // (in `packs`) and CurseForge pack IDs (in `curseforge`) in a single response.
-    // The /curseforge/search/ endpoint does not exist.
+    // The provider-specific search endpoints are also available for filtered browsing.
     const r = await searchPacks(term, limit);
     if (!r) return { ftbPacks: [], cfPacks: [], total: 0 };
     const ftbPacks = r.packs        ?? [];
@@ -297,6 +297,13 @@ function classifyModrinthPath(path: string): string {
     return "override";
 }
 
+function matchesVersionToken(version: { name: string; version?: string; version_number?: string }, ref: string): boolean {
+    const tokens = [version.name, version.version ?? "", version.version_number ?? ""]
+        .flatMap(value => value.match(/\d+(?:\.\d+)+(?:[-+][a-zA-Z0-9.]+)*/g) ?? []);
+    return tokens.some(token => token.toLowerCase() === ref.toLowerCase()
+        || token.toLowerCase().startsWith(ref.toLowerCase() + "."));
+}
+
 function resolveVersionByRef<T extends { id: number | string; name: string; version?: string; version_number?: string }>(
     versions: T[],
     ref?: number | string,
@@ -319,6 +326,9 @@ function resolveVersionByRef<T extends { id: number | string; name: string; vers
     );
     if (hit) return hit;
 
+    const exactTokens = versions.filter(version => matchesVersionToken(version, String(ref)));
+    if (exactTokens.length === 1) return exactTokens[0];
+
     const partialMatches = versions.filter((v) =>
         normalized(v.name).includes(wanted) ||
         (v.version !== undefined && normalized(v.version).includes(wanted)) ||
@@ -338,6 +348,7 @@ function resolveVersionByRef<T extends { id: number | string; name: string; vers
 
 function versionMatchesRef(version: { id: number | string; name: string; version?: string; version_number?: string }, ref?: number | string): boolean {
     if (ref === undefined || ref === "") return false;
+    if (/^\d+(?:\.\d+)+(?:[-+][a-zA-Z0-9.]+)*$/.test(String(ref))) return matchesVersionToken(version, String(ref));
     const wanted = normalized(String(ref));
     return normalized(String(version.id)) === wanted ||
         normalized(version.name) === wanted ||
@@ -346,7 +357,7 @@ function versionMatchesRef(version: { id: number | string; name: string; version
         (version.version_number !== undefined && normalized(version.version_number).includes(wanted));
 }
 
-async function resolveModpacksChPack(namespace: "ftb" | "curseforge", rawPackRef: number | string | undefined): Promise<FtbPack> {
+async function resolveModpacksChPack(namespace: "ftb" | "curseforge", rawPackRef: number | string | undefined): Promise<PackMetadata> {
     let packId = maybeNumber(rawPackRef);
 
     if (packId === undefined) {
@@ -356,7 +367,7 @@ async function resolveModpacksChPack(namespace: "ftb" | "curseforge", rawPackRef
         if (ids.length === 0) throw new Error(`No ${namespace} pack found for "${String(rawPackRef)}"`);
         const packs = (await Promise.all(ids.slice(0, 10).map((id) =>
             (namespace === "curseforge" ? getCfPack(id) : getPack(id)).catch(() => null)
-        ))).filter((p): p is FtbPack => p !== null);
+        ))).filter((p): p is PackMetadata => p !== null);
         const wanted = normalized(String(rawPackRef));
         const scored = packs
             .map((pack) => {
@@ -373,7 +384,7 @@ async function resolveModpacksChPack(namespace: "ftb" | "curseforge", rawPackRef
     return pack;
 }
 
-function normalizeOfficialFtbManifest(manifest: OfficialFtbManifest): FtbManifest {
+function normalizeOfficialFtbManifest(manifest: OfficialFtbManifest): PackManifest {
     return {
         id: manifest.id,
         parent: manifest.parent,
@@ -757,7 +768,7 @@ export async function packManifestAction(packId: number, versionId: number, name
             : await getPackManifest(packId, versionId);
     if (!manifest) throw new Error(`Manifest not found for pack ${packId} version ${versionId} (${namespace})`);
 
-    const fileSummary = (f: FtbManifestFile) => ({
+    const fileSummary = (f: ManifestFile) => ({
         id:         f.id,
         name:       f.name,
         type:       f.type,
@@ -791,13 +802,13 @@ export async function packManifestAction(packId: number, versionId: number, name
     };
 }
 
-// ── FTB mod search ────────────────────────────────────────────────────────────
+// ── Mod search ────────────────────────────────────────────────────────────────
 
-export async function searchFtbModsAction(term: string, limit = 20) {
+export async function searchModsAction(term: string, limit = 20) {
     const r = await searchMods(term, limit);
     if (!r) return { mods: [], total: 0, enriched: [] };
     // Enrich the first up to 20 IDs into full mod objects so callers get
-    // names/synopses without having to call ftb_mod_info for each hit.
+    // names/synopses without having to call mod_info for each hit.
     const mods = r.mods ?? [];
     const take = mods.slice(0, Math.min(mods.length, 20));
     const enriched = await getModsBatch(take);
@@ -814,14 +825,16 @@ export async function searchFtbModsAction(term: string, limit = 20) {
     };
 }
 
-export async function ftbModInfoAction(modId: number | string, opts: {
-    mcVersion?: string; loader?: string;
+export async function modInfoAction(modId: number | string, opts: {
+    mcVersion?: string; loader?: string; limit?: number;
 } = {}) {
+    const limit = opts.limit ?? 20;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("limit must be a positive integer");
     const m = await getMod(modId);
-    if (!m) throw new Error(`FTB mod ${modId} not found`);
+    if (!m) throw new Error(`Mod ${modId} not found on modpacks.ch`);
 
     // Filter versions by mcVersion / loader if requested
-    let versions = m.versions as FtbModVersion[];
+    let versions = await providerVersions("mod", m.id, { ...opts, limit });
     if (opts.mcVersion) {
         versions = versions.filter((v) =>
             v.targets.some((t) => t.type === "game" && t.version === opts.mcVersion)
@@ -840,6 +853,7 @@ export async function ftbModInfoAction(modId: number | string, opts: {
         synopsis: m.synopsis,
         installs: m.installs,
         links:    m.links.map((l) => ({ type: l.type, url: l.link })),
+        versionLimit: limit,
         versions: versions.map((v) => ({
             fileId:  v.id,
             name:    v.name,
@@ -850,6 +864,7 @@ export async function ftbModInfoAction(modId: number | string, opts: {
             url:     resolveModVersionUrl(v),
             mcVersions: v.targets.filter((t) => t.type === "game").map((t) => t.version),
             loaders:    v.targets.filter((t) => t.type === "modloader").map((t) => t.name),
+            ...(v.loaderSource ? { loaderSource: v.loaderSource } : {}),
             updated: new Date(v.updated * 1000).toISOString(),
         })),
     };
@@ -866,7 +881,7 @@ export async function ftbModInfoAction(modId: number | string, opts: {
  * @param opts.force     - Re-download even if the file is already in cache
  */
 export async function downloadModAction(modId: number | string, opts: {
-    mcVersion?: string; loader?: string; fileId?: number; force?: boolean;
+    mcVersion?: string; loader?: string; fileId?: number | string; force?: boolean;
 } = {}): Promise<{
     status: string;
     modId?: number;
@@ -874,15 +889,16 @@ export async function downloadModAction(modId: number | string, opts: {
     version?: string;
     jarPath?: string;
     message?: string;
+    loaderSource?: "jar";
 }> {
     const m = await getMod(modId);
     if (!m) throw new Error(`Mod ${modId} not found on modpacks.ch`);
 
-    let candidates = m.versions as FtbModVersion[];
+    let candidates = await providerVersions("mod", m.id, opts.fileId !== undefined ? {} : { ...opts, limit: 1 });
 
     if (opts.fileId !== undefined) {
         // Exact file requested
-        candidates = candidates.filter((v) => v.id === opts.fileId);
+        candidates = candidates.filter((v) => String(v.id) === String(opts.fileId));
     } else {
         if (opts.mcVersion) {
             candidates = candidates.filter((v) =>
@@ -907,25 +923,23 @@ export async function downloadModAction(modId: number | string, opts: {
 
     // Take the first (most recent) matching version
     const version = candidates[0];
-    const url = resolveModVersionUrl(version);
-    if (!url) throw new Error(`No download URL available for ${version.name}`);
-
-    // Build a stable cache path: use sha1 when available
-    const key      = version.sha1 || String(version.id);
-    const destPath = join(CACHE_ROOT, "mods", String(m.id), `${key}.jar`);
-    const tmpPath  = destPath + ".tmp";
-
-    await ensureDir(destPath);
-
-    if (opts.force || !(await exists(destPath))) {
-        const res = await fetchWithRetry(url, { headers: MOD_HEADERS }, DOWNLOAD_OPTS);
-        if (!res.ok) throw new Error(`Download failed for ${version.name}: HTTP ${res.status}`);
-        const stream = createWriteStream(tmpPath);
-        await pipeline(res.body as unknown as NodeJS.ReadableStream, stream);
-        await rename(tmpPath, destPath);
-    }
+    // A forced loader inspection has already refreshed this artifact.
+    const destPath = await downloadModVersion(m.id, version, opts.force && !version.loaderSource);
 
     const result = await ingestMod(destPath, /* skipSource */ true);
+    if ("mod" in result && result.mod) {
+        // The chosen API record already identifies the file, including hashes
+        // which may not yet have reached the separate checksum lookup index.
+        const mod = result.mod;
+        const isCurseForge = m.provider === "curseforge" || /^\d+$/.test(String(m.id));
+        await updateMod(mod.id, {
+            ...(isCurseForge ? { curseforgeId: Number(m.id) } : { modrinthId: String(m.id) }),
+            metadata: { ...(mod.metadata as object), modpacksChFileId: String(version.id),
+                modpacksChSha1: version.sha1, modpacksChVersion: version.version,
+                sourceUrl: (mod.metadata as Record<string, unknown>).sourceUrl
+                    ?? m.links?.find(link=>link.type === "source")?.link },
+        });
+    }
     return {
         status:  result.status,
         modId:   result.status === "ingested" || result.status === "replaced" || result.status === "already_ingested"
@@ -935,6 +949,7 @@ export async function downloadModAction(modId: number | string, opts: {
         version: version.version,
         jarPath: destPath,
         message: "message" in result ? result.message : undefined,
+        ...(version.loaderSource ? { loaderSource: version.loaderSource } : {}),
     };
 }
 
@@ -963,7 +978,7 @@ export async function syncPackModsAction(opts: SyncPackModsOptions): Promise<{
     const skipServer   = opts.skipServer  ?? false;
     const skipOptional = opts.skipOptional ?? false;
 
-    const manifest: FtbManifest | null = namespace === "feedthebeast"
+    const manifest: PackManifest | null = namespace === "feedthebeast"
         ? await getOfficialFtbPackManifest(packId, versionId).then((m) => m ? normalizeOfficialFtbManifest(m) : null)
         : namespace === "curseforge"
             ? await getCfPackManifest(packId, versionId)
@@ -1046,7 +1061,7 @@ export async function syncPackModsAction(opts: SyncPackModsOptions): Promise<{
     };
 }
 
-async function processFile(file: FtbManifestFile, cacheDir: string): Promise<FileResult> {
+async function processFile(file: ManifestFile, cacheDir: string): Promise<FileResult> {
     const url = resolveFileUrl(file)!;
     // Derive a stable local path: sha1 preferred, fall back to name hash
     const key     = file.sha1 || createHash("sha1").update(url).digest("hex");
@@ -1153,14 +1168,18 @@ async function downloadModrinthPackIndex(project: ModrinthProject, version: Modr
     index: ModrinthPackIndex;
     mrpackPath: string;
 }> {
-    const file = getModrinthPrimaryFile(version);
+    // The parsed manifest supplies the authoritative archive URL and integrity hash.
+    const manifest = await modpacksChGet<PackManifest>(`modrinth/${encodeURIComponent(project.id)}/${encodeURIComponent(version.id)}`);
+    const archive = manifest?.files?.find(f=>f.type === "mr-extract");
+    if (!archive?.url) throw new Error(`modpacks.ch returned no source archive for pack ${project.id}/${version.id}`);
+    const file = {url:archive.url, filename:archive.name, hashes:{sha1:archive.sha1}};
     if (!file) throw new Error(`Modrinth version ${version.id} has no downloadable files`);
     if (!file.filename.endsWith(".mrpack")) {
         throw new Error(`Primary file for Modrinth version ${version.id} is not an .mrpack: ${file.filename}`);
     }
 
     const packDir = join(CACHE_ROOT, "packs", "modrinth", project.id, version.id);
-    const mrpackPath = join(packDir, file.filename);
+    const mrpackPath = join(packDir, basename(file.filename));
     await mkdir(packDir, { recursive: true });
 
     if (!(await exists(mrpackPath))) {

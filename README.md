@@ -121,6 +121,8 @@ Search reports its coverage: a missing match does not prove absence from binarie
 
 Contributor validation: `npm run test:project:http` exercises the real uploader and HTTP transport. Set `JAVA_HOME` and `MODLENS_TEST_GRADLE_HOME`, then run `npm run test:project:gradle` for a Java dependency fixture, or `npm run test:project:gradle -- moddev` for a real AT before/after check. The Gradle tests use disposable projects and may download build dependencies; they never launch Minecraft.
 
+Minecraft compatibility validation: `npm run test:minecraft:eras` exercises the local MCP server across Beta 1.7.3 through 26.1.2, plus real legacy Forge, Fabric and NeoForge mods, using temporary databases and caches. See [TESTING.md](TESTING.md) for the version matrix, offline format coverage and upstream gaps.
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -135,7 +137,7 @@ Contributor validation: `npm run test:project:http` exercises the real uploader 
 
 | Variable | Purpose |
 |----------|---------|
-| `CURSEFORGE_API_KEY` | CurseForge platform sync (`sync_curseforge` action) |
+| `CURSEFORGE_API_KEY` | Optional direct fingerprint lookup and authenticated CurseForge downloads; normal metadata/sync uses modpacks.ch |
 | `MODRINTH_TOKEN` | Modrinth API — increases rate limit for batch operations |
 | `JAVA_HOME` | Override Java discovery (falls back to PATH if not set) |
 
@@ -226,9 +228,23 @@ node dist/cli.js backfill-embeddings
 node dist/cli.js backfill-embeddings --type source --version 26.1.2
 ```
 
-After this, the `docs` and `primers` MCP tools will have a `semantic_search` action, and the `mc_source` tool will have `search_semantic` and `index_semantic`. Semantic search is **opt-in** — if `OLLAMA_URL` is not reachable, tools fall back to keyword search automatically.
+After this, the `docs` and `primers` MCP tools provide `semantic_search`, and `mc_source` provides `search_semantic` and `index_semantic`. Semantic search requires a reachable Ollama service and the configured embedding model. Keyword search remains available separately. SQLite uses the bundled `sqlite-vec` dependency; `db:vector` above is for PostgreSQL.
 
 > **Note:** The `npm run db:vector` script is safe to re-run. It creates the `pgvector` extension and `embedding` columns using `IF NOT EXISTS` guards.
+
+## Data sources and shared bundles
+
+ModLens uses [modpacks.ch](https://modpacks.ch/api/openapi.json) for supported mod and pack searches, provider records, release histories, hash lookups, parsed pack manifests and loader versions. Maven artifacts and metadata come from [CreeperHost Maven](https://maven.creeperhost.net/). Download URLs supplied by modpacks.ch may point to the original provider's CDN. An API failure or missing result does not silently switch to another metadata service.
+
+When a mod file has no loader label, loader-filtered searches, version listings and update checks automatically download and inspect its JAR. Existing modpacks.ch labels take precedence. Inspection supports Forge/FML, Fabric, Quilt and NeoForge, including multiple loader declarations in one JAR; unknown or mismatched loaders are excluded. Recovered labels report `loaderSource: "jar"`. The first lookup can download several candidate files; subsequent queries and ingestion reuse the artifact cache. `mod_info` defaults to the latest 20 matches and reports `versionLimit`; increase `limit` (CLI: `--limit`) for more history. Download, checksum and unreadable-JAR failures are reported as errors.
+
+Existing sources remain for capabilities these services do not cover: Mojang manifests, game files and official mappings; mcmeta's extracted data and history; RetroMCP legacy mappings; Adoptium runtime provisioning; the ModLens indexer release; metadata-provided source repositories; and the selected GitHub graph and embedding registries. Existing local Java installations are preferred.
+
+`mod graph_build` can build a class and inheritance graph directly from the mod JAR, without Graphify or an AI service. Set `backend=ast-only` to select this mode explicitly. `graph_enrich_next` and `graph_enrich_submit` add relationships supplied by the client. Automatic semantic extraction still needs a configured Graphify backend.
+
+`graph_export` and `embed_export` produce portable gzip bundles. Pass the resulting `bundlePath` to `graph_submit` or `embed_submit` to propose the bundle and its index entry together in a draft pull request. The defaults are [Mattabase/modlens-graphs](https://github.com/Mattabase/modlens-graphs) and [Mattabase/modlens-embeddings](https://github.com/Mattabase/modlens-embeddings). Submissions require `MODLENS_REGISTRY_TOKEN` or `GITHUB_TOKEN` with access to write the branch and open the pull request; a personal fork is used when the account cannot push to the registry. Submission does not merge the pull request.
+
+Custom registries use `MODLENS_GRAPH_REGISTRY_URL` or `MODLENS_EMBED_REGISTRY_URL`. For submission, the corresponding `MODLENS_GRAPH_REGISTRY_REPO` / `MODLENS_EMBED_REGISTRY_REPO`, `_BRANCH` and `_INDEX_PATH` settings override the destination inferred from a GitHub raw-content URL.
 
 ---
 
@@ -528,10 +544,10 @@ Run without arguments (or `--help`) to print the full command list. Every MCP to
 | `modpacks manifest <packId> <verId>` | Pack manifest |
 | MCP `modpacks_ch action=resolve_pack` | Resolve FTB/CurseForge/Modrinth/Feed The Beast pack names, IDs, version IDs, or version names |
 | MCP `modpacks_ch action=list_versions` | List remote pack versions and optionally mark matches for a short `versionRef` like `7.1` |
-| MCP `modpacks_ch action=ingest_pack` | Download and ingest a resolved pack version from modpacks.ch, Modrinth, or the official Feed The Beast API |
+| MCP `modpacks_ch action=ingest_pack` | Resolve metadata through modpacks.ch, then download and ingest the selected pack version |
 | `modpacks list-versions` | Pack version list |
 | `modpacks list-files` | Pack file list |
-| `modpacks ftb-mod-info <modId>` | FTB mod info |
+| `modpacks mod-info <modId>` | Mod metadata from modpacks.ch (`ftb-mod-info` remains an alias) |
 | `modpacks find-mod` | Find a mod across packs |
 
 **Diagnostics**
@@ -640,8 +656,8 @@ All tool actions have been consolidated into **24 grouped tools** to stay within
 
 | action | Key params | Description |
 |--------|-----------|-------------|
-| `sync_modrinth` | dbId | SHA-512 lookup → store project ID + source URL |
-| `sync_curseforge` | dbId | Murmur2 fingerprint lookup (needs `CURSEFORGE_API_KEY`) |
+| `sync_modrinth` | dbId | Resolve a known project or JAR SHA-1 through modpacks.ch; store project ID and source URL |
+| `sync_curseforge` | dbId | Resolve a known project or JAR SHA-1 through modpacks.ch; no CurseForge API key required |
 | `check_updates` | dbId | Check both platforms for newer version |
 | `batch_sync` | syncModrinth, syncCurseforge, downloadSources, modIdFilter, limit | Bulk sync all unmatched mods |
 | `download_source` | dbId | Download GitHub/GitLab source ZIP |
@@ -908,7 +924,7 @@ modpacks_ch  action=ingest_pack  namespace=modrinth  packRef=<slug-or-project-id
 modpacks_ch  action=ingest_pack  namespace=modrinth  packRef="https://modrinth.com/modpack/fabulously-optimized"  versionRef=6.4.0
 
 # Official Feed The Beast API packs use namespace=feedthebeast.
-# Use namespace=ftb for the modpacks.ch FTB namespace; use feedthebeast for api.feed-the-beast.com.
+# Both use modpacks.ch: namespace=ftb selects /modpack; feedthebeast selects /ftb.
 modpacks_ch  action=list_versions  namespace=feedthebeast  packRef="Architect's"  versionRef=1.1
 modpacks_ch  action=ingest_pack  namespace=feedthebeast  packRef="Architect's"  versionRef=1.1
 
@@ -1014,9 +1030,9 @@ node dist/cli.js check-updates 2
 
 ### Services & APIs
 - **[CreeperHost](https://www.creeperhost.net)** — for the free [modpacks.ch](https://www.modpacks.ch) public API powering modpack search, sync, and mod downloads.
-- **[Feed The Beast](https://www.feed-the-beast.com)** — for the public Feed The Beast modpack API powering official FTB pack lookup and ingest.
+- **[Feed The Beast](https://www.feed-the-beast.com)** — for the official FTB pack catalog, accessed through modpacks.ch.
 - **[Modrinth](https://modrinth.com)** — for the free [Modrinth API](https://docs.modrinth.com) powering mod search, metadata lookup, and version sync.
-- **[CurseForge](https://www.curseforge.com)** — for the [CurseForge API](https://docs.curseforge.com) powering mod and modpack browsing and sync.
+- **[CurseForge](https://www.curseforge.com)** — for mod and modpack hosting; metadata and release history are accessed through modpacks.ch.
 - **[misode](https://github.com/misode)** — for [mcmeta](https://github.com/misode/mcmeta), the version-controlled Minecraft data repository that powers the `mc_data`, `mc_files`, and `mc_registry` tools.
 - **[Mojang](https://www.minecraft.net)** — for publishing official Mojmap mappings and the Piston Meta API used for version discovery and JAR downloads.
 

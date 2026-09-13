@@ -46,7 +46,7 @@ async function mixinConflictRaw(
     // class_name → set of deduped mod row ids that target it
     const classToModIds = new Map<string, Set<number>>();
     for (const m of latestByModId.values()) {
-        for (const className of new Set(deserializeArray<string>(m.mixinTargets))) {
+        for (const className of new Set(deserializeArray<string>(m.mixinTargets).map(t=>t.replace(/\./g,"/")))) {
             let ids = classToModIds.get(className);
             if (!ids) { ids = new Set(); classToModIds.set(className, ids); }
             ids.add(m.id);
@@ -257,8 +257,8 @@ function parseMixinTargetsFromJavap(output: string): string[] {
     }
 
     // targets=["net/minecraft/X"] or targets={"net/minecraft/X"}  (slash-separated strings)
-    for (const m of block.matchAll(/"([\w/$]+)"/g)) {
-        const cls = m[1];
+    for (const m of block.matchAll(/"([\w/.$]+)"/g)) {
+        const cls = normalise(m[1]);
         if (cls.includes("/") && !targets.includes(cls)) targets.push(cls);
     }
 
@@ -293,10 +293,15 @@ export async function resolveMixinTargets(dbId: number): Promise<{
     const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
     assertJarPath(mod.jarPath);
+    const result = await readJarMixinTargets(mod.jarPath, deserializeArray<string>(mod.mixinConfigs));
+    await updateMod(dbId, { mixinTargets: result.targets });
+    return result;
+}
 
+export async function readJarMixinTargets(jarPath: string, configs: string[]) {
     // Always re-read mixin class names from the JAR — never from DB mixinTargets
     // (DB value may already be resolved or stale)
-    const mixinClasses = readMixinClassesFromJar(mod.jarPath, mod.mixinConfigs as string[]);
+    const mixinClasses = readMixinClassesFromJar(jarPath, configs);
     if (!mixinClasses.length) return { resolved: 0, failed: 0, skipped: 0, targets: [] };
 
     const allTargets = new Set<string>();
@@ -305,7 +310,7 @@ export async function resolveMixinTargets(dbId: number): Promise<{
     for (const mixinClass of mixinClasses) {
         const className = mixinClass.replace(/\./g, "/");
         try {
-            const bytecode = await getBytecode(mod.jarPath, className);
+            const bytecode = await getBytecode(jarPath, className);
             const targets = parseMixinTargetsFromJavap(bytecode);
             if (targets.length === 0) { skipped++; continue; }
             targets.forEach((t) => allTargets.add(t));
@@ -316,8 +321,6 @@ export async function resolveMixinTargets(dbId: number): Promise<{
     }
 
     const targetArray = [...allTargets];
-    await updateMod(dbId, { mixinTargets: targetArray });
-
     return { resolved, failed, skipped, targets: targetArray };
 }
 
@@ -339,7 +342,8 @@ export async function getMixinTargets(modId: string | number) {
 
 export async function getMixinConflicts(targetClass: string) {
     const all = await listMods({ hasMixins: true, limit: 9999 });
-    const mods = all.filter((m) => (m.mixinTargets as string[])?.includes(targetClass));
+    const internal = targetClass.replace(/\./g, "/");
+    const mods = all.filter((m) => deserializeArray<string>(m.mixinTargets).some(t => t.replace(/\./g, "/") === internal));
 
     return {
         targetClass,

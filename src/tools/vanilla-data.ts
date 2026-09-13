@@ -8,11 +8,12 @@
  *   data branch  → data/minecraft/<type>/<id>.json
  *   assets-json  → assets/minecraft/<type>/<id>.json
  */
-import { readFile, writeFile, readdir } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { join, resolve, sep } from "path";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
 import { resolveModRef } from "../repositories/mod.js";
 import { searchSource } from "./source.js";
+import { listMcmetaDirectory } from "./mcmeta.js";
 
 const RAW_BASE     = "https://raw.githubusercontent.com/misode/mcmeta";
 const MCMETA_CACHE = join(CACHE_ROOT, "mcmeta");
@@ -60,47 +61,8 @@ function versionRef(version: string | undefined, branch: string): string {
     return version ? `${version}-${branch}` : branch;
 }
 
-type DirEntry = { name: string; type: "file" | "dir" };
-
-/**
- * List files/dirs in a mcmeta branch directory via the GitHub Contents API.
- * Result is cached as _dir_index.json inside the matching cache directory.
- */
-async function listMcmetaDir(
-    version: string,
-    branch: string,
-    path: string,
-): Promise<DirEntry[]> {
-    const cacheDir  = mcmetaCachePath(version, branch, path);
-    const indexPath = join(cacheDir, "_dir_index.json");
-
-    if (await exists(indexPath)) {
-        return JSON.parse((await readFile(indexPath)).toString("utf8")) as DirEntry[];
-    }
-
-    // Try local cache dir listing first (may already be populated by prior fetches)
-    if (await exists(cacheDir)) {
-        try {
-            const dirEntries = await readdir(cacheDir, { withFileTypes: true });
-            const entries: DirEntry[] = dirEntries
-                .filter(e => e.name !== "_dir_index.json")
-                .map(e => ({ name: e.name, type: e.isDirectory() ? "dir" : "file" }));
-            if (entries.length > 0) {
-                await writeFile(indexPath, JSON.stringify(entries, null, 2));
-                return entries;
-            }
-        } catch { /* fall through to API */ }
-    }
-
-    const apiUrl = `https://api.github.com/repos/misode/mcmeta/contents/${path}?ref=${version}-${branch}`;
-    const res = await fetch(apiUrl, { headers: { Accept: "application/vnd.github.v3+json" } });
-    if (!res.ok) throw new Error(`GitHub contents API ${res.status} — ${apiUrl}`);
-    const items = await res.json() as Array<{ name: string; type: string }>;
-    const entries: DirEntry[] = items.map(i => ({ name: i.name, type: i.type === "dir" ? "dir" : "file" }));
-
-    await ensureDir(indexPath);
-    await writeFile(indexPath, JSON.stringify(entries, null, 2));
-    return entries;
+async function listMcmetaDir(version: string, branch: string, path: string) {
+    return (await listMcmetaDirectory(path, version, branch)).entries;
 }
 
 // ── Tags ──────────────────────────────────────────────────────────────────────

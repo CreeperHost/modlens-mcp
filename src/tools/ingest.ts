@@ -42,8 +42,9 @@ const PLATFORM_ADAPTERS = [
 async function lookupPlatforms(
     sha512: string | null,
     murmur2: string | null,
+    sha1?: string | null,
 ): Promise<PlatformHit[]> {
-    const hashes = { sha512, murmur2 };
+    const hashes = { sha512, murmur2, sha1 };
     const results = await Promise.allSettled(
         PLATFORM_ADAPTERS.map(a => a.lookup(hashes)),
     );
@@ -153,7 +154,7 @@ export async function ingestMod(jarPath: string, skipSource = false, replace = f
     });
 
     if (!skipSource) {
-        const hits = await lookupPlatforms(hashes.sha512, hashes.murmur2);
+        const hits = await lookupPlatforms(hashes.sha512, hashes.murmur2, hashes.sha1);
         let merged: Record<string, unknown> & { sourceUrl?: string | null } = { ...(mod.metadata as object) };
 
         for (const hit of hits) {
@@ -261,7 +262,7 @@ export async function refreshDegradedMetadata(opts?: { loader?: string; mcVersio
         metadataSource: { in: ["filename", "@Mod annotation"] },
     };
     if (opts?.loader) where.loader = opts.loader;
-    if (opts?.mcVersion) Object.assign(where, mcVersionWhere(opts.mcVersion));
+    if (opts?.mcVersion) Object.assign(where, await mcVersionWhere(opts.mcVersion));
 
     const mods = await db.mod.findMany({ where, orderBy: { modId: "asc" } });
     let refreshed = 0, unchanged = 0, failed = 0;

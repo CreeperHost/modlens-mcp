@@ -1,5 +1,6 @@
 /** Hashes available for a mod JAR at ingest time. */
 export type JarHashes = {
+    sha1?: string | null;
     sha512:  string | null;
     murmur2: string | null;
 };

@@ -29,7 +29,7 @@ const KUBEJS_PATTERNS: Record<string, string[]> = {
     "startup_register":  ["StartupEvents.registry", "event.register(", "event.createRecipeSerializer("],
     "client_asset":      ["ClientEvents", "event.painter(", "event.addLayer("],
     "player_events":     ["PlayerEvents", "event.give(", "event.sendMessage("],
-    "server_events":     ["ServerEvents.loaded", "ServerEvents.commmandRegistry", "event.addCommand("],
+    "server_events":     ["ServerEvents.loaded", "ServerEvents.commandRegistry", "event.addCommand("],
     "forge_events":      ["ForgeEvents", "event.register("],
     "jei_integration":   ["JEIEvents", "JEIPlugin", "event.hideItem(", "event.addItem("],
     "kubejs_additions":  ["KubeJSAdditions", "MoreJSEvents"],

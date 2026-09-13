@@ -4,7 +4,7 @@
  * references, inheritance, version diff, source search, AW validation,
  * and mixin validation.
  */
-import { readFile, writeFile, readdir } from "fs/promises";
+import { readFile, writeFile, readdir, rename, unlink } from "fs/promises";
 import { join, relative } from "path";
 import { getMcJarPath, mcPaths, fetchMcVersionList } from "../minecraft.js";
 import { listClasses } from "../jar.js";
@@ -19,24 +19,34 @@ import { formatClassMembers } from "../access-flags.js";
 import { ensureMcVersion, updateMcVersion } from "../repositories/mcVersion.js";
 import { findModByModIdLike } from "../repositories/mod.js";
 import { searchSource } from "./source.js";
-import { hasSrgMappings, remapMcJar, applyMcpNamesToSource, applyMcpNamesToFile, hasRetroMcpMappings, remapMcJarTiny } from "../mappings.js";
+import { hasSrgMappings, remapMcJar, applyMcpNamesToSource, applyMcpNamesToFile, hasRetroMcpMappings, remapMcJarTiny, remapJar, isUnobfuscated } from "../mappings.js";
 
 /**
  * Resolve the jar to feed Vineflower for a version. Legacy versions are remapped
  * to readable net/minecraft names first (cached as <jar>-mapped.jar by the remap
- * helpers); modern versions decompile from the raw jar. Shared by the bulk and
+ * helpers); modern obfuscated versions use Mojang mappings. Shared by the bulk and
  * single-class decompile paths so both produce the same class names.
  */
 async function resolveMcDecompileJar(
     version: string,
     rawJarPath: string,
-): Promise<{ jarPath: string; remapType: "srg" | "retromcp" | "none" }> {
+): Promise<{ jarPath: string; remapType: "srg" | "retromcp" | "mojmap" | "none" }> {
     if (hasSrgMappings(version)) {
         const mapped = await remapMcJar(rawJarPath, version);
         if (mapped) return { jarPath: mapped, remapType: "srg" };
     } else if (hasRetroMcpMappings(version)) {
         const mapped = await remapMcJarTiny(rawJarPath, version);
         if (mapped) return { jarPath: mapped, remapType: "retromcp" };
+    } else if (!isUnobfuscated(version)) {
+        const mapped = rawJarPath.replace(/\.jar$/, "-mojmap.jar");
+        if (!(await exists(mapped))) {
+            const temporary = mapped.replace(/\.jar$/, `-${process.pid}-${Date.now()}.tmp.jar`);
+            try {
+                await remapJar(rawJarPath, temporary, version, "mojmap");
+                await rename(temporary, mapped);
+            } finally { await unlink(temporary).catch(() => {}); }
+        }
+        return { jarPath: mapped, remapType: "mojmap" };
     }
     return { jarPath: rawJarPath, remapType: "none" };
 }
@@ -45,7 +55,7 @@ async function resolveMcDecompileJar(
 
 const indexMemCache = new Map<string, JarIndex>();
 
-async function getMcIndex(version: string): Promise<JarIndex> {
+export async function getMcIndex(version: string): Promise<JarIndex> {
     if (indexMemCache.has(version)) return indexMemCache.get(version)!;
 
     const cachePath = mcPaths.index(version);
@@ -55,7 +65,7 @@ async function getMcIndex(version: string): Promise<JarIndex> {
         return data;
     }
 
-    const jarPath = await getMcJarPath(version);
+    const { jarPath } = await resolveMcDecompileJar(version, await getMcJarPath(version));
     const index = await indexJar(jarPath);
     await ensureDir(cachePath);
     await writeFile(cachePath, JSON.stringify(index), "utf8");
@@ -208,9 +218,9 @@ export async function getMcInheritance(version: string, className: string) {
 
 /** diff_minecraft_versions — added/removed classes between two versions. */
 export async function diffMcVersions(versionA: string, versionB: string) {
-    const [jarA, jarB] = await Promise.all([getMcJarPath(versionA), getMcJarPath(versionB)]);
-    const setA = new Set(listClasses(jarA));
-    const setB = new Set(listClasses(jarB));
+    const [indexA, indexB] = await Promise.all([getMcIndex(versionA), getMcIndex(versionB)]);
+    const setA = new Set(Object.keys(indexA.classes).map(name => `${name}.class`));
+    const setB = new Set(Object.keys(indexB.classes).map(name => `${name}.class`));
 
     const added   = [...setB].filter((c) => !setA.has(c)).sort();
     const removed = [...setA].filter((c) => !setB.has(c)).sort();
@@ -411,7 +421,7 @@ export async function validateAccessWidener(content: string, mcVersion: string) 
         byClass.set(e.className, list);
     }
 
-    const jarPath = await getMcJarPath(mcVersion);
+    const { jarPath } = await resolveMcDecompileJar(mcVersion, await getMcJarPath(mcVersion));
 
     for (const [className, classEntries] of byClass) {
         let members: ReturnType<typeof formatClassMembers> | null = null;
@@ -515,10 +525,10 @@ function parseMixinAnnotations(source: string): {
 
     // @Mixin(SomeClass.class) or @Mixin(value = SomeClass.class)
     if (!targetClass) {
-        const valueMatch = source.match(/@Mixin\s*\(\s*(?:value\s*=\s*)?(\w+)\.class/);
+        const valueMatch = source.match(/@Mixin\s*\(\s*(?:value\s*=\s*)?([\w.$]+)\.class/);
         if (valueMatch) {
             const simpleName = valueMatch[1];
-            targetClass = imports.get(simpleName) ?? simpleName;
+            targetClass = imports.get(simpleName) ?? simpleName.replace(/\./g,"/");
             targetRaw = valueMatch[0];
         }
     }
@@ -562,7 +572,7 @@ export async function analyzeMixin(source: string, mcVersion: string) {
         };
     }
 
-    const jarPath = await getMcJarPath(mcVersion);
+    const { jarPath } = await resolveMcDecompileJar(mcVersion, await getMcJarPath(mcVersion));
     let members: ReturnType<typeof formatClassMembers>;
     try {
         const info = await inspectClass(jarPath, targetClass);

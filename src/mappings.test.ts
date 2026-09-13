@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { parseTinyV2, lookupInIndex, hasSrgMappings, hasRetroMcpMappings } from "./mappings.js";
+import { parseTinyV2, lookupInIndex, hasSrgMappings, hasRetroMcpMappings, proguardToTiny } from "./mappings.js";
 
 const FIXTURE_TINY = [
     "tiny\t2\t0\tofficial\tintermediary",
@@ -126,6 +126,7 @@ describe("lookupInIndex — reverse (intermediary → official)", () => {
 
 describe("hasSrgMappings", () => {
     it("returns true for known SRG versions", () => {
+        expect(hasSrgMappings("1.6.4")).toBe(true);
         expect(hasSrgMappings("1.7.10")).toBe(true);
         expect(hasSrgMappings("1.8")).toBe(true);
         expect(hasSrgMappings("1.8.9")).toBe(true);
@@ -147,7 +148,7 @@ describe("hasSrgMappings", () => {
     });
 
     it("returns false for versions without SRG", () => {
-        expect(hasSrgMappings("1.6.4")).toBe(false);
+        expect(hasSrgMappings("1.4.7")).toBe(false);
         expect(hasSrgMappings("1.5.2")).toBe(false);
     });
 });
@@ -186,5 +187,27 @@ describe("hasRetroMcpMappings", () => {
         for (const v of retroVersions) {
             expect(hasSrgMappings(v)).toBe(false);
         }
+    });
+});
+
+describe("Mojang ProGuard to Tiny conversion", () => {
+    it("accepts CRLF mappings without retaining carriage returns in names", () => {
+        const tiny = proguardToTiny("net.minecraft.world.World -> a:\r\n    int height -> b\r\n");
+        const index = parseTinyV2(tiny.replace(/\n/g, "\r\n"));
+        expect(index.ns).toEqual(["official", "named"]);
+        expect(index.classes.get("a")).toBe("net/minecraft/world/World");
+        expect(index.fields.get("a")?.get("b:I")).toBe("height");
+    });
+    it("maps members with descriptors in the input namespace", () => {
+        const result = proguardToTiny(`net.minecraft.Level -> a:\n    net.minecraft.Entity[] entities -> b\n    12:14:net.minecraft.Entity lookup(int,net.minecraft.Entity[]):20:22 -> c\nnet.minecraft.Entity -> d:\n    long id -> a\n`);
+        expect(result).toContain("c\ta\tnet/minecraft/Level");
+        expect(result).toContain("\tf\t[Ld;\tb\tentities");
+        expect(result).toContain("\tm\t(I[Ld;)Ld;\tc\tlookup");
+        expect(result).toContain("\tf\tJ\ta\tid");
+    });
+    it("deduplicates line mappings and excludes foreign inline owners", () => {
+        const result = proguardToTiny(`Example -> a:\n    1:2:void run():4:5 -> b\n    3:4:void run():6:7 -> b\n    5:6:void Other.inline():1:2 -> b\n`);
+        expect(result.match(/\tm\t/g)).toHaveLength(1);
+        expect(result).toContain("\tm\t()V\tb\trun");
     });
 });

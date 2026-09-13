@@ -477,9 +477,11 @@ describe("validateEmbeddingBundle", () => {
         expect(validateEmbeddingBundle(b).reason).toContain("invalid className");
     });
 
-    it("rejects className with path separators", () => {
+    it("accepts JVM internal class names but rejects traversal paths", () => {
         const b = validBundle();
         b.entries = [{ className: "com/example/Foo", embedding: [0.1, 0.2, 0.3] }];
+        expect(validateEmbeddingBundle(b).valid).toBe(true);
+        b.entries[0].className = "com/../example/Foo";
         expect(validateEmbeddingBundle(b).reason).toContain("invalid className");
     });
 

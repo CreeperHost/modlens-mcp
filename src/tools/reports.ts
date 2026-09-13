@@ -327,7 +327,7 @@ async function reportPackCompat(opts: { mcVersion?: string; loader?: string; dbI
     const degradedWhere: Record<string, unknown> = {
         metadataSource: { in: ["filename", "@Mod annotation"] },
     };
-    if (opts.mcVersion) Object.assign(degradedWhere, mcVersionWhere(opts.mcVersion));
+    if (opts.mcVersion) Object.assign(degradedWhere, await mcVersionWhere(opts.mcVersion));
     if (opts.loader) degradedWhere.loader = opts.loader;
     const db = await getDb();
 
@@ -464,8 +464,10 @@ async function reportDepGraph(opts: { mcVersion?: string; modId?: string | numbe
     // Mermaid diagram (cap at 40 mods to keep it readable)
     const entries = Object.entries(graphData.graph);
     md += h2("Mermaid Dependency Diagram");
-    const subset = opts.modId
-        ? entries.filter(([id]) => String(id).includes(String(opts.modId)))
+    const filterId = typeof opts.modId === "number" || /^\d+$/.test(String(opts.modId))
+        ? (await resolveModRef(opts.modId!))?.modId ?? String(opts.modId) : opts.modId;
+    const subset = filterId
+        ? entries.filter(([id]) => String(id).includes(filterId))
         : entries.slice(0, 40);
 
     if (subset.length > 0) {

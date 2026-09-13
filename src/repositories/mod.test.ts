@@ -1,30 +1,47 @@
-import { describe, it, expect } from "vitest";
-import { mcVersionWhere } from "./mod.js";
-
-/** Pull the `startsWith` family-prefix out of the generated filter. */
-function familyPrefix(mcVersion: string): string {
-    const filter = mcVersionWhere(mcVersion);
-    const arm = (filter.OR as Array<{ mcVersion: { startsWith: string } }>)[1];
-    return arm.mcVersion.startsWith;
-}
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { mcVersionWhere, resolveModRef, resolveModRefSlim } from "./mod.js";
+const database = vi.hoisted(() => ({ findUnique: vi.fn(), findFirst: vi.fn() }));
+afterEach(() => vi.clearAllMocks());
+vi.mock("../db.js", () => ({getDb: async () => ({mod:{...database, findMany:async () => [
+    "1.21.1", "1.21.11", "1.21.1.0", "1.211", "[1.21.1,)", "[1.21,1.22)", ">=1.21 <1.22",
+    "1.7.2", "1.7.10", "[1.7.10,1.8)", "1.12.2", "[1.12,1.13)", ">=1.16.2 <1.17",
+].map(mcVersion=>({mcVersion}))}})}));
 
 describe("mcVersionWhere", () => {
-    it("matches the exact MC version", () => {
-        expect(mcVersionWhere("1.21.1")).toEqual({
-            OR: [{ mcVersion: "1.21.1" }, { mcVersion: { startsWith: "1.21.1." } }],
-        });
+    it.each([
+        ["1.7.10", ["1.7.10", "[1.7.10,1.8)"]],
+        ["1.12.2", ["1.12.2", "[1.12,1.13)"]],
+        ["1.16.5", [">=1.16.2 <1.17"]],
+    ])("filters stored legacy declarations for %s", async (version, declarations) => {
+        expect(await mcVersionWhere(version as string)).toEqual({ mcVersion: { in: declarations } });
+    });
+    it("matches exact versions and compatible Maven/Fabric declarations", async () => {
+        expect(await mcVersionWhere("1.21.1")).toEqual({mcVersion:{in:[
+            "1.21.1", "1.21.1.0", "[1.21.1,)", "[1.21,1.22)", ">=1.21 <1.22",
+        ]}});
     });
 
-    it("does not let 1.21.1 pull in 1.21.11 (different patch versions are not compatible)", () => {
-        const prefix = familyPrefix("1.21.1"); // "1.21.1."
-        expect("1.21.11".startsWith(prefix)).toBe(false);
-        expect("1.21.1.0".startsWith(prefix)).toBe(true); // a real sub-version still matches
+    it("does not pull in a different patch", async () => {
+        const where = await mcVersionWhere("1.21.1");
+        expect((where.mcVersion as {in:string[]}).in).not.toContain("1.21.11");
     });
 
-    it("treats a partial version as a family prefix (1.21 → all 1.21.x)", () => {
-        const prefix = familyPrefix("1.21"); // "1.21."
-        expect("1.21.1".startsWith(prefix)).toBe(true);
-        expect("1.21.11".startsWith(prefix)).toBe(true);
-        expect("1.211".startsWith(prefix)).toBe(false); // not a 1.21 patch
+    it("treats a partial version as a family prefix (1.21 → all 1.21.x)", async () => {
+        const where = await mcVersionWhere("1.21");
+        expect((where.mcVersion as {in:string[]}).in).toEqual(expect.arrayContaining(["1.21.1", "1.21.11"]));
+        expect((where.mcVersion as {in:string[]}).in).not.toContain("1.211");
+    });
+});
+
+describe.each([resolveModRef, resolveModRefSlim])("mod reference resolution", resolve => {
+    it.each([undefined, null, ""])("does not query the first record for a missing reference (%s)", async ref => {
+        expect(await resolve(ref as any)).toBeNull();
+        expect(database.findFirst).not.toHaveBeenCalled();
+        expect(database.findUnique).not.toHaveBeenCalled();
+    });
+    it("does not interpret a mod name's numeric prefix as a database ID", async () => {
+        await resolve("3d-example");
+        expect(database.findUnique).not.toHaveBeenCalled();
+        expect(database.findFirst).toHaveBeenCalledOnce();
     });
 });

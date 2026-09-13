@@ -1,6 +1,7 @@
 import { extractEntry, listEntries } from "../jar.js";
 import { assertJarPath } from "../security.js";
 import type { Mod } from "@prisma/client";
+import { matchesVersionRange } from "../version-ranges.js";
 import {
     listMods as dbListMods,
     resolveModRef,
@@ -71,22 +72,19 @@ export async function getDependencies(modId: string | number, recursive = false)
     const deps = mod.dependencies as Dep[];
     if (!recursive) {
         // Annotate each dep with whether it's present in the DB
-        return deps.map((d) => ({ ...d, inDb: false })); // enriched below
+        return Promise.all(deps.map(async d => ({...d,inDb:!!await findModByModId(d.id)})));
     }
 
     // Recursive: resolve each dep from DB
-    const seen = new Set<string>();
-    const resolve = async (id: string): Promise<unknown[]> => {
-        if (seen.has(id)) return [];
-        seen.add(id);
-        const dep = await findModByModId(id);
-        if (!dep) return [];
-        const subDeps = dep.dependencies as Array<{ id: string; }>;
-        const children = await Promise.all(subDeps.map((d) => resolve(d.id)));
-        return [{ ...dep, children: children.flat() }];
+    const resolve = async (declaration: Dep, ancestors: Set<string>): Promise<unknown> => {
+        const dep = await findModByModId(declaration.id);
+        const cycle = ancestors.has(declaration.id);
+        const next = new Set(ancestors).add(declaration.id);
+        const children = dep && !cycle ? await Promise.all((dep.dependencies as Dep[]).map(d=>resolve(d,next))) : [];
+        return {...declaration,inDb:!!dep,...(dep ? {dbId:dep.id,installedVersion:dep.version} : {}),...(cycle ? {cycle:true} : {}),children};
     };
 
-    return Promise.all(deps.map((d) => resolve(d.id)));
+    return Promise.all(deps.map(d=>resolve(d,new Set([mod.modId]))));
 }
 
 /**
@@ -123,7 +121,7 @@ export async function findVersionConflicts(opts?: { mcVersion?: string; loader?:
             // Flag if no exact match and range looks specific
             const versionStr = typeof dep.version === "string" ? dep.version : String(dep.version ?? "");
             const rangeIsSpecific = versionStr !== "*" && versionStr !== "" && versionStr !== "any";
-            if (rangeIsSpecific && !versions.includes(versionStr.replace(/[\[\]()]/g, "").split(",")[0].trim())) {
+            if (rangeIsSpecific && !versions.some(version => matchesVersionRange(version, versionStr))) {
                 unsatisfied.push({
                     declaredBy:    mod.modId,
                     depId:         dep.id,
@@ -319,4 +317,3 @@ export async function listModRegistryEntries(
         entries,
     };
 }
-

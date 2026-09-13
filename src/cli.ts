@@ -64,7 +64,7 @@ import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzeP
 import { indexKubeJsScripts, searchKubeJsScripts } from "./tools/kubejs.js";
 import {
     searchPacksAction, featuredPacksAction, packInfoAction, packManifestAction, syncPackModsAction,
-    searchFtbModsAction, ftbModInfoAction, downloadModAction, downloadOverridesAction,
+    searchModsAction, modInfoAction, downloadModAction, downloadOverridesAction,
     listPackVersionsAction, listPackFilesAction, findModInPacksAction,
 } from "./tools/modpacks-ch.js";
 import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
@@ -387,7 +387,7 @@ MODPACKS.CH
   modpacks manifest <packId> <verId> Pack manifest  [--namespace=]
   modpacks list-versions             Pack version list  [--namespace=] [--pack-id=]
   modpacks list-files                Pack file list  [--namespace=] [--pack-id=] [--version-id=] [--file-type=]
-  modpacks ftb-mod-info <modId>      FTB mod info  [--mc-version=] [--loader=]
+  modpacks mod-info <modId>          Mod metadata  [--mc-version=] [--loader=] [--limit=20]
   modpacks find-mod                  Find a mod across packs  [--mod-db-id=] [--cf-project=]
 
 DIAGNOSTICS
@@ -1388,14 +1388,15 @@ try {
                 case "list-files":
                     out(await listPackFilesAction({ namespace: flags.namespace as any, packId: flags.packId as number | undefined, versionId: flags.versionId as number | undefined, fileType: flags.fileType as string | undefined }));
                     break;
-                case "ftb-mod-info":
-                    out(await ftbModInfoAction(modIdArg(positional[1], "modId"), { mcVersion: flags.mcVersion as string | undefined, loader: flags.loader as string | undefined }));
+                case "mod-info":
+                case "ftb-mod-info": // Compatibility with older CLI clients.
+                    out(await modInfoAction(modIdArg(positional[1], "modId"), { mcVersion: flags.mcVersion as string | undefined, loader: flags.loader as string | undefined, limit: flags.limit as number | undefined }));
                     break;
                 case "find-mod":
                     out(await findModInPacksAction({ modDbId: flags.modDbId as number | undefined, cfProject: flags.cfProject as number | undefined }));
                     break;
                 default:
-                    die(`Unknown modpacks action: ${sub}. Use: search|featured|info|manifest|list-versions|list-files|ftb-mod-info|find-mod`);
+                    die(`Unknown modpacks action: ${sub}. Use: search|featured|info|manifest|list-versions|list-files|mod-info|find-mod`);
             }
             break;
         }

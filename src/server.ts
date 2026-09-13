@@ -80,7 +80,7 @@ import {
 import { generateReport } from "./tools/reports.js";
 import { findAssetConflicts, findVanillaOverrides, analyzeModSidedness, analyzePackSidedness, computeModComplexity, computePackChangelog, findDataConflicts, buildPackGraph, diffPackConfigs, packHealth } from "./tools/packtools.js";
 import { indexKubeJsScripts, searchKubeJsScripts, semanticSearchKubeJsScripts } from "./tools/kubejs.js";
-import { searchPacksAction, featuredPacksAction, packInfoAction, packManifestAction, syncPackModsAction, resolvePackAction, listRemotePackVersionsAction, ingestPackAction, searchFtbModsAction, ftbModInfoAction, downloadModAction, downloadOverridesAction, listPackVersionsAction, listPackFilesAction, findModInPacksAction } from "./tools/modpacks-ch.js";
+import { searchPacksAction, featuredPacksAction, packInfoAction, packManifestAction, syncPackModsAction, resolvePackAction, listRemotePackVersionsAction, ingestPackAction, searchModsAction, modInfoAction, downloadModAction, downloadOverridesAction, listPackVersionsAction, listPackFilesAction, findModInPacksAction } from "./tools/modpacks-ch.js";
 import { analyzeCrashLog, findMissingDeps } from "./tools/diagnostics.js";
 import { checkModCompat } from "./tools/compat-check.js";
 import { disconnect } from "./db.js";
@@ -163,6 +163,12 @@ function resolveDbId(dbId: number | undefined, modId: string | number | undefine
     return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+function requireModRef(modId: string | number | undefined, dbId?: number): string | number {
+    const ref = dbId ?? modId;
+    if (ref === undefined || ref === "") throw new Error("modId or dbId is required");
+    return ref;
+}
+
 /**
  * Like resolveDbId, but for actions that need a valid DB id — will look up
  * string modIds via the database so agents can pass e.g. modId:"polylib".
@@ -212,7 +218,7 @@ function createMcpServer(): McpServer {
 
 server.tool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|refresh_metadata|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). refresh_metadata: re-parse all mods with degraded metadata (filename/@Mod annotation) and upgrade if a higher-quality manifest is found. graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: (stub) community graph submission — not yet functional. embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: (stub) community embedding submission — not yet functional. Auto-behaviors: decompile_status auto-queues embedding (MODLENS_AUTO_EMBED) and graph build (MODLENS_AUTO_GRAPH). Pass autoEmbed/autoGraph to override per-call.",
+    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|refresh_metadata|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). refresh_metadata: re-parse all mods with degraded metadata (filename/@Mod annotation) and upgrade if a higher-quality manifest is found. graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: validate an exported bundle and open a draft GitHub registry PR (bundlePath required). embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: validate an exported bundle and open a draft GitHub registry PR (bundlePath required). Auto-behaviors: decompile_status auto-queues embedding (MODLENS_AUTO_EMBED) and graph build (MODLENS_AUTO_GRAPH). Pass autoEmbed/autoGraph to override per-call.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
@@ -254,11 +260,14 @@ server.tool(
         targetLoader: z.string().optional().describe("Optional loader hint for registry matching"),
         targetMcVersion: z.string().optional().describe("Optional MC version hint for registry matching"),
         model:        z.string().optional().describe("Embedding model override for embed_download"),
+        bundlePath:   z.string().optional().describe("Exported bundle file for graph_submit or embed_submit"),
+        contributor:  z.string().optional().describe("Contributor alias for a registry submission"),
+        note:         z.string().optional().describe("Note for the registry pull request"),
         autoEmbed:    z.boolean().optional().describe("Override auto-embed on decompile completion (default: env MODLENS_AUTO_EMBED, true)"),
         autoGraph:    z.boolean().optional().describe("Override auto-graph-build on decompile/source-download (default: env MODLENS_AUTO_GRAPH, true)"),
         provenance:   z.enum(["local", "registry", "community"]).optional().describe("Filter search_semantic results by embedding source (default: all sources)"),
     },
-    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model, autoEmbed, autoGraph, provenance }) => {
+    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model, autoEmbed, autoGraph, provenance, bundlePath, contributor, note }) => {
         const dbId = await resolveDbIdAsync(rawDbId, modId);
         const resolvedTargetType = targetType ?? "mod";
         const resolvedTargetId = targetId ?? (typeof modId === "string" ? modId : undefined) ?? (resolvedTargetType === "vanilla" ? "minecraft" : undefined);
@@ -267,10 +276,10 @@ server.tool(
         switch (action) {
             case "ingest":           result = await ingestMod(jarPath!, skipSource ?? false, replace ?? false); break;
             case "list":             result = await listMods({ loader: loader as any, mcVersion, hasMixins, decompiled, limit: limit ?? 50 }); break;
-            case "get":              result = await getModDetails(modId!); break;
+            case "get":              result = await getModDetails(requireModRef(modId, rawDbId)); break;
             case "search":           result = await searchMods(query!, { loader, mcVersion, limit: limit ?? 20 }); break;
             case "stats":            result = await getDbStats(); break;
-            case "dependencies":     result = await getDependencies(modId!, recursive ?? false); break;
+            case "dependencies":     result = await getDependencies(requireModRef(modId, rawDbId), recursive ?? false); break;
             case "dep_graph":        result = await getDependencyGraph(mcVersion); break;
             case "version_conflicts":result = await findVersionConflicts(); break;
             case "source_urls":      result = await listModSourceUrls(query); break;
@@ -344,7 +353,7 @@ server.tool(
                 mcVersion: targetMcVersion ?? mcVersion,
             }); break;
             case "graph_export":    result = await exportGraph(dbId!, outputDir!); break;
-            case "graph_submit":    result = await submitGraph({ bundlePath: outputDir ?? "" }); break;
+            case "graph_submit":    result = await submitGraph({ bundlePath: bundlePath ?? outputDir ?? "", contributor, note }); break;
             case "embed_export":    result = await exportEmbeddings(resolvedTargetType, outputDir!, { dbId, mcVersion: resolvedTargetVersion ?? mcVersion, targetId: resolvedTargetId }); break;
             case "embed_download":  result = await downloadEmbeddings({
                 targetType: resolvedTargetType,
@@ -360,7 +369,7 @@ server.tool(
                 dbId,
                 mcVersion: resolvedTargetVersion ?? mcVersion,
             }); break;
-            case "embed_submit":    result = await submitEmbeddings({ bundlePath: outputDir ?? "" }); break;
+            case "embed_submit":    result = await submitEmbeddings({ bundlePath: bundlePath ?? outputDir ?? "", contributor, note }); break;
         }
         return out(result);
     })
@@ -435,7 +444,7 @@ server.tool(
         const dbId = await resolveDbIdAsync(rawDbId, modId);
         let result: unknown;
         switch (action) {
-            case "targets":            result = await getMixinTargets(modId!); break;
+            case "targets":            result = await getMixinTargets(requireModRef(modId, rawDbId)); break;
             case "resolve":            result = await resolveMixinTargets(dbId!); break;
             case "conflicts":          result = await getMixinConflicts(targetClass!); break;
             case "targets_in_package": result = await getMixinsTargetingPackage(packagePrefix!, mcVersion); break;
@@ -452,7 +461,7 @@ server.tool(
 server.tool(
     "platform",
     "Modrinth/CurseForge platform sync and source download. action=sync_modrinth|sync_curseforge|check_updates|batch_sync|download_source|search|batch_check_updates. " +
-    "action=search: unified mod search across both Modrinth and CurseForge — deduplicated, sorted by downloads (query required, loader, mcVersion, limit). " +
+    "action=search: unified mod search across both Modrinth and CurseForge — deduplicated, sorted by downloads (query required, loader, mcVersion, limit). Missing modpacks.ch loader labels are recovered by inspecting cached/downloaded JARs. " +
     "action=batch_check_updates: check ALL linked mods for newer versions on Modrinth/CurseForge in one pass (mcVersion, loader, modIdFilter, limit). " +
     "download_source downloads GitHub source without decompilation — auto-queues graph build (override with autoGraph). Env: MODLENS_AUTO_GRAPH (default: 1).",
     {
@@ -489,23 +498,23 @@ server.tool(
 server.tool(
     "modpacks_ch",
     "Search, resolve, list versions for, and ingest arbitrary modpacks so other ModLens tools can analyze the exact pack contents. General workflow: when the user names a modpack and possibly a fuzzy version like 7.1, call action=list_versions with packRef/versionRef, choose the best matching version, then call action=ingest_pack before using analyze_crash_log, reports, pack_tools, dependency checks, mixin scans, source search, or other pack-aware analysis. Crash triage is one common use, not the only use. " +
-    "Backends: modpacks.ch API (CreeperHost service) for FTB/CurseForge, Modrinth API/.mrpack for Modrinth, and the official Feed The Beast API when namespace=feedthebeast. CurseForge via modpacks.ch requires no CurseForge API key. Modrinth packRef may be a slug/project ID, a modrinth.com modpack/version URL, an api.modrinth.com project/version URL, a cdn.modrinth.com .mrpack URL, or any direct HTTPS .mrpack URL. " +
-    "action=search|featured|info|manifest|resolve_pack|list_versions|ingest_pack|sync_pack_mods|search_ftb_mods|ftb_mod_info|download_mod|download_overrides|list_pack_versions|list_pack_files|find_mod_in_packs. " +
-    "namespace=ftb|curseforge|modrinth|feedthebeast (default: ftb). Use feedthebeast for api.feed-the-beast.com packs; use ftb for the modpacks.ch FTB namespace. resolve_pack/list_versions/ingest_pack accept packRef=name/slug/id and versionRef=version id/name/number/partial text. list_versions returns matches for fuzzy refs; list_pack_versions is DB-backed synced-pack history. " +
+    "Metadata comes from modpacks.ch for all providers; downloads use the supplied URLs and Modrinth .mrpack archives. Loader-filtered mod queries automatically download and inspect unlabeled JARs; recovered labels report loaderSource=jar. No CurseForge API key is required. Modrinth packRef may be a slug/project ID, a modrinth.com modpack/version URL, an api.modrinth.com project/version URL, a cdn.modrinth.com .mrpack URL, or any direct HTTPS .mrpack URL. " +
+    "action=search|featured|info|manifest|resolve_pack|list_versions|ingest_pack|sync_pack_mods|search_mods|mod_info|download_mod|download_overrides|list_pack_versions|list_pack_files|find_mod_in_packs. mod_info returns up to limit versions (default 20). search_ftb_mods and ftb_mod_info remain compatibility aliases. " +
+    "namespace=ftb|curseforge|modrinth|feedthebeast (default: ftb). feedthebeast uses the modpacks.ch /ftb catalog; ftb uses /modpack. resolve_pack/list_versions/ingest_pack accept packRef=name/slug/id and versionRef=version id/name/number/partial text. list_versions returns matches for fuzzy refs; list_pack_versions is DB-backed synced-pack history. " +
     "User-Agent is set per modpacks.ch (CreeperHost) team request for usage tracking.",
     {
-        action:           z.enum(["search", "featured", "info", "manifest", "resolve_pack", "list_versions", "ingest_pack", "sync_pack_mods", "search_ftb_mods", "ftb_mod_info", "download_mod", "download_overrides", "list_pack_versions", "list_pack_files", "find_mod_in_packs"]),
-        namespace:        z.enum(["ftb", "curseforge", "modrinth", "feedthebeast"]).optional().describe("ftb, curseforge, modrinth, or feedthebeast (default: ftb). feedthebeast uses api.feed-the-beast.com; ftb uses modpacks.ch."),
+        action:           z.enum(["search", "featured", "info", "manifest", "resolve_pack", "list_versions", "ingest_pack", "sync_pack_mods", "search_mods", "mod_info", "search_ftb_mods", "ftb_mod_info", "download_mod", "download_overrides", "list_pack_versions", "list_pack_files", "find_mod_in_packs"]),
+        namespace:        z.enum(["ftb", "curseforge", "modrinth", "feedthebeast"]).optional().describe("Provider catalog on modpacks.ch (default: ftb). feedthebeast selects /ftb; ftb selects /modpack."),
         packId:           z.number().optional().describe("Numeric FTB/CurseForge pack ID or internal Modrinth pack key returned by resolve/list actions"),
         versionId:        z.number().optional().describe("Numeric FTB/CurseForge version ID or internal Modrinth version key returned by resolve/list actions"),
         packRef:          z.union([z.number(), z.string()]).optional().describe("Pack name, slug, Modrinth project ID, CurseForge pack ID, FTB/feedthebeast pack ID, Modrinth web/API/CDN URL, or direct HTTPS .mrpack URL. Use for resolve_pack/list_versions/ingest_pack."),
         versionRef:       z.union([z.number(), z.string()]).optional().describe("Version ID, full version name, version number, or fuzzy partial text such as 7.1. Use list_versions first if ambiguous."),
         packVersionDbId:  z.number().optional().describe("Pack version DB id returned by sync_pack_mods (shortcut for list_pack_files)"),
-        query:            z.string().optional().describe("Search query (required for search, search_ftb_mods)"),
-        modId:            z.union([z.number(), z.string()]).optional().describe("FTB mod ID (required for ftb_mod_info, download_mod)"),
-        fileId:           z.number().optional().describe("Exact CF file ID to download (download_mod; skips mcVersion/loader filter)"),
-        loader:           z.string().optional().describe("Loader filter for ftb_mod_info/download_mod (e.g. neoforge, fabric)"),
-        mcVersionFilter:  z.string().optional().describe("MC version filter for ftb_mod_info/download_mod (e.g. 26.1.2)"),
+        query:            z.string().optional().describe("Search query (required for search, search_mods)"),
+        modId:            z.union([z.number(), z.string()]).optional().describe("CurseForge project ID or Modrinth project ID/slug (required for mod_info, download_mod)"),
+        fileId:           z.union([z.number(), z.string()]).optional().describe("Exact CurseForge file ID or Modrinth version ID to download (download_mod; skips mcVersion/loader filter)"),
+        loader:           z.string().optional().describe("Loader filter for mod_info/download_mod (e.g. forge, fabric, neoforge)"),
+        mcVersionFilter:  z.string().optional().describe("MC version filter for mod_info/download_mod (e.g. 1.7.10, 1.12.2, 1.21.1)"),
         force:            z.boolean().optional().describe("Force re-download even if cached (download_mod)"),
         modDbId:          z.number().optional().describe("ModLens DB mod id (for find_mod_in_packs)"),
         cfProject:        z.number().optional().describe("CurseForge project id (for find_mod_in_packs)"),
@@ -552,13 +561,15 @@ server.tool(
                 if (ns === "modrinth") throw new Error("Use action=ingest_pack for Modrinth packs");
                 result = await syncPackModsAction({ packId, versionId, namespace: ns, fileTypes, skipServer, skipOptional, concurrency, maxFiles });
                 break;
+            case "search_mods":
             case "search_ftb_mods":
-                if (!query) throw new Error("query is required for action=search_ftb_mods");
-                result = await searchFtbModsAction(query, limit ?? 20);
+                if (!query) throw new Error("query is required for action=search_mods");
+                result = await searchModsAction(query, limit ?? 20);
                 break;
+            case "mod_info":
             case "ftb_mod_info":
-                if (modId === undefined) throw new Error("modId is required for action=ftb_mod_info");
-                result = await ftbModInfoAction(modId, { mcVersion: mcVersionFilter, loader });
+                if (modId === undefined) throw new Error("modId is required for action=mod_info");
+                result = await modInfoAction(modId, { mcVersion: mcVersionFilter, loader, limit });
                 break;
             case "download_mod":
                 if (modId === undefined) throw new Error("modId is required for action=download_mod");

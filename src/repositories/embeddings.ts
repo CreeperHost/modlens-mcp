@@ -7,6 +7,7 @@
  * Run `npm run db:vector` once after docker-compose up to enable the extension.
  */
 import { getDb } from "../db.js";
+import { detectBackend } from "../db-backend.js";
 
 type VecRow = { id: number; similarity: number };
 
@@ -17,6 +18,7 @@ function vecLiteral(vec: number[]): string {
 // ── doc_entries ───────────────────────────────────────────────────────────────
 
 export async function upsertDocEmbedding(id: number, vec: number[]): Promise<void> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).upsertDocEmbedding(id, vec);
     const db = await getDb();
     await db.$executeRawUnsafe(
         `UPDATE doc_entries SET embedding = $1::vector WHERE id = $2`,
@@ -25,6 +27,7 @@ export async function upsertDocEmbedding(id: number, vec: number[]): Promise<voi
 }
 
 export async function searchDocsByVector(vec: number[], limit = 5): Promise<VecRow[]> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).searchDocsByVector(vec, limit);
     const db = await getDb();
     return db.$queryRawUnsafe<VecRow[]>(
         `SELECT id, (1 - (embedding <=> $1::vector))::float AS similarity
@@ -39,6 +42,7 @@ export async function searchDocsByVector(vec: number[], limit = 5): Promise<VecR
 // ── primers ───────────────────────────────────────────────────────────────────
 
 export async function upsertPrimerEmbedding(id: number, vec: number[]): Promise<void> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).upsertPrimerEmbedding(id, vec);
     const db = await getDb();
     await db.$executeRawUnsafe(
         `UPDATE primers SET embedding = $1::vector WHERE id = $2`,
@@ -47,6 +51,7 @@ export async function upsertPrimerEmbedding(id: number, vec: number[]): Promise<
 }
 
 export async function searchPrimersByVector(vec: number[], limit = 5): Promise<VecRow[]> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).searchPrimersByVector(vec, limit);
     const db = await getDb();
     return db.$queryRawUnsafe<VecRow[]>(
         `SELECT id, (1 - (embedding <=> $1::vector))::float AS similarity
@@ -61,6 +66,7 @@ export async function searchPrimersByVector(vec: number[], limit = 5): Promise<V
 // ── mc_source_files ───────────────────────────────────────────────────────────
 
 export async function upsertSourceEmbedding(id: number, vec: number[], source: string = "local"): Promise<void> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).upsertSourceEmbedding(id, vec, source);
     const db = await getDb();
     await db.$executeRawUnsafe(
         `UPDATE mc_source_files SET embedding = $1::vector, embed_source = $3, embed_updated_at = NOW() WHERE id = $2`,
@@ -71,6 +77,7 @@ export async function upsertSourceEmbedding(id: number, vec: number[], source: s
 export async function searchSourceByVector(
     vec: number[], mcVersionId: number, limit = 10, provenance?: string,
 ): Promise<Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).searchSourceByVector(vec, mcVersionId, limit, provenance);
     const db = await getDb();
     if (provenance) {
         return db.$queryRawUnsafe(
@@ -97,13 +104,13 @@ export async function countUnembedded(table: "doc_entries" | "primers" | "mc_sou
     const db = await getDb();
     if (table === "mc_source_files" && mcVersionId !== undefined) {
         const rows = await db.$queryRawUnsafe<[{ count: string }]>(
-            `SELECT COUNT(*)::text AS count FROM mc_source_files WHERE mc_version_id = $1 AND embedding IS NULL`,
+            `SELECT CAST(COUNT(*) AS TEXT) AS count FROM mc_source_files WHERE mc_version_id = $1 AND embedding IS NULL`,
             mcVersionId,
         );
         return parseInt(rows[0].count, 10);
     }
     const rows = await db.$queryRawUnsafe<[{ count: string }]>(
-        `SELECT COUNT(*)::text AS count FROM ${table} WHERE embedding IS NULL`,
+        `SELECT CAST(COUNT(*) AS TEXT) AS count FROM ${table} WHERE embedding IS NULL`,
     );
     return parseInt(rows[0].count, 10);
 }
@@ -111,6 +118,7 @@ export async function countUnembedded(table: "doc_entries" | "primers" | "mc_sou
 // ── mod_source_files ──────────────────────────────────────────────────────────
 
 export async function upsertModSourceEmbedding(id: number, vec: number[], source: string = "local"): Promise<void> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).upsertModSourceEmbedding(id, vec, source);
     const db = await getDb();
     await db.$executeRawUnsafe(
         `UPDATE mod_source_files SET embedding = $1::vector, embed_source = $3, embed_updated_at = NOW() WHERE id = $2`,
@@ -121,6 +129,7 @@ export async function upsertModSourceEmbedding(id: number, vec: number[], source
 export async function searchModSourceByVector(
     vec: number[], modId: number, limit = 10, provenance?: string,
 ): Promise<Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).searchModSourceByVector(vec, modId, limit, provenance);
     const db = await getDb();
     if (provenance) {
         return db.$queryRawUnsafe(
@@ -147,6 +156,7 @@ export async function searchModSourceByVector(
 export async function findSourceIdsByClassNames(
     classNames: string[], mcVersionId: number, requireEmbedding = true,
 ): Promise<Map<string, number>> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).findSourceIdsByClassNames(classNames, mcVersionId, requireEmbedding);
     if (classNames.length === 0) return new Map();
     const db = await getDb();
     const embFilter = requireEmbedding ? " AND embedding IS NOT NULL" : "";
@@ -161,6 +171,7 @@ export async function findSourceIdsByClassNames(
 export async function findModSourceIdsByClassNames(
     classNames: string[], modId: number, requireEmbedding = true,
 ): Promise<Map<string, number>> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).findModSourceIdsByClassNames(classNames, modId, requireEmbedding);
     if (classNames.length === 0) return new Map();
     const db = await getDb();
     const embFilter = requireEmbedding ? " AND embedding IS NOT NULL" : "";
@@ -176,6 +187,7 @@ export async function findModSourceIdsByClassNames(
 export async function getEmbedSources(
     table: "mod_source_files" | "mc_source_files", ids: number[],
 ): Promise<Map<number, { source: string | null; updatedAt: Date | null }>> {
+    if (detectBackend() === "sqlite") return (await import("./embeddings-sqlite.js")).getEmbedSources(table, ids);
     if (ids.length === 0) return new Map();
     const db = await getDb();
     const rows = await db.$queryRawUnsafe<Array<{ id: number; embed_source: string | null; embed_updated_at: Date | null }>>(
@@ -191,7 +203,7 @@ export async function countEmbedsBySource(
 ): Promise<{ local: number; registry: number; community: number; unknown: number }> {
     const db = await getDb();
     const rows = await db.$queryRawUnsafe<Array<{ embed_source: string | null; count: string }>>(
-        `SELECT embed_source, COUNT(*)::text AS count FROM ${table}
+        `SELECT embed_source, CAST(COUNT(*) AS TEXT) AS count FROM ${table}
          WHERE ${scopeColumn} = $1 AND embedding IS NOT NULL
          GROUP BY embed_source`,
         scopeId,

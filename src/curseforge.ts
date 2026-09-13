@@ -1,4 +1,8 @@
 import { fetchWithRetry, safeJson } from "./fetch-utils.js";
+import {
+    getMod, providerVersions, providerSearch, providerLink, resolveModVersionUrl,
+    type ModMetadata, type ModVersion,
+} from "./modpacks-ch.js";
 import type { PlatformAdapter } from "./platform-adapter.js";
 
 const CF_BASE = "https://api.curseforge.com/v1";
@@ -21,11 +25,13 @@ export interface CFProject {
 
 export interface CFFile {
     id: number;
+    sha1?: string;
     displayName: string;
     fileName: string;
     fileDate: string;
     downloadUrl: string;
     gameVersions: string[];
+    loaderSource?: "jar";
 }
 
 export async function lookupByFingerprint(murmur2: number): Promise<CFProject | null> {
@@ -43,20 +49,48 @@ export async function lookupByFingerprint(murmur2: number): Promise<CFProject | 
     return getProject(match.id);
 }
 
-export async function getProject(modId: number): Promise<CFProject | null> {
-    const res = await fetchWithRetry(`${CF_BASE}/mods/${modId}`, { headers });
-    if (!res.ok) return null;
-    const data = await safeJson<{ data: CFProject; }>(res, "CurseForge project");
-    return data.data;
+function asCFFile(version: ModVersion): CFFile {
+    return {
+        id: Number(version.id),
+        sha1: version.sha1,
+        displayName: version.version ?? version.name,
+        fileName: version.name,
+        fileDate: new Date((version.updated ?? 0) * 1000).toISOString(),
+        downloadUrl: resolveModVersionUrl(version) ?? "",
+        gameVersions: (version.targets ?? []).map(target => target.type === "game" ? target.version : target.name),
+        ...(version.loaderSource ? { loaderSource: version.loaderSource } : {}),
+    };
 }
 
-export async function getLatestFile(modId: number, mcVersion?: string): Promise<CFFile | null> {
-    const project = await getProject(modId);
-    if (!project) return null;
-    const files = project.latestFiles.filter((f) =>
-        mcVersion ? f.gameVersions.includes(mcVersion) : true
-    );
-    return files[0] ?? null;
+function asCFProject(project: ModMetadata): CFProject {
+    return {
+        id: Number(project.id),
+        name: project.name,
+        slug: project.slug ?? String(project.id),
+        links: {
+            sourceUrl: providerLink(project, "source") ?? providerLink(project, "github"),
+            websiteUrl: providerLink(project, "website"),
+        },
+        latestFiles: (project.versions ?? []).map(asCFFile),
+    };
+}
+
+export async function getProject(modId: number): Promise<CFProject | null> {
+    const p = await getMod(modId);
+    return p ? asCFProject(p) : null;
+}
+export async function lookupProjectByHash(hash: string): Promise<CFProject | null> {
+    const project = await getMod(hash);
+    if (!project || (project.provider && project.provider !== "curseforge") || !/^\d+$/.test(String(project.id))) return null;
+    return asCFProject(project);
+}
+
+export async function getLatestFile(modId: number, mcVersion?: string, loader?: string): Promise<CFFile | null> {
+    if (mcVersion && !/^\d+(?:\.\d+)*$/.test(mcVersion)) {
+        const [latest] = await providerVersions("mod", modId, { loader, mcVersionRange: mcVersion, limit: 1 });
+        return latest ? asCFFile(latest) : null;
+    }
+    return (await getProjectFiles(modId, {mcVersion,loader,limit:1}))[0] ?? null;
 }
 
 export interface CFSearchHit {
@@ -67,63 +101,31 @@ export interface CFSearchHit {
     downloadCount: number;
     dateModified: string;
     latestFiles: CFFile[];
+    loaders?: string[];
+    loaderSource?: "jar";
     links: { sourceUrl?: string; websiteUrl?: string };
 }
 
 /**
- * Search CurseForge mods by name/keyword. Requires CURSEFORGE_API_KEY.
- * Returns null if no API key is configured.
+ * Search CurseForge mods through modpacks.ch; no API key is required.
  */
-export async function searchMods(
-    query: string,
-    opts: { loader?: string; mcVersion?: string; limit?: number } = {},
-): Promise<CFSearchHit[] | null> {
-    if (!CF_KEY) return null;
-    const params = new URLSearchParams({
-        gameId:   String(MINECRAFT_GAME_ID),
-        classId:  "6",       // 6 = Mods category on CurseForge
-        searchFilter: query,
-        pageSize: String(opts.limit ?? 20),
-    });
-    if (opts.mcVersion) params.set("gameVersion", opts.mcVersion);
-    if (opts.loader)    params.set("modLoaderType", modloaderToEnum(opts.loader));
-    const res = await fetchWithRetry(`${CF_BASE}/mods/search?${params}`, { headers });
-    if (!res.ok) return null;
-    const data = await safeJson<{ data: CFSearchHit[] }>(res, "CurseForge search");
-    return data.data;
+export async function searchMods(query: string, opts: {loader?: string; mcVersion?: string; limit?: number} = {}): Promise<CFSearchHit[]> {
+    return (await providerSearch("curseforge", "mod", query, opts)).map(p=>({...asCFProject(p),
+        summary:p.synopsis ?? "", downloadCount:p.installs ?? 0,
+        loaders:(p.targets ?? []).filter(target=>target.type === "modloader").map(target=>target.name),
+        ...(p.loaderSource ? {loaderSource:p.loaderSource} : {}),
+        dateModified:new Date((p.updated ?? 0)*1000).toISOString()}));
 }
 
-/** Map a loader string to CurseForge's modLoaderType enum value. */
-function modloaderToEnum(loader: string): string {
-    const map: Record<string, string> = {
-        forge: "1", fabric: "4", quilt: "5", neoforge: "6",
-    };
-    return map[loader.toLowerCase()] ?? "0";
-}
-
-/**
- * Get all files for a CF project, optionally filtered by MC version.
- */
-export async function getProjectFiles(
-    modId: number,
-    opts: { mcVersion?: string; limit?: number } = {},
-): Promise<CFFile[]> {
-    if (!CF_KEY) return [];
-    const params = new URLSearchParams({ pageSize: String(opts.limit ?? 20) });
-    if (opts.mcVersion) params.set("gameVersion", opts.mcVersion);
-    const res = await fetchWithRetry(`${CF_BASE}/mods/${modId}/files?${params}`, { headers });
-    if (!res.ok) return [];
-    const data = await safeJson<{ data: CFFile[] }>(res, "CurseForge files");
-    return data.data;
+export async function getProjectFiles(modId: number, opts: {mcVersion?: string; loader?: string; limit?: number} = {}): Promise<CFFile[]> {
+    return (await providerVersions("mod",modId,{...opts,limit:opts.limit ?? 20})).map(asCFFile);
 }
 
 export const curseforgePlatformAdapter: PlatformAdapter = {
     name: "curseforge",
-    async lookup({ murmur2 }) {
-        if (!murmur2) return null;
-        const m = parseInt(murmur2, 10);
-        if (isNaN(m)) return null;
-        const proj = await lookupByFingerprint(m).catch(() => null);
+    async lookup({ sha1 }) {
+        if (!sha1) return null;
+        const proj = await lookupProjectByHash(sha1);
         if (!proj) return null;
         return {
             platform: "curseforge" as const,

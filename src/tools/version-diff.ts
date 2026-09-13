@@ -7,7 +7,7 @@
  */
 import { createHash } from "crypto";
 import { readFile, writeFile } from "fs/promises";
-import { getMcJarPath, mcPaths } from "../minecraft.js";
+import { getMcIndex } from "./vanilla.js";
 import { indexJar, type JarIndex } from "../java-tools.js";
 import { descriptorToSimpleType, accessStr, type ClassInfo } from "../access-flags.js";
 import { exists, ensureDir } from "../cache.js";
@@ -221,26 +221,6 @@ export function diffClassIndex(a: ClassInfo, b: ClassInfo): ClassDiff {
     };
 }
 
-// ── Index loading (cached to disk, mirrors vanilla.ts getMcIndex) ─────────────
-
-const indexMemCache = new Map<string, JarIndex>();
-
-async function getMcIndexCached(version: string): Promise<JarIndex> {
-    if (indexMemCache.has(version)) return indexMemCache.get(version)!;
-    const cachePath = mcPaths.index(version);
-    if (await exists(cachePath)) {
-        const data = JSON.parse(await readFile(cachePath, "utf8")) as JarIndex;
-        indexMemCache.set(version, data);
-        return data;
-    }
-    const jarPath = await getMcJarPath(version);
-    const index = await indexJar(jarPath);
-    await ensureDir(cachePath);
-    await writeFile(cachePath, JSON.stringify(index), "utf8");
-    indexMemCache.set(version, index);
-    return index;
-}
-
 // ── packages hash helper ──────────────────────────────────────────────────────
 
 function buildPackagesHash(packages: string[] | undefined): string {
@@ -307,7 +287,7 @@ export async function diffMcVersionsDetailed(
     validateVersion(versionA);
     validateVersion(versionB);
 
-    const pkgHash = buildPackagesHash(packages);
+    const pkgHash = "named-v2:" + buildPackagesHash(packages) + (semantic ? ":semantic" : "");
 
     if (!force && cache) {
         const cached = await readCachedDiff(versionA, versionB, pkgHash);
@@ -317,8 +297,8 @@ export async function diffMcVersionsDetailed(
     }
 
     const [indexA, indexB] = await Promise.all([
-        getMcIndexCached(versionA),
-        getMcIndexCached(versionB),
+        getMcIndex(versionA),
+        getMcIndex(versionB),
     ]);
 
     const setA = new Set(Object.keys(indexA.classes));

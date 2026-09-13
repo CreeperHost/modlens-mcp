@@ -492,7 +492,7 @@ export async function buildPackGraph(
     // 1. Fetch all mods with deps and mixin data
     const mods = await db.mod.findMany({
         where: {
-            ...(mcVersion ? mcVersionWhere(mcVersion) : {}),
+            ...(mcVersion ? await mcVersionWhere(mcVersion) : {}),
             ...(loader ? { loader } : {}),
         },
         select: {
@@ -550,7 +550,7 @@ export async function buildPackGraph(
     const tags = await db.modTag.findMany({
         where: {
             mod: {
-                ...(mcVersion ? mcVersionWhere(mcVersion) : {}),
+                ...(mcVersion ? await mcVersionWhere(mcVersion) : {}),
                 ...(loader ? { loader } : {}),
             },
         },
@@ -827,7 +827,7 @@ export async function packHealth(
 
     // 1. Basic stats
     const where = {
-        ...(mcVersion ? mcVersionWhere(mcVersion) : {}),
+        ...(mcVersion ? await mcVersionWhere(mcVersion) : {}),
         ...(loader ? { loader } : {}),
     };
     const mods = await db.mod.findMany({

@@ -148,17 +148,19 @@ export async function indexMcSourceSemantic(
     // Fetch rows without embeddings in batches — always from offset 0
     // so re-runs pick up any rows that failed in a previous pass
     let embedded = 0; let skipped = 0;
+    let afterId = 0;
     while (true) {
         const { getDb } = await import("../db.js");
         const _db = await getDb();
         const batch = await _db.$queryRawUnsafe<Array<{ id: number; class_name: string; content: string }>>(
             `SELECT id, class_name, content FROM mc_source_files
-             WHERE mc_version_id = $1 AND embedding IS NULL
+             WHERE mc_version_id = $1 AND embedding IS NULL AND id > $3
              ORDER BY id LIMIT $2`,
-            mcVersionId, batchSize,
+            mcVersionId, batchSize, afterId,
         );
         if (!batch.length) break;
         for (const file of batch) {
+            afterId = file.id;
             try {
                 const chunkSize = parseInt(process.env.OLLAMA_EMBED_CHUNK ?? "500", 10);
                 const chunk = chunkText(file.content, chunkSize)[0];
@@ -171,7 +173,7 @@ export async function indexMcSourceSemantic(
     }
 
     const remaining = await countUnembedded("mc_source_files", mcVersionId);
-    return { status: "done", embedded, skipped, remaining };
+    return { status: remaining ? "partial" : "done", embedded, skipped, remaining };
 }
 
 /**
@@ -266,6 +268,7 @@ export async function indexModSourceSemantic(
     let embedded = 0; let embedSkipped = 0; let firstError = "";
     const cap = maxFiles ?? Infinity;
     while (embedded + embedSkipped < cap) {
+        const beforeBatch = embedded;
         const batch = await findModSourceFilesUnembedded(dbId, Math.min(batchSize, cap - embedded - embedSkipped), 0);
         if (!batch.length) break;
         for (const file of batch) {
@@ -284,11 +287,12 @@ export async function indexModSourceSemantic(
                 }
             }
         }
+        if (embedded === beforeBatch) break;
         await new Promise(r => setTimeout(r, 50));
     }
 
     const remaining = await countUnembeddedModSourceFiles(dbId);
-    return { status: "done", indexed, embedded, skipped: walkSkipped + embedSkipped, remaining, ...(firstError ? { error: firstError } : {}) };
+    return { status: remaining ? "partial" : "done", indexed, embedded, skipped: walkSkipped + embedSkipped, remaining, ...(firstError ? { error: firstError } : {}) };
 }
 
 /**

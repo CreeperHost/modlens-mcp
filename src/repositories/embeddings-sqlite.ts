@@ -1,10 +1,10 @@
 /**
  * sqlite-vec helpers for vector operations on a SQLite backend.
- * Uses float32 blobs stored in separate vec0 virtual tables.
- *
- * Requires: `npm run db:vector:sqlite` run once to create the vec0 tables.
+ * Uses float32 blobs and cosine distance, with scope filters before the limit.
+ * Existing vec0 tables are kept in sync when present; searches also work on
+ * databases created without those optional indexes.
  */
-import { detectBackend } from "../db-backend.js";
+import { sqliteDatabasePath } from "../sqlite-schema.js";
 
 type VecRow = { id: number; similarity: number };
 
@@ -13,7 +13,7 @@ let _vecDb: import("better-sqlite3").Database | null = null;
 async function getVecDb(): Promise<import("better-sqlite3").Database> {
     if (_vecDb) return _vecDb;
     const url = process.env.DATABASE_URL ?? "";
-    const path = url.replace(/^file:\/\//, "").replace(/^file:/, "");
+    const path = sqliteDatabasePath(url);
     const Database = (await import("better-sqlite3")).default;
     const db = new Database(path);
     try {
@@ -22,13 +22,20 @@ async function getVecDb(): Promise<import("better-sqlite3").Database> {
         const sqliteVec = require("sqlite-vec");
         sqliteVec.load(db);
     } catch {
-        // sqlite-vec not installed — vector search unavailable
+        db.close();
+        throw new Error("SQLite vector search requires the sqlite-vec package. Reinstall ModLens with optional dependencies enabled.");
     }
     _vecDb = db;
     return db;
 }
 
+export function closeVecDb(): void {
+    _vecDb?.close();
+    _vecDb = null;
+}
+
 function float32Blob(vec: number[]): Buffer {
+    if (!vec.length || vec.some(value => !Number.isFinite(value))) throw new Error("Embedding must be a non-empty finite vector");
     const buf = Buffer.allocUnsafe(vec.length * 4);
     for (let i = 0; i < vec.length; i++) buf.writeFloatLE(vec[i], i * 4);
     return buf;
@@ -49,16 +56,9 @@ export async function upsertDocEmbedding(id: number, vec: number[]): Promise<voi
 
 export async function searchDocsByVector(vec: number[], limit = 5): Promise<VecRow[]> {
     const db = await getVecDb();
-    try {
-        const rows = db.prepare(
-            `SELECT rowid AS id, distance FROM vec_doc_entries
-             WHERE embedding MATCH ? AND k = ?
-             ORDER BY distance`,
-        ).all(float32Blob(vec), limit) as Array<{ id: number; distance: number }>;
-        return rows.map((r) => ({ id: r.id, similarity: 1 - r.distance }));
-    } catch {
-        return [];
-    }
+    return db.prepare(`SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity
+        FROM doc_entries WHERE embedding IS NOT NULL ORDER BY similarity DESC LIMIT ?`
+    ).all(float32Blob(vec), limit) as VecRow[];
 }
 
 // ── primers ───────────────────────────────────────────────────────────────────
@@ -74,16 +74,9 @@ export async function upsertPrimerEmbedding(id: number, vec: number[]): Promise<
 
 export async function searchPrimersByVector(vec: number[], limit = 5): Promise<VecRow[]> {
     const db = await getVecDb();
-    try {
-        const rows = db.prepare(
-            `SELECT rowid AS id, distance FROM vec_primers
-             WHERE embedding MATCH ? AND k = ?
-             ORDER BY distance`,
-        ).all(float32Blob(vec), limit) as Array<{ id: number; distance: number }>;
-        return rows.map((r) => ({ id: r.id, similarity: 1 - r.distance }));
-    } catch {
-        return [];
-    }
+    return db.prepare(`SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity
+        FROM primers WHERE embedding IS NOT NULL ORDER BY similarity DESC LIMIT ?`
+    ).all(float32Blob(vec), limit) as VecRow[];
 }
 
 // ── mc_source_files ───────────────────────────────────────────────────────────
@@ -101,24 +94,10 @@ export async function searchSourceByVector(
     vec: number[], mcVersionId: number, limit = 10, provenance?: string,
 ): Promise<Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>> {
     const db = await getVecDb();
-    try {
-        const sql = provenance
-            ? `SELECT v.rowid AS id, s.class_name, s.embed_source, v.distance FROM vec_mc_source v
-               JOIN mc_source_files s ON s.id = v.rowid
-               WHERE v.embedding MATCH ? AND v.k = ? AND s.mc_version_id = ? AND s.embed_source = ?
-               ORDER BY v.distance`
-            : `SELECT v.rowid AS id, s.class_name, s.embed_source, v.distance FROM vec_mc_source v
-               JOIN mc_source_files s ON s.id = v.rowid
-               WHERE v.embedding MATCH ? AND v.k = ? AND s.mc_version_id = ?
-               ORDER BY v.distance`;
-        const args = provenance
-            ? [float32Blob(vec), limit, mcVersionId, provenance]
-            : [float32Blob(vec), limit, mcVersionId];
-        const rows = db.prepare(sql).all(...args) as Array<{ id: number; class_name: string; embed_source: string | null; distance: number }>;
-        return rows.map((r) => ({ id: r.id, class_name: r.class_name, embed_source: r.embed_source, similarity: 1 - r.distance }));
-    } catch {
-        return [];
-    }
+    return db.prepare(`SELECT id, class_name, embed_source, 1 - vec_distance_cosine(embedding, ?) AS similarity
+        FROM mc_source_files WHERE mc_version_id = ? AND embedding IS NOT NULL
+        ${provenance ? "AND embed_source = ?" : ""} ORDER BY similarity DESC LIMIT ?`
+    ).all(float32Blob(vec), mcVersionId, ...(provenance ? [provenance] : []), limit) as Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>;
 }
 
 // ── mod_source_files ──────────────────────────────────────────────────────────
@@ -136,24 +115,10 @@ export async function searchModSourceByVector(
     vec: number[], modId: number, limit = 10, provenance?: string,
 ): Promise<Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>> {
     const db = await getVecDb();
-    try {
-        const sql = provenance
-            ? `SELECT v.rowid AS id, s.class_name, s.embed_source, v.distance FROM vec_mod_source v
-               JOIN mod_source_files s ON s.id = v.rowid
-               WHERE v.embedding MATCH ? AND v.k = ? AND s.mod_id = ? AND s.embed_source = ?
-               ORDER BY v.distance`
-            : `SELECT v.rowid AS id, s.class_name, s.embed_source, v.distance FROM vec_mod_source v
-               JOIN mod_source_files s ON s.id = v.rowid
-               WHERE v.embedding MATCH ? AND v.k = ? AND s.mod_id = ?
-               ORDER BY v.distance`;
-        const args = provenance
-            ? [float32Blob(vec), limit, modId, provenance]
-            : [float32Blob(vec), limit, modId];
-        const rows = db.prepare(sql).all(...args) as Array<{ id: number; class_name: string; embed_source: string | null; distance: number }>;
-        return rows.map((r) => ({ id: r.id, class_name: r.class_name, embed_source: r.embed_source, similarity: 1 - r.distance }));
-    } catch {
-        return [];
-    }
+    return db.prepare(`SELECT id, class_name, embed_source, 1 - vec_distance_cosine(embedding, ?) AS similarity
+        FROM mod_source_files WHERE mod_id = ? AND embedding IS NOT NULL
+        ${provenance ? "AND embed_source = ?" : ""} ORDER BY similarity DESC LIMIT ?`
+    ).all(float32Blob(vec), modId, ...(provenance ? [provenance] : []), limit) as Array<{ id: number; class_name: string; similarity: number; embed_source: string | null }>;
 }
 
 // ── Class-name → ID lookups (for diff semantic enrichment) ───────────────────

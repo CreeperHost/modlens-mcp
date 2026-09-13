@@ -18,7 +18,8 @@ import type { Prisma } from "@prisma/client";
 import { embed, isOllamaAvailable } from "../embeddings.js";
 import { upsertDocEmbedding, searchDocsByVector, countUnembedded } from "../repositories/embeddings.js";
 import { ftsSearchDocs } from "../search-adapter.js";
-import { caseInsensitive } from "../db-backend.js";
+import { caseInsensitive, detectBackend } from "../db-backend.js";
+import { sqliteArrayMemberIds } from "../repositories/array-fields.js";
 
 export interface DocEntryInput {
     className?: string;
@@ -129,7 +130,10 @@ export async function listDocumentation(
     const where: Record<string, unknown> = {};
     if (category)  where.category  = category;
     if (namespace) where.namespace = namespace;
-    if (tag)       where.tags      = { has: tag };
+    if (tag) {
+        if (detectBackend() === "sqlite") where.id = { in: await sqliteArrayMemberIds("doc_entries", "tags", tag) };
+        else where.tags = { has: tag };
+    }
 
     const db = await getDb();
     const total = await db.docEntry.count({ where });

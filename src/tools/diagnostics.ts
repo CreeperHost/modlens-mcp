@@ -8,7 +8,7 @@
  */
 
 import { findModClassesByClassNames, listAllMods } from "../repositories/mod.js";
-import { searchMods, getModsBatch, type FtbMod, type FtbModVersion } from "../modpacks-ch.js";
+import { searchMods, getModsBatch, type ModMetadata, type ModVersion } from "../modpacks-ch.js";
 import { downloadModAction } from "./modpacks-ch.js";
 import { reindexClasses } from "./ingest.js";
 import { translateSymbol, type MappingNs } from "../mappings.js";
@@ -75,7 +75,7 @@ type PopulateAttempt = {
     terms: string[];
     status: string;
     remoteId?: number | string;
-    fileId?: number;
+    fileId?: number | string;
     message?: string;
 };
 
@@ -438,7 +438,7 @@ async function populateMissingMods(candidates: Candidate[], frames: ParsedFrame[
     return { attempted: attempts.length, attempts };
 }
 
-async function findRemoteMod(terms: string[], candidate: Candidate, facts: CrashFacts): Promise<FtbMod | null> {
+async function findRemoteMod(terms: string[], candidate: Candidate, facts: CrashFacts): Promise<ModMetadata | null> {
     for (const term of terms) {
         const found = await searchMods(term, 8);
         const ids = found?.mods ?? [];
@@ -453,7 +453,7 @@ async function findRemoteMod(terms: string[], candidate: Candidate, facts: Crash
     return null;
 }
 
-function remoteScore(mod: FtbMod, wanted: string, candidate: Candidate, facts: CrashFacts): number {
+function remoteScore(mod: ModMetadata, wanted: string, candidate: Candidate, facts: CrashFacts): number {
     const name = normalized(mod.name);
     const links = (mod.links ?? []).map((l) => normalized(l.link + " " + l.name + " " + l.type)).join(" ");
     if (name === wanted) return 0;
@@ -464,14 +464,14 @@ function remoteScore(mod: FtbMod, wanted: string, candidate: Candidate, facts: C
     return 6;
 }
 
-function pickRemoteVersion(mod: FtbMod, candidate: Candidate, facts: CrashFacts): FtbModVersion | undefined {
+function pickRemoteVersion(mod: ModMetadata, candidate: Candidate, facts: CrashFacts): ModVersion | undefined {
     const jars = candidate.jars.map(normalized);
     const exactJar = mod.versions?.find((v) => jars.includes(normalized(v.name)));
     if (exactJar) return exactJar;
     return mod.versions?.find((v) => versionMatches(v, facts));
 }
 
-function versionMatches(version: FtbModVersion, facts: CrashFacts): boolean {
+function versionMatches(version: ModVersion, facts: CrashFacts): boolean {
     if (facts.minecraftVersion && !version.targets.some((t) => t.type === "game" && t.version === facts.minecraftVersion)) return false;
     if (facts.loader && !version.targets.some((t) => t.type === "modloader" && t.name.toLowerCase() === facts.loader)) return false;
     return true;

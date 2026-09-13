@@ -5,14 +5,19 @@
  * Postgres/PGlite: uses native tsvector (mc_source_files) or
  *   case-insensitive LIKE via Prisma's mode:"insensitive".
  * SQLite: uses FTS5 MATCH (mc_source_files) or raw LIKE (docs/primers).
- *   SQLite paths throw until P2 wires them.
  */
 import { detectBackend } from "./db-backend.js";
 import { getDb } from "./db.js";
+import { sqliteDatabasePath } from "./sqlite-schema.js";
 
 /** Escape LIKE metacharacters so user input is matched literally. */
 function escapeLike(s: string): string {
     return s.replace(/[%_\\]/g, c => "\\" + c);
+}
+
+/** Match code identifiers literally instead of interpreting punctuation as FTS operators. */
+export function sqliteFtsQuery(query: string): string {
+    return query.trim().split(/\s+/).filter(Boolean).map(token => `"${token.replace(/"/g,'""')}"`).join(" AND ");
 }
 
 export interface FtsSourceResult {
@@ -48,11 +53,12 @@ export async function ftsSearchSource(
     query: string,
     limit: number,
 ): Promise<FtsSourceResult[]> {
+    if (!query.trim()) return [];
     const backend = detectBackend();
 
     if (backend === "sqlite") {
         const url = process.env.DATABASE_URL ?? "";
-        const path = url.replace(/^file:\/\//, "").replace(/^file:/, "");
+        const path = sqliteDatabasePath(url);
         const Database = (await import("better-sqlite3")).default;
         const db = new Database(path, { readonly: true });
         try {
@@ -63,7 +69,7 @@ export async function ftsSearchSource(
                  WHERE f.fts_mc_source MATCH ? AND s.mc_version_id = ?
                  ORDER BY rank
                  LIMIT ?`,
-            ).all(query, mcVersionId, limit) as Row[];
+            ).all(sqliteFtsQuery(query), mcVersionId, limit) as Row[];
             return rows.map(r => ({
                 className: r.class_name,
                 snippet: r.content.slice(0, 300),
@@ -105,11 +111,12 @@ export async function ftsSearchModSource(
     query: string,
     limit: number,
 ): Promise<FtsSourceResult[]> {
+    if (!query.trim()) return [];
     const backend = detectBackend();
 
     if (backend === "sqlite") {
         const url = process.env.DATABASE_URL ?? "";
-        const path = url.replace(/^file:\/\//, "").replace(/^file:/, "");
+        const path = sqliteDatabasePath(url);
         const Database = (await import("better-sqlite3")).default;
         const db = new Database(path, { readonly: true });
         try {
@@ -120,7 +127,7 @@ export async function ftsSearchModSource(
                  WHERE f.fts_mod_source MATCH ? AND s.mod_id = ?
                  ORDER BY rank
                  LIMIT ?`,
-            ).all(query, modId, limit) as Row[];
+            ).all(sqliteFtsQuery(query), modId, limit) as Row[];
             return rows.map(r => ({
                 className: r.class_name,
                 snippet: r.content.slice(0, 300),
@@ -155,11 +162,12 @@ export async function ftsSearchDocs(
     query: string,
     limit = 20,
 ): Promise<FtsDocResult[]> {
+    if (!query.trim()) return [];
     const backend = detectBackend();
 
     if (backend === "sqlite") {
         const url = process.env.DATABASE_URL ?? "";
-        const path = url.replace(/^file:\/\//, "").replace(/^file:/, "");
+        const path = sqliteDatabasePath(url);
         const Database = (await import("better-sqlite3")).default;
         const db = new Database(path, { readonly: true });
         try {
@@ -174,7 +182,7 @@ export async function ftsSearchDocs(
                  WHERE f.fts_doc_entries MATCH ?
                  ORDER BY rank
                  LIMIT ?`,
-            ).all(query, limit) as Row[];
+            ).all(sqliteFtsQuery(query), limit) as Row[];
             return rows.map(r => ({ ...r, tags: JSON.parse(r.tags ?? "[]") as string[] }));
         } finally {
             db.close();
@@ -207,11 +215,12 @@ export async function ftsSearchPrimers(
     modloader?: string,
     limit = 20,
 ): Promise<FtsPrimerResult[]> {
+    if (!query.trim()) return [];
     const backend = detectBackend();
 
     if (backend === "sqlite") {
         const url = process.env.DATABASE_URL ?? "";
-        const path = url.replace(/^file:\/\//, "").replace(/^file:/, "");
+        const path = sqliteDatabasePath(url);
         const Database = (await import("better-sqlite3")).default;
         const db = new Database(path, { readonly: true });
         try {
@@ -227,7 +236,7 @@ export async function ftsSearchPrimers(
                  ${modloader ? "AND p.modloader = ?" : ""}
                  ORDER BY rank
                  LIMIT ?`,
-            ).all(...[query, ...(modloader ? [modloader] : []), limit]) as Row[];
+            ).all(...[sqliteFtsQuery(query), ...(modloader ? [modloader] : []), limit]) as Row[];
             return rows.map(r => ({
                 id: r.id, title: r.title, summary: r.summary,
                 from_version: r.from_version, to_version: r.to_version,

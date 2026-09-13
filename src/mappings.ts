@@ -5,12 +5,12 @@
  * Also supports Parchment parameter names + javadocs layered on top of mojmap.
  *
  * Data sources:
- *   - Intermediary: https://maven.fabricmc.net/net/fabricmc/intermediary/{v}/intermediary-{v}-v2.jar
- *   - Yarn:         https://maven.fabricmc.net/net/fabricmc/yarn/{yarnVer}/yarn-{yarnVer}-v2.jar
+ *   - Intermediary: https://maven.creeperhost.net/net/fabricmc/intermediary/{v}/intermediary-{v}-v2.jar
+ *   - Yarn:         https://maven.creeperhost.net/net/fabricmc/yarn/{yarnVer}/yarn-{yarnVer}-v2.jar
  *   - Mojmap:       Mojang's client_mappings ProGuard file (inverted to official→named)
- *   - Parchment:    https://maven.parchmentmc.org/org/parchmentmc/data/parchment-{v}/{build}/parchment-{v}-{build}-checked.zip
+ *   - Parchment:    https://maven.creeperhost.net/org/parchmentmc/data/parchment-{v}/{build}/parchment-{v}-{build}-checked.zip
  */
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, rename, unlink } from "fs/promises";
 import { join, dirname } from "path";
 import AdmZip from "adm-zip";
 import { CACHE_ROOT, exists, ensureDir } from "./cache.js";
@@ -23,11 +23,11 @@ const TOOLS_DIR = join(CACHE_ROOT, "tools");
 
 const TINY_REMAPPER_VERSION = "0.10.3";
 export const TINY_REMAPPER_PATH = join(TOOLS_DIR, "tiny-remapper.jar");
-const TINY_REMAPPER_URL = `https://maven.fabricmc.net/net/fabricmc/tiny-remapper/${TINY_REMAPPER_VERSION}/tiny-remapper-${TINY_REMAPPER_VERSION}-fat.jar`;
+const TINY_REMAPPER_URL = `https://maven.creeperhost.net/net/fabricmc/tiny-remapper/${TINY_REMAPPER_VERSION}/tiny-remapper-${TINY_REMAPPER_VERSION}-fat.jar`;
 
 const SPECIAL_SOURCE_VERSION = "1.11.4";
 export const SPECIAL_SOURCE_PATH = join(TOOLS_DIR, "SpecialSource.jar");
-const SPECIAL_SOURCE_URL = `https://maven.minecraftforge.net/net/md-5/SpecialSource/${SPECIAL_SOURCE_VERSION}/SpecialSource-${SPECIAL_SOURCE_VERSION}-shaded.jar`;
+const SPECIAL_SOURCE_URL = `https://maven.creeperhost.net/net/md-5/SpecialSource/${SPECIAL_SOURCE_VERSION}/SpecialSource-${SPECIAL_SOURCE_VERSION}-shaded.jar`;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export type MappingNs = "official" | "intermediary" | "yarn" | "mojmap" | "srg" | "mcp";
@@ -86,7 +86,7 @@ async function extractTinyFromJar(jarPath: string, entry: string, dest: string):
 
 // ── Tiny V2 parser ────────────────────────────────────────────────────────────
 export function parseTinyV2(content: string): TinyV2Index {
-    const lines = content.split("\n");
+    const lines = content.split(/\r?\n/);
     const header = lines[0].split("\t");
     const ns0 = header[3] ?? "official";
     const ns1 = header[4] ?? "intermediary";
@@ -126,7 +126,7 @@ export function parseTinyV2(content: string): TinyV2Index {
 // ── ProGuard parser (named → official, inverted to official → named) ──────────
 function parseProGuardClasses(content: string): Map<string, string> {
     const map = new Map<string, string>();
-    for (const line of content.split("\n")) {
+    for (const line of content.split(/\r?\n/)) {
         if (line.startsWith("#") || line.startsWith(" ") || line.startsWith("\t") || !line.trim()) continue;
         const m = line.match(/^(.+) -> (.+):$/);
         if (m) {
@@ -138,14 +138,58 @@ function parseProGuardClasses(content: string): Map<string, string> {
     return map;
 }
 
-// ── Fabric Meta ───────────────────────────────────────────────────────────────
+/** Convert Mojang's named-to-obfuscated ProGuard mappings to Tiny v2. */
+export function proguardToTiny(content: string): string {
+    const classes = parseProGuardClasses(content);
+    const obfuscated = new Map([...classes].map(([obf, named]) => [named, obf]));
+    const descriptor = (type: string): string => {
+        if (type.endsWith("[]")) return "[" + descriptor(type.slice(0, -2));
+        const primitive: Record<string, string> = {void:"V",boolean:"Z",byte:"B",char:"C",short:"S",int:"I",long:"J",float:"F",double:"D"};
+        if (primitive[type]) return primitive[type];
+        const named = type.replace(/\./g, "/");
+        return `L${obfuscated.get(named) ?? named};`;
+    };
+    const lines = ["tiny\t2\t0\tofficial\tnamed"];
+    let members = new Map<string, string>();
+    const flush = () => { lines.push(...members.values()); members = new Map(); };
+    for (const raw of content.split(/\r?\n/)) {
+        if (!raw.trim() || raw.startsWith("#")) continue;
+        if (!/^\s/.test(raw)) {
+            const c = raw.match(/^(.+) -> (.+):$/);
+            if (!c) continue;
+            flush();
+            lines.push(`c\t${c[2].replace(/\./g, "/")}\t${c[1].replace(/\./g, "/")}`);
+            continue;
+        }
+        const mapping = raw.trim().match(/^(.+) -> (\S+)$/);
+        if (!mapping) continue;
+        const member = mapping[1].replace(/^\d+:\d+:/, "").replace(/:\d+(?::\d+)?$/, "");
+        const method = member.match(/^(\S+) ([^\s(]+)\((.*)\)$/);
+        if (method) {
+            if (method[2].includes(".")) continue; // Inlined method with a different owner.
+            const args = method[3] ? method[3].split(",").map(t => descriptor(t.trim())).join("") : "";
+            const desc = `(${args})${descriptor(method[1])}`;
+            members.set(`m:${mapping[2]}:${desc}`, `\tm\t${desc}\t${mapping[2]}\t${method[2]}`);
+        } else {
+            const field = member.match(/^(\S+) (\S+)$/);
+            if (!field) continue;
+            const desc = descriptor(field[1]);
+            members.set(`f:${mapping[2]}:${desc}`, `\tf\t${desc}\t${mapping[2]}\t${field[2]}`);
+        }
+    }
+    flush();
+    if (classes.size === 0) throw new Error("No classes found in Mojang mappings");
+    return lines.join("\n") + "\n";
+}
+
+// ── Yarn versions from CreeperHost Maven ───────────────────────────────────────
 async function resolveYarnVersion(mcVersion: string): Promise<string | null> {
     try {
-        const res = await fetch(`https://meta.fabricmc.net/v2/versions/yarn/${encodeURIComponent(mcVersion)}`);
+        const res = await fetch("https://maven.creeperhost.net/net/fabricmc/yarn/maven-metadata.xml");
         if (!res.ok) return null;
-        const versions = await res.json() as Array<{ version: string; stable: boolean }>;
-        const stable = versions.filter(v => v.stable);
-        const list = stable.length > 0 ? stable : versions;
+        const list = [...(await res.text()).matchAll(/<version>([^<]+)<\/version>/g)]
+            .map(m => ({ version: m[1] }))
+            .filter(v => v.version.startsWith(`${mcVersion}+build.`));
         if (list.length === 0) return null;
         list.sort((a, b) => {
             const ba = parseInt(a.version.split("+build.")[1] ?? "0");
@@ -164,7 +208,7 @@ async function getIntermediaryIndex(version: string): Promise<TinyV2Index | null
     const tinyPath = join(MAPPINGS_DIR, `intermediary-${version}.tiny`);
     if (!(await exists(tinyPath))) {
         const jarPath = join(MAPPINGS_DIR, `intermediary-${version}.jar`);
-        const url = `https://maven.fabricmc.net/net/fabricmc/intermediary/${encodeURIComponent(version)}/intermediary-${encodeURIComponent(version)}-v2.jar`;
+        const url = `https://maven.creeperhost.net/net/fabricmc/intermediary/${encodeURIComponent(version)}/intermediary-${encodeURIComponent(version)}-v2.jar`;
         try {
             await downloadToFile(url, jarPath);
             await extractTinyFromJar(jarPath, "mappings/mappings.tiny", tinyPath);
@@ -186,7 +230,7 @@ async function getYarnIndex(version: string): Promise<TinyV2Index | null> {
         const yarnVersion = await resolveYarnVersion(version);
         if (!yarnVersion) { tinyIndexCache.set(key, null); return null; }
         const jarPath = join(MAPPINGS_DIR, `yarn-${version}.jar`);
-        const url = `https://maven.fabricmc.net/net/fabricmc/yarn/${encodeURIComponent(yarnVersion)}/yarn-${encodeURIComponent(yarnVersion)}-v2.jar`;
+        const url = `https://maven.creeperhost.net/net/fabricmc/yarn/${encodeURIComponent(yarnVersion)}/yarn-${encodeURIComponent(yarnVersion)}-v2.jar`;
         try {
             await downloadToFile(url, jarPath);
             await extractTinyFromJar(jarPath, "mappings/mappings.tiny", tinyPath);
@@ -203,7 +247,7 @@ async function getMojmapClassMap(version: string): Promise<Map<string, string> |
     if (mojmapCache.has(version)) return mojmapCache.get(version) ?? null;
 
     const cachePath = join(MAPPINGS_DIR, `mojmap-classes-${version}.json`);
-    if (!(await exists(cachePath))) {
+    if (!(await exists(cachePath)) || !(await exists(join(MAPPINGS_DIR, `proguard-${version}.txt`)))) {
         try {
             const manifestRes = await fetch("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json");
             if (!manifestRes.ok) { mojmapCache.set(version, null); return null; }
@@ -291,7 +335,7 @@ export function lookupInIndex(idx: TinyV2Index, symbol: string, reverse: boolean
 /**
  * Known stable MCP channels per MC version.
  * Format: "stable_{num}-{mcVersion}" or "snapshot_{date}-{mcVersion}"
- * Source: https://maven.minecraftforge.net/de/oceanlabs/mcp/mcp_stable/maven-metadata.xml
+ * Source: https://maven.creeperhost.net/de/oceanlabs/mcp/mcp_stable/maven-metadata.xml
  *
  * Versions without a dedicated stable channel fall back to the nearest
  * available channel for the same major.minor series.
@@ -345,14 +389,14 @@ interface McpNames {
 
 const srgCache = new Map<string, SrgIndex | null>();
 const mcpCache = new Map<string, McpNames | null>();
-const SRG_ONLY_VERSIONS = new Set(["1.7.2"]);
+const SRG_ONLY_VERSIONS = new Set(["1.6.4", "1.7.2"]);
 
 function parseSrg(content: string): SrgIndex {
     const classes = new Map<string, string>();
     const methods = new Map<string, string>();
     const fields = new Map<string, string>();
     for (const line of content.split("\n")) {
-        const parts = line.trim().split(" ");
+        const parts = line.trim().split(/\s+/);
         if (parts[0] === "CL:") {
             classes.set(parts[1], parts[2]);
         } else if (parts[0] === "FD:") {
@@ -373,10 +417,10 @@ function parseTsrg(content: string): SrgIndex {
     for (const line of content.split("\n")) {
         if (!line || line.startsWith("#")) continue;
         if (!line.startsWith("\t")) {
-            const [obf, srg] = line.trim().split(" ");
+            const [obf, srg] = line.trim().split(/\s+/);
             if (obf && srg) { curObf = obf; curSrg = srg; classes.set(obf, srg); }
         } else {
-            const parts = line.trim().split(" ");
+            const parts = line.trim().split(/\s+/);
             if (parts.length === 3) {
                 // method: obfName obfDesc srgName
                 methods.set(curObf + "/" + parts[0] + " " + parts[1], curSrg + "/" + parts[2]);
@@ -414,7 +458,7 @@ async function getSrgIndex(version: string): Promise<SrgIndex | null> {
     if (!(await exists(srgPath))) {
         // Try joined.srg format first (1.7.10–1.12.2)
         const srgZipPath = join(MAPPINGS_DIR, `mcp-${version}-srg.zip`);
-        const srgUrl = `https://maven.minecraftforge.net/de/oceanlabs/mcp/mcp/${version}/mcp-${version}-srg.zip`;
+        const srgUrl = `https://maven.creeperhost.net/de/oceanlabs/mcp/mcp/${version}/mcp-${version}-srg.zip`;
         try {
             await downloadToFile(srgUrl, srgZipPath);
             const zip = new AdmZip(srgZipPath);
@@ -429,7 +473,7 @@ async function getSrgIndex(version: string): Promise<SrgIndex | null> {
         } catch {
             // Try MCPConfig TSRG format (1.13+)
             const tsrgZipPath = join(MAPPINGS_DIR, `mcp_config-${version}.zip`);
-            const tsrgUrl = `https://maven.minecraftforge.net/de/oceanlabs/mcp/mcp_config/${version}/mcp_config-${version}.zip`;
+            const tsrgUrl = `https://maven.creeperhost.net/de/oceanlabs/mcp/mcp_config/${version}/mcp_config-${version}.zip`;
             try {
                 await downloadToFile(tsrgUrl, tsrgZipPath);
                 const zip = new AdmZip(tsrgZipPath);
@@ -470,7 +514,7 @@ async function getMcpNames(version: string): Promise<McpNames | null> {
         // silently never load.
         const mavenVersion = channel.replace(/^stable_/, "");
         const zipPath = join(MAPPINGS_DIR, `mcp_${mavenVersion}.zip`);
-        const url = `https://maven.minecraftforge.net/de/oceanlabs/mcp/mcp_stable/${mavenVersion}/mcp_stable-${mavenVersion}.zip`;
+        const url = `https://maven.creeperhost.net/de/oceanlabs/mcp/mcp_stable/${mavenVersion}/mcp_stable-${mavenVersion}.zip`;
         try {
             await downloadToFile(url, zipPath);
             const zip = new AdmZip(zipPath);
@@ -539,7 +583,7 @@ function translateMcpToSrg(symbol: string, mcpNames: McpNames): TranslateResult 
 }
 
 // ── Detect unobfuscated versions (MC 26.1+ ships without obfuscation) ─────────
-function isUnobfuscated(version: string): boolean {
+export function isUnobfuscated(version: string): boolean {
     // 26.1+ versioning uses the new unobfuscated scheme
     return /^(?:2[6-9]\.|[3-9]\d\.)/.test(version);
 }
@@ -672,14 +716,14 @@ async function runJava(args: string[]): Promise<string> {
         ? join(process.env.JAVA_HOME, "bin", process.platform === "win32" ? "java.exe" : "java")
         : "java";
     return new Promise((resolve, reject) => {
-        const proc = spawn(javaExe, args, { stdio: ["ignore", "pipe", "pipe"] });
+        const proc = spawn(javaExe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
         const out: Buffer[] = [];
         const err: Buffer[] = [];
         proc.stdout.on("data", (d: Buffer) => out.push(d));
         proc.stderr.on("data", (d: Buffer) => err.push(d));
         proc.on("close", (code) => {
             if (code === 0) resolve(Buffer.concat(out).toString());
-            else reject(new Error(Buffer.concat(err).toString().slice(0, 1000)));
+            else reject(new Error(Buffer.concat([...out, ...err]).toString().slice(0, 8000)));
         });
         proc.on("error", reject);
     });
@@ -701,6 +745,14 @@ export async function remapJar(
     }
 
     const trJar = await ensureTinyRemapper();
+    if (toMapping === "mojmap") {
+        const mappings = await getMojmapClassMap(version);
+        if (!mappings) throw new Error(`Mojang mappings not available for ${version}`);
+        const tiny = join(MAPPINGS_DIR, `mojmap-${version}.tiny`);
+        await writeFile(tiny, proguardToTiny(await readFile(join(MAPPINGS_DIR, `proguard-${version}.txt`), "utf8")));
+        await runJava(["-jar", trJar, inputJar, outputJar, tiny, "official", "named"]);
+        return { outputJar };
+    }
     const intIdx   = await getIntermediaryIndex(version);
     if (!intIdx) throw new Error(`Intermediary mappings not available for ${version}`);
 
@@ -712,19 +764,8 @@ export async function remapJar(
     await runJava(["-jar", trJar, inputJar, stepOneOut, intTiny, "official", "intermediary"]);
 
     // Step 2: intermediary → named (yarn or mojmap)
-    let step2Tiny: string;
-    if (toMapping === "yarn") {
-        await getYarnIndex(version); // ensure downloaded
-        step2Tiny = join(MAPPINGS_DIR, `yarn-${version}.tiny`);
-    } else {
-        // Mojmap
-        await getMojmapClassMap(version); // ensure downloaded
-        step2Tiny = join(MAPPINGS_DIR, `mojmap-${version}.tiny`);
-        // For mojmap, the proguard inverted tiny doesn't exist yet — build it
-        if (!(await exists(step2Tiny))) {
-            throw new Error(`Mojmap tiny file not found at ${step2Tiny}. Mojmap remapping via TinyRemapper requires a converted Tiny v2 file. Use a tool like mapping-io to generate it.`);
-        }
-    }
+    await getYarnIndex(version);
+    const step2Tiny = join(MAPPINGS_DIR, `yarn-${version}.tiny`);
 
     await runJava(["-jar", trJar, stepOneOut, outputJar, step2Tiny, "intermediary", "named"]);
 
@@ -737,7 +778,7 @@ export async function remapJar(
 
 // ── Parchment ─────────────────────────────────────────────────────────────────
 async function resolveParchmentVersion(mcVersion: string): Promise<string | null> {
-    const metaUrl = `https://maven.parchmentmc.org/org/parchmentmc/data/parchment-${mcVersion}/maven-metadata.xml`;
+    const metaUrl = `https://maven.creeperhost.net/org/parchmentmc/data/parchment-${mcVersion}/maven-metadata.xml`;
     try {
         const res = await fetch(metaUrl);
         if (!res.ok) return null;
@@ -756,7 +797,7 @@ export async function getParchmentData(mcVersion: string): Promise<ParchmentData
         const parchmentVersion = await resolveParchmentVersion(mcVersion);
         if (!parchmentVersion) { parchmentCache.set(mcVersion, null); return null; }
 
-        const zipUrl = `https://maven.parchmentmc.org/org/parchmentmc/data/parchment-${mcVersion}/${parchmentVersion}/parchment-${mcVersion}-${parchmentVersion}-checked.zip`;
+        const zipUrl = `https://maven.creeperhost.net/org/parchmentmc/data/parchment-${mcVersion}/${parchmentVersion}/parchment-${mcVersion}-${parchmentVersion}-checked.zip`;
         const zipPath = join(PARCHMENT_DIR, `${mcVersion}-${parchmentVersion}.zip`);
         try {
             await downloadToFile(zipUrl, zipPath);
@@ -808,7 +849,7 @@ export async function getParchmentClass(className: string, mcVersion: string): P
 }
 
 export async function listAvailableParchmentVersions(mcVersion: string): Promise<string[]> {
-    const metaUrl = `https://maven.parchmentmc.org/org/parchmentmc/data/parchment-${mcVersion}/maven-metadata.xml`;
+    const metaUrl = `https://maven.creeperhost.net/org/parchmentmc/data/parchment-${mcVersion}/maven-metadata.xml`;
     try {
         const res = await fetch(metaUrl);
         if (!res.ok) return [];
@@ -903,7 +944,7 @@ function remapDescriptor(desc: string, classMap: Map<string, string>): string {
 }
 
 /**
- * Versions that have SRG+MCP mappings available (legacy Forge era 1.7.10–1.15).
+ * Versions with SRG mappings, optionally enriched with MCP member names.
  */
 export function hasSrgMappings(version: string): boolean {
     return version in MCP_CHANNELS || SRG_ONLY_VERSIONS.has(version);
@@ -918,7 +959,7 @@ export function hasSrgMappings(version: string): boolean {
 const RETROMCP_BASE_URL = process.env.RETROMCP_BASE_URL ?? "https://mcphackers.org/versionsV2";
 
 /**
- * Known versions with RetroMCP mappings (Tiny v2 format, "official" → "named").
+ * Known versions with RetroMCP mappings (Tiny v2, client/official → named).
  * Maps version ID → resource ZIP filename (appended to RETROMCP_BASE_URL).
  * Source: https://mcphackers.org/versionsV3/versions.json
  *
@@ -1013,16 +1054,24 @@ async function getRetroMcpTinyPath(version: string): Promise<string | null> {
  * Returns the path to the remapped JAR, or null if mappings aren't available.
  */
 export async function remapMcJarTiny(jarPath: string, version: string): Promise<string | null> {
-    const remappedPath = jarPath.replace(/\.jar$/, "-mapped.jar");
+    const remappedPath = jarPath.replace(/\.jar$/, "-mapped-v2.jar");
     if (await exists(remappedPath)) return remappedPath;
 
     const tinyPath = await getRetroMcpTinyPath(version);
     if (!tinyPath) return null;
 
     const trJar = await ensureTinyRemapper();
-    // RetroMCP Tiny v2 namespaces: named (human-readable), client (obfuscated), server (obfuscated)
-    // MC client JAR uses "client" obfuscation, so remap client → named
-    await runJava(["-jar", trJar, jarPath, remappedPath, tinyPath, "client", "named"]);
+    const header = (await readFile(tinyPath, "utf8")).split(/\r?\n/, 1)[0].split("\t");
+    const namespaces = header.slice(3);
+    const source = namespaces.includes("client") ? "client" : "official";
+    if (!namespaces.includes(source) || !namespaces.includes("named")) {
+        throw new Error(`Unsupported RetroMCP namespaces for ${version}: ${namespaces.join(", ")}`);
+    }
+    // The joined 1.5.2 mappings give server overrides distinct explicit names.
+    // Resolve those from the declaring class instead of inherited guesses.
+    // TinyRemapper still rejects conflicts it cannot resolve from the mapping.
+    const options = version === "1.5.2" ? ["--ignoreConflicts"] : [];
+    await writeRemappedJar(remappedPath, temporary => runJava(["-jar", trJar, jarPath, temporary, tinyPath, source, "named", ...options]));
     return remappedPath;
 }
 
@@ -1031,15 +1080,26 @@ export async function remapMcJarTiny(jarPath: string, version: string): Promise<
  * Returns the path to the remapped JAR.
  */
 export async function remapMcJar(jarPath: string, version: string): Promise<string | null> {
-    const remappedPath = jarPath.replace(/\.jar$/, "-mapped.jar");
+    const remappedPath = jarPath.replace(/\.jar$/, "-mapped-v2.jar");
     if (await exists(remappedPath)) return remappedPath;
 
     const srgPath = await generateCombinedSrg(version);
     if (!srgPath) return null;
 
     const ssJar = await ensureSpecialSource();
-    await runJava(["-jar", ssJar, "--in-jar", jarPath, "--out-jar", remappedPath, "--srg-in", srgPath]);
+    await writeRemappedJar(remappedPath, temporary => runJava(["-jar", ssJar, "--in-jar", jarPath, "--out-jar", temporary, "--srg-in", srgPath]));
     return remappedPath;
+}
+
+/** Failed remaps must not leave a partial JAR that the next request treats as cached. */
+async function writeRemappedJar(destination: string, remap: (temporary: string) => Promise<unknown>): Promise<void> {
+    const temporary = destination.replace(/\.jar$/, `-${process.pid}-${Date.now()}.tmp.jar`);
+    try {
+        await remap(temporary);
+        await rename(temporary, destination);
+    } finally {
+        await unlink(temporary).catch(() => {});
+    }
 }
 
 /**

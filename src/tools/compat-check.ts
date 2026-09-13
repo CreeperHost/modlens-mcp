@@ -14,8 +14,10 @@
 import { parseJar } from "../processor.js";
 import { listEntries, extractEntry } from "../jar.js";
 import { getDb } from "../db.js";
-import { listModsSlim } from "../repositories/mod.js";
+import { listModsSlim, listModsForMixinScan } from "../repositories/mod.js";
+import { deserializeArray } from "../db-backend.js";
 import { normalizeJarPath, assertJarPath } from "../security.js";
+import { readJarMixinTargets } from "./mixin-scan.js";
 
 export type IssueSeverity = "error" | "warn" | "info";
 export type IssueType =
@@ -45,31 +47,13 @@ async function findModsWithMixinTargetsMatching(
 ): Promise<Array<{ modId: string; displayName: string; matchedTargets: string[] }>> {
     if (targets.length === 0) return [];
 
-    const params: unknown[] = [targets];
-    const extra: string[] = [];
-    if (loader)    { params.push(loader);    extra.push(`m.loader = $${params.length}`); }
-    if (mcVersion) { params.push(mcVersion); extra.push(`m.mc_version = $${params.length}`); }
-    const whereExtra = extra.length ? " AND " + extra.join(" AND ") : "";
-
-    const db = await getDb();
-    const rows = await db.$queryRawUnsafe<
-        Array<{ mod_id: string; display_name: string; matched: string[] }>
-    >(`
-        SELECT
-            m.mod_id,
-            m.display_name,
-            ARRAY_AGG(t.cls) FILTER (WHERE t.cls = ANY($1)) AS matched
-        FROM "mods" m
-        CROSS JOIN LATERAL jsonb_array_elements_text(m.mixin_targets::jsonb) AS t(cls)
-        WHERE t.cls = ANY($1) ${whereExtra}
-        GROUP BY m.mod_id, m.display_name
-    `, ...params);
-
-    return rows.map((r) => ({
-        modId: r.mod_id,
-        displayName: r.display_name,
-        matchedTargets: r.matched ?? [],
-    }));
+    const wanted = new Set(targets.map(target => target.replace(/\./g, "/")));
+    const rows = await listModsForMixinScan({ hasMixins: true, loader, mcVersion });
+    return rows.flatMap(row => {
+        const matchedTargets = deserializeArray<string>(row.mixinTargets)
+            .map(target => target.replace(/\./g, "/")).filter(target => wanted.has(target));
+        return matchedTargets.length ? [{ modId: row.modId, displayName: row.displayName, matchedTargets }] : [];
+    });
 }
 
 const DISPLAY_TEST_MAP: Record<string, string> = {
@@ -89,6 +73,11 @@ export async function checkModCompat(
 
     const manifest = await parseJar(jarPath);
     const issues: CompatIssue[] = [];
+    if (manifest.mixinConfigs.length) {
+        const scanned = await readJarMixinTargets(jarPath, manifest.mixinConfigs);
+        manifest.mixinTargets = scanned.targets;
+        if (scanned.failed) issues.push({severity:"warn",type:"mixin_conflict",detail:`Could not inspect ${scanned.failed} candidate mixin classes; mixin coverage is incomplete.`});
+    }
 
     // ── Check 0: Degraded metadata warning ────────────────────────────────────
     if (manifest.metadataSource === "filename") {
@@ -133,8 +122,8 @@ export async function checkModCompat(
         >(`SELECT mod_id, display_name, at_entries, aw_entries FROM mods WHERE has_at = true OR has_aw = true`);
 
         for (const row of atRows) {
-            const dbAt = new Set<string>(Array.isArray(row.at_entries) ? (row.at_entries as string[]) : []);
-            const dbAw = new Set<string>(Array.isArray(row.aw_entries) ? (row.aw_entries as string[]) : []);
+            const dbAt = new Set(deserializeArray<string>(row.at_entries));
+            const dbAw = new Set(deserializeArray<string>(row.aw_entries));
             for (const e of candidateAt) {
                 if (dbAt.has(e)) {
                     issues.push({

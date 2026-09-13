@@ -3,6 +3,7 @@ import { createHash } from "crypto";
 import { readFile } from "fs/promises";
 import { parse as parseToml } from "smol-toml";
 import { assertJarPath } from "./security.js";
+import { normalizeVersionRange } from "./version-ranges.js";
 
 export type MetadataSource = "fabric.mod.json" | "quilt.mod.json" | "mods.toml" | "mcmod.info" | "@Mod annotation" | "filename";
 
@@ -35,6 +36,41 @@ export interface ParsedManifest {
     metadataSource: MetadataSource;
 }
 
+/** Read every declared loader, including JARs that ship metadata for multiple loaders. */
+export async function inspectJarLoaders(jarPath: string): Promise<Array<Exclude<ParsedManifest["loader"], "unknown">>> {
+    assertJarPath(jarPath);
+    const zip = new AdmZip(jarPath);
+    const readEntry = (name: string) => zip.readAsText(name) || null;
+    const loaders = new Set<Exclude<ParsedManifest["loader"], "unknown">>();
+    const addManifest = (parse: () => ParsedManifest) => {
+        try {
+            const manifest = parse();
+            if (manifest.loader !== "unknown" && manifest.modId && manifest.modId !== "unknown") loaders.add(manifest.loader);
+        } catch {
+            // Invalid metadata is not loader evidence; another declaration may be valid.
+        }
+    };
+    const fabric = readEntry("fabric.mod.json");
+    const quilt = readEntry("quilt.mod.json");
+    const forge = readEntry("META-INF/mods.toml");
+    const neoforge = readEntry("META-INF/neoforge.mods.toml");
+    const legacy = readEntry("mcmod.info");
+    if (fabric) addManifest(() => parseFabric(fabric, []));
+    if (quilt) addManifest(() => parseQuilt(quilt, []));
+    if (forge) addManifest(() => parseForgeToml(forge, "forge", [], readEntry));
+    if (neoforge) addManifest(() => parseForgeToml(neoforge, "neoforge", [], readEntry));
+    if (legacy) addManifest(() => parseMcModInfo(legacy, []));
+    if (!loaders.size) {
+        // Annotation-only FML mods have no metadata file. Never guess from a filename.
+        try {
+            if (extractForgeModAnnotation(zip)?.modId) loaders.add("forge");
+        } catch {
+            // Unrecognised bytecode provides no loader evidence.
+        }
+    }
+    return [...loaders];
+}
+
 export async function parseJar(jarPath: string): Promise<ParsedManifest> {
     assertJarPath(jarPath);
     const zip = new AdmZip(jarPath);
@@ -44,6 +80,7 @@ export async function parseJar(jarPath: string): Promise<ParsedManifest> {
         const e = zip.getEntry(name);
         return e ? zip.readFile(e)?.toString("utf8") ?? null : null;
     };
+    const jarAttributes = parseJarAttributes(readEntry("META-INF/MANIFEST.MF") ?? "");
 
     // Detect loader
     const fabricJson = readEntry("fabric.mod.json");
@@ -58,16 +95,16 @@ export async function parseJar(jarPath: string): Promise<ParsedManifest> {
     } else if (quiltJson) {
         manifest = parseQuilt(quiltJson, entries);
     } else if (neoforgeToml) {
-        manifest = parseNeoForge(neoforgeToml, entries);
+        manifest = parseForgeToml(neoforgeToml, "neoforge", entries, readEntry);
     } else if (forgeToml) {
-        manifest = parseForge(forgeToml, entries);
+        manifest = parseForgeToml(forgeToml, "forge", entries, readEntry);
     } else {
-        // Legacy Forge (1.7.10–1.12.2) uses mcmod.info at the JAR root
+        // FML-era mods can provide mcmod.info, an @Mod annotation, or both.
         const mcmodInfoRaw = readEntry("mcmod.info");
         if (mcmodInfoRaw) {
             manifest = parseMcModInfo(mcmodInfoRaw, entries);
         } else {
-            // Pre-mcmod.info era (1.2.5–1.6) — try @Mod annotation from bytecode
+            // Annotation metadata is also used by mods that omit mcmod.info.
             let modAnnotation: ForgeModAnnotationResult | null = null;
             try {
                 modAnnotation = extractForgeModAnnotation(zip);
@@ -75,16 +112,16 @@ export async function parseJar(jarPath: string): Promise<ParsedManifest> {
                 // Malformed class files (obfuscators, Kotlin metadata, etc.) — degrade gracefully
             }
             if (modAnnotation) {
-                const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
+                const mixinConfigs = mixinConfigNames(entries);
                 manifest = {
                     modId: modAnnotation.modId,
                     displayName: modAnnotation.name,
                     version: modAnnotation.version,
-                    mcVersion: "",
+                    mcVersion: modAnnotation.mcVersion,
                     loader: "forge",
                     description: "",
                     sourceUrl: null,
-                    dependencies: [],
+                    dependencies: parseLegacyDependencies(modAnnotation.dependencies.split(";")),
                     mixinConfigs,
                     hasMixins: mixinConfigs.length > 0,
                     hasAt: entries.includes("META-INF/accesstransformer.cfg"),
@@ -100,12 +137,28 @@ export async function parseJar(jarPath: string): Promise<ParsedManifest> {
         }
     }
 
-    // AT entries
-    const atContent = readEntry("META-INF/accesstransformer.cfg");
-    if (atContent) {
-        manifest.hasAt = true;
-        manifest.atEntries = parseAtEntries(atContent);
+    if (manifest.version === "${file.jarVersion}" && jarAttributes["implementation-version"]) {
+        manifest.version = jarAttributes["implementation-version"];
     }
+
+    // Legacy FML names AT files in the manifest; later Forge uses a fixed path.
+    const atPaths = new Set(["META-INF/accesstransformer.cfg"]);
+    for (const name of (jarAttributes.fmlat ?? "").split(/\s+/).filter(Boolean)) {
+        atPaths.add(name.startsWith("META-INF/") ? name : `META-INF/${name}`);
+    }
+    for (const path of atPaths) {
+        const content = readEntry(path);
+        if (content !== null) {
+            manifest.hasAt = true;
+            manifest.atEntries.push(...parseAtEntries(content));
+        }
+    }
+    manifest.atEntries = [...new Set(manifest.atEntries)];
+    manifest.mixinConfigs = [...new Set([
+        ...manifest.mixinConfigs,
+        ...(jarAttributes.mixinconfigs ?? "").split(",").map(name => name.trim()).filter(name => entries.includes(name)),
+    ])];
+    manifest.hasMixins = manifest.mixinConfigs.length > 0;
 
     // AW entries — scan all entries for *.accesswidener
     const awEntry = entries.find((e) => e.endsWith(".accesswidener"));
@@ -144,16 +197,44 @@ export async function parseJar(jarPath: string): Promise<ParsedManifest> {
     return manifest;
 }
 
+/** JAR manifest main attributes, with continuation lines unfolded per the JAR format. */
+function parseJarAttributes(content: string): Record<string, string> {
+    const main = content.replace(/\r?\n /g, "").split(/\r?\n\r?\n/, 1)[0];
+    const attributes: Record<string, string> = {};
+    for (const line of main.split(/\r?\n/)) {
+        const separator = line.indexOf(": ");
+        if (separator > 0) attributes[line.slice(0, separator).toLowerCase()] = line.slice(separator + 2);
+    }
+    return attributes;
+}
+
+function mixinConfigNames(entries: string[], declared?: unknown): string[] {
+    const values = Array.isArray(declared) ? declared : declared ? [declared] : [];
+    const names = values.map(value => typeof value === "string" ? value
+        : value && typeof value === "object" ? (value as Record<string, unknown>).config : undefined);
+    return [...new Set([
+        ...names.filter((name): name is string => typeof name === "string" && entries.includes(name)),
+        ...entries.filter(name => name.endsWith(".mixins.json") || /(^|\/)mixins\.[^/]+\.json$/.test(name)),
+    ])];
+}
+
 function parseFabric(raw: string, entries: string[]): ParsedManifest {
     let json: Record<string, unknown>;
     try { json = JSON.parse(raw); } catch { json = {}; }
 
-    const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
+    const mixinConfigs = mixinConfigNames(entries, json.mixins);
 
     const deps: ParsedManifest["dependencies"] = [];
-    const rawDeps = (json.depends ?? {}) as Record<string, string>;
+    const rawDeps = (json.depends ?? {}) as Record<string, unknown>;
     for (const [id, ver] of Object.entries(rawDeps)) {
-        deps.push({ id, version: ver, required: true });
+        deps.push({ id, version: normalizeVersionRange(ver), required: true });
+    }
+    for (const field of ["recommends", "suggests"] as const) {
+        const optional = json[field];
+        if (!optional || typeof optional !== "object") continue;
+        for (const [id, ver] of Object.entries(optional)) {
+            if (!deps.some(dep => dep.id === id)) deps.push({ id, version: normalizeVersionRange(ver), required: false });
+        }
     }
 
     return {
@@ -180,17 +261,25 @@ function parseQuilt(raw: string, entries: string[]): ParsedManifest {
     let json: Record<string, unknown>;
     try { json = JSON.parse(raw); } catch { json = {}; }
     const ql = (json.quilt_loader ?? {}) as Record<string, unknown>;
-    const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
+    const mixinConfigs = mixinConfigNames(entries, json.mixin);
+    const metadata = (ql.metadata ?? {}) as Record<string, unknown>;
+    const dependencies: ParsedManifest["dependencies"] = [];
+    for (const value of Array.isArray(ql.depends) ? ql.depends : []) {
+        if (typeof value === "string") dependencies.push({ id: value, version: "*", required: true });
+        else if (value && typeof value.id === "string") dependencies.push({
+            id: value.id, version: normalizeVersionRange(value.versions) || "*", required: value.optional !== true,
+        });
+    }
 
     return {
         modId: String(ql.id ?? "unknown"),
         displayName: String((ql.metadata as Record<string, unknown>)?.name ?? ql.id ?? "unknown"),
         version: String(ql.version ?? "0.0.0"),
-        mcVersion: "",
+        mcVersion: dependencies.find(dep => dep.id === "minecraft")?.version ?? "",
         loader: "quilt",
-        description: "",
-        sourceUrl: null,
-        dependencies: [],
+        description: typeof metadata.description === "string" ? metadata.description : "",
+        sourceUrl: extractString(metadata, "contact", "sources"),
+        dependencies,
         mixinConfigs,
         hasMixins: mixinConfigs.length > 0,
         hasAt: false,
@@ -202,15 +291,9 @@ function parseQuilt(raw: string, entries: string[]): ParsedManifest {
     };
 }
 
-function parseNeoForge(raw: string, entries: string[]): ParsedManifest {
-    return parseForgeToml(raw, "neoforge", entries);
-}
-
-function parseForge(raw: string, entries: string[]): ParsedManifest {
-    return parseForgeToml(raw, "forge", entries);
-}
-
-function parseForgeToml(raw: string, loader: "neoforge" | "forge", entries: string[]): ParsedManifest {
+function parseForgeToml(
+    raw: string, loader: "neoforge" | "forge", entries: string[], readEntry: (name: string) => string | null,
+): ParsedManifest {
     let doc: Record<string, unknown>;
     try {
         doc = parseToml(raw) as Record<string, unknown>;
@@ -241,6 +324,8 @@ function parseForgeToml(raw: string, loader: "neoforge" | "forge", entries: stri
     for (const v of Object.values(depsTable)) {
         if (Array.isArray(v)) allDepObjs.push(...v as Record<string, unknown>[]);
     }
+    // Early NeoForge versions still used mods.toml.
+    if (modId === "neoforge" || allDepObjs.some(dep => dep.modId === "neoforge")) loader = "neoforge";
 
     const mcDepEntry = allDepObjs.find((d) => str(d.modId) === "minecraft");
     const mcVersion = str(mcDepEntry?.versionRange);
@@ -248,15 +333,22 @@ function parseForgeToml(raw: string, loader: "neoforge" | "forge", entries: stri
     const dependencies: ParsedManifest["dependencies"] = allDepObjs
         .filter((d) => {
             const id = str(d.modId);
-            return id && id !== "minecraft" && id !== "neoforge" && id !== "forge";
+            return id && id !== "minecraft" && id !== "neoforge" && id !== "forge"
+                && d.type !== "incompatible" && d.type !== "discouraged";
         })
         .map((d) => ({
             id: str(d.modId),
             version: str(d.versionRange, "*"),
-            required: d.mandatory !== false,
+            required: d.type ? d.type === "required" : d.mandatory !== false,
         }));
 
-    const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
+    const mixinConfigs = mixinConfigNames(entries, doc.mixins);
+    const atEntries: string[] = [];
+    for (const at of Array.isArray(doc.accessTransformers) ? doc.accessTransformers : []) {
+        if (typeof at?.file !== "string") continue;
+        const content = readEntry(at.file);
+        if (content !== null) atEntries.push(...parseAtEntries(content));
+    }
 
     return {
         modId,
@@ -269,9 +361,9 @@ function parseForgeToml(raw: string, loader: "neoforge" | "forge", entries: stri
         dependencies,
         mixinConfigs,
         hasMixins: mixinConfigs.length > 0,
-        hasAt: entries.includes("META-INF/accesstransformer.cfg"),
+        hasAt: entries.includes("META-INF/accesstransformer.cfg") || atEntries.length > 0,
         hasAw: false,
-        atEntries: [],
+        atEntries,
         awEntries: [],
         mixinTargets: [],
         metadataSource: "mods.toml",
@@ -302,22 +394,12 @@ function parseMcModInfo(raw: string, entries: string[]): ParsedManifest {
     const str = (v: unknown, fallback = "") => (typeof v === "string" ? v : fallback);
     const modId = str(mod.modid ?? mod.modId, "unknown");
 
-    const mixinConfigs = entries.filter((e) => e.endsWith(".mixins.json"));
+    const mixinConfigs = mixinConfigNames(entries);
 
     // Dependencies — handle multiple legacy formats
     const rawDeps = Array.isArray(mod.dependencies) ? mod.dependencies : [];
     const rawRequired = Array.isArray(mod.requiredMods) ? mod.requiredMods : [];
-    const allDeps = [...rawDeps, ...rawRequired];
-    const dependencies: ParsedManifest["dependencies"] = allDeps
-        .filter((d): d is string => typeof d === "string")
-        .filter((d) => d !== "Forge" && d !== "forge" && d !== "FML" && d !== "mcp" && d !== "minecraft")
-        // Strip version ranges from dependency strings like "required-after:SomeLib@[1.0,)"
-        .map((d) => {
-            const depMatch = d.match(/^(?:required-after|after|required-before|before|required):?\s*([^@\s;]+)/i);
-            return depMatch ? depMatch[1] : d;
-        })
-        .filter((d) => d !== "Forge" && d !== "forge" && d !== "FML")
-        .map((d) => ({ id: d, version: "*", required: true }));
+    const dependencies = parseLegacyDependencies(rawDeps, rawRequired);
 
     return {
         modId,
@@ -339,6 +421,25 @@ function parseMcModInfo(raw: string, entries: string[]): ParsedManifest {
     };
 }
 
+function parseLegacyDependencies(declarations: unknown[], requiredMods: unknown[] = []): ParsedManifest["dependencies"] {
+    const dependencies = new Map<string, ParsedManifest["dependencies"][number]>();
+    for (const [values, required] of [[declarations, false], [requiredMods, true]] as const) {
+        for (const value of values) {
+            if (typeof value !== "string") continue;
+            const match = value.trim().match(/^(?:(required-(?:after|before)|after|before|required):)?([^@\s;]+)(?:@(.+))?$/i);
+            if (!match) continue;
+            const [, order = "", id, version = "*"] = match;
+            if (["forge", "fml", "mcp", "minecraft", "*"].includes(id.toLowerCase())) continue;
+            const previous = dependencies.get(id);
+            dependencies.set(id, {
+                id, version: version === "*" ? previous?.version ?? "*" : version,
+                required: required || order.toLowerCase().startsWith("required") || previous?.required === true,
+            });
+        }
+    }
+    return [...dependencies.values()];
+}
+
 // ── @Mod annotation extraction from bytecode ──────────────────────────────────
 
 const FORGE_MOD_DESCRIPTORS = new Set([
@@ -350,6 +451,8 @@ interface ForgeModAnnotationResult {
     modId: string;
     name: string;
     version: string;
+    mcVersion: string;
+    dependencies: string;
 }
 
 /**
@@ -382,6 +485,7 @@ export function extractForgeModAnnotation(zip: AdmZip): ForgeModAnnotationResult
 
 /** Parse a single .class file's bytes for a Forge @Mod annotation. */
 export function parseClassForModAnnotation(buf: Buffer): ForgeModAnnotationResult | null {
+    if (buf.length < 10) return null;
     if (buf.readUInt32BE(0) !== 0xCAFEBABE) return null;
 
     // ── Parse constant pool ──
@@ -507,6 +611,8 @@ function parseModAnnotationAttr(
                     modId,
                     name: values["name"] ?? modId,
                     version: values["version"] ?? "0.0.0",
+                    mcVersion: values["acceptedMinecraftVersions"] ?? "",
+                    dependencies: values["dependencies"] ?? "",
                 };
             }
         } else {
@@ -595,7 +701,7 @@ function unknownMod(jarPath: string): ParsedManifest {
 export function parseAtEntries(content: string): string[] {
     return content
         .split("\n")
-        .map((l) => l.trim())
+        .map((l) => l.split("#", 1)[0].trim())
         .filter((l) => l && !l.startsWith("#"));
 }
 
@@ -606,8 +712,8 @@ export function parseAwEntries(content: string): string[] {
         .filter((l) => l && !l.startsWith("#") && !l.startsWith("accessWidener"));
 }
 
-function extractFabricMcVersion(deps: Record<string, string>): string {
-    return deps["minecraft"] ?? "";
+function extractFabricMcVersion(deps: Record<string, unknown>): string {
+    return normalizeVersionRange(deps["minecraft"]);
 }
 
 function extractString(obj: unknown, ...keys: string[]): string | null {
@@ -619,12 +725,12 @@ function extractString(obj: unknown, ...keys: string[]): string | null {
     return typeof cur === "string" ? cur : null;
 }
 
-export async function computeHashes(jarPath: string): Promise<{ sha256: string; sha512: string; murmur2: string; }> {
+export async function computeHashes(jarPath: string): Promise<{ sha1: string; sha256: string; sha512: string; murmur2: string; }> {
     const buf = await readFile(jarPath);
     const sha256 = createHash("sha256").update(buf).digest("hex");
     const sha512 = createHash("sha512").update(buf).digest("hex");
     const murmur2 = computeMurmur2(buf).toString();
-    return { sha256, sha512, murmur2 };
+    return { sha1: createHash("sha1").update(buf).digest("hex"), sha256, sha512, murmur2 };
 }
 
 /** CurseForge Murmur2 hash — matches CF API fingerprint (whitespace-normalized). */

@@ -1,7 +1,11 @@
 import { PrismaClient } from "@prisma/client";
 import { detectBackend } from "./db-backend.js";
+import { decodeSqliteResult, encodeSqliteArgs } from "./sqlite-json.js";
+import { initializeSqliteDatabase, sqliteDatabasePath } from "./sqlite-schema.js";
+import { sqliteRawArgs } from "./sqlite-parameters.js";
 
 let _client: PrismaClient | null = null;
+let _initializing: Promise<PrismaClient> | null = null;
 
 /**
  * Returns the shared Prisma client, initializing it on first call.
@@ -10,15 +14,35 @@ let _client: PrismaClient | null = null;
  */
 export async function getDb(): Promise<PrismaClient> {
     if (_client) return _client;
+    if (_initializing) return _initializing;
+    _initializing = initializeDb();
+    try { return await _initializing; }
+    finally { _initializing = null; }
+}
+
+async function initializeDb(): Promise<PrismaClient> {
     const backend = detectBackend();
 
     if (backend === "sqlite") {
         const url = process.env.DATABASE_URL ?? "";
+        initializeSqliteDatabase(sqliteDatabasePath(url));
         // Adapter v7 declares SQLite v12 support; test:package covers this pairing with client v6.
         const { PrismaBetterSqlite3 } = await import("@prisma/adapter-better-sqlite3");
         const adapter = new PrismaBetterSqlite3({ url });
         const { PrismaClient: SQLiteClient } = await import("./generated/sqlite/client.js");
-        _client = new SQLiteClient({ adapter }) as unknown as PrismaClient;
+        _client = new SQLiteClient({ adapter }).$extends({
+            name: "sqlite-json-models",
+            query: {
+                $queryRawUnsafe({args, query}) { return query(sqliteRawArgs(args) as typeof args); },
+                $executeRawUnsafe({args, query}) { return query(sqliteRawArgs(args) as typeof args); },
+                $allModels: {
+                    async $allOperations({ model, args, query }) {
+                        const result = await query(encodeSqliteArgs(model, args) as typeof args);
+                        return decodeSqliteResult(model, result);
+                    },
+                },
+            },
+        }) as unknown as PrismaClient;
         return _client;
     }
 
@@ -58,6 +82,7 @@ export function db(): PrismaClient {
 }
 
 export async function disconnect(): Promise<void> {
+    if (detectBackend() === "sqlite") (await import("./repositories/embeddings-sqlite.js")).closeVecDb();
     await _client?.$disconnect();
     _client = null;
 }

@@ -2,12 +2,12 @@ import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { join } from "path";
 import { CACHE_ROOT, ensureDir, exists } from "./cache.js";
-import { LEGACY_SRG_VERSIONS, LEGACY_RETROMCP_VERSIONS } from "./minecraft.js";
+import { fetchMcVersionList } from "./minecraft.js";
+import { loaderVersions, providerVersions } from "./modpacks-ch.js";
 
-const PISTON_META = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
-const NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge";
-const NEOFORGE_META = "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge";
-const FORGE_MAVEN = "https://maven.minecraftforge.net/net/minecraftforge/forge";
+const NEOFORGE_MAVEN = "https://maven.creeperhost.net/net/neoforged/neoforge";
+const NEOFORGE_META = `${NEOFORGE_MAVEN}/maven-metadata.xml`;
+const FORGE_MAVEN = "https://maven.creeperhost.net/net/minecraftforge/forge";
 const FORGE_PROMOS = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
 
 export interface MCVersion {
@@ -38,30 +38,21 @@ export interface ForgeVersion {
     recommended?: boolean;
 }
 
-let mcCache: MCVersion[] | null = null;
 let neoforgeCache: NeoForgeVersion[] | null = null;
 let forgeCache: ForgeVersion[] | null = null;
 
 export async function listMcVersions(type?: "release" | "snapshot" | "all"): Promise<MCVersion[]> {
-    if (!mcCache) {
-        const res = await fetch(PISTON_META);
-        if (!res.ok) throw new Error(`Failed to fetch MC versions: ${res.status}`);
-        const data = await res.json() as { versions: MCVersion[]; };
-        mcCache = data.versions.filter(
-            (v) => v.type !== "old_beta" && v.type !== "old_alpha" &&
-                (new Date(v.releaseTime) >= new Date("2019-04-23") || LEGACY_SRG_VERSIONS.has(v.id) || LEGACY_RETROMCP_VERSIONS.has(v.id))
-        );
-    }
-    if (!type || type === "all") return mcCache;
-    if (type === "release") return mcCache.filter((v) => v.type === "release");
-    return mcCache.filter((v) => v.type === "snapshot");
+    const versions = (await fetchMcVersionList(true)).map(({ id, type, releaseTime }) => ({ id, type, releaseTime }));
+    return !type || type === "all" ? versions : versions.filter(version => version.type === type);
 }
 
 export async function listNeoForgeVersions(mcVersion?: string, limit = 20): Promise<NeoForgeVersion[]> {
+    if (mcVersion) return (await loaderVersions(mcVersion, "neoforge")).slice(0, limit)
+        .map(v => ({ version: v.version, mcVersion: v.gameVersion ?? mcVersion }));
     if (!neoforgeCache) {
         const res = await fetch(NEOFORGE_META);
         if (!res.ok) throw new Error(`Failed to fetch NeoForge versions: ${res.status}`);
-        const data = await res.json() as { versions: string[]; };
+        const data = { versions: [...(await res.text()).matchAll(/<version>([^<]+)<\/version>/g)].map(m => m[1]) };
         // NeoForge versions look like "21.1.0", "21.1.1", etc. — leading number = MC major
         neoforgeCache = data.versions
             .filter((v) => /^\d+\.\d+\.\d+/.test(v))
@@ -83,28 +74,17 @@ export async function listNeoForgeVersions(mcVersion?: string, limit = 20): Prom
 }
 
 export async function listFabricApiVersions(mcVersion?: string, limit = 20): Promise<FabricApiVersion[]> {
-    // Fabric API project on Modrinth: P7dR8mSH
-    const url = mcVersion
-        ? `https://api.modrinth.com/v2/project/P7dR8mSH/version?game_versions=%5B%22${encodeURIComponent(mcVersion)}%22%5D&loaders=%5B%22fabric%22%5D`
-        : `https://api.modrinth.com/v2/project/P7dR8mSH/version?loaders=%5B%22fabric%22%5D`;
-
-    const res = await fetch(url, { headers: { "User-Agent": "modlens-mcp/1.0" } });
-    if (!res.ok) throw new Error(`Failed to fetch Fabric API versions: ${res.status}`);
-
-    const versions = await res.json() as Array<{
-        version_number: string;
-        date_published: string;
-        game_versions: string[];
-    }>;
-
-    return versions.slice(0, limit).map((v) => ({
-        version: v.version_number,
-        mcVersion: v.game_versions[0] ?? "unknown",
-        datePublished: v.date_published,
+    const versions = await providerVersions("mod", "P7dR8mSH", { mcVersion, loader: "fabric", limit });
+    return versions.map((v) => ({
+        version: v.version,
+        mcVersion: (v.targets ?? []).find(t => t.type === "game")?.version ?? "unknown",
+        datePublished: new Date((v.updated ?? 0) * 1000).toISOString(),
     }));
 }
 
 export async function listForgeVersions(mcVersion?: string, limit = 20): Promise<ForgeVersion[]> {
+    if (mcVersion) return (await loaderVersions(mcVersion, "forge")).slice(0, limit)
+        .map(v => ({ version: v.version, fullVersion: `${mcVersion}-${v.version}`, mcVersion: v.gameVersion ?? mcVersion }));
     if (!forgeCache) {
         // Fetch promotions to know which versions are recommended
         const promoRes = await fetch(FORGE_PROMOS, { headers: { "User-Agent": "modlens-mcp/1.0" } });
@@ -223,23 +203,5 @@ export async function downloadFabricApi(version: string): Promise<string> {
     const destPath = join(CACHE_ROOT, "loaders", "fabric-api", `fabric-api-${version}.jar`);
     if (await exists(destPath)) return destPath;
 
-    // Fetch the version file list from Modrinth
-    const res = await fetch(
-        `https://api.modrinth.com/v2/project/P7dR8mSH/version?loaders=%5B%22fabric%22%5D`,
-        { headers: { "User-Agent": "modlens-mcp/1.0" } }
-    );
-    if (!res.ok) throw new Error(`Modrinth lookup failed: ${res.status}`);
-
-    const versions = await res.json() as Array<{
-        version_number: string;
-        files: Array<{ url: string; primary: boolean; filename: string; }>;
-    }>;
-
-    const match = versions.find((v) => v.version_number === version);
-    if (!match) throw new Error(`Fabric API version "${version}" not found on Modrinth`);
-
-    const file = match.files.find((f) => f.primary) ?? match.files[0];
-    if (!file) throw new Error(`No download file found for Fabric API ${version}`);
-
-    return downloadJar(file.url, destPath);
+    return downloadJar(`https://maven.creeperhost.net/net/fabricmc/fabric-api/fabric-api/${encodeURIComponent(version)}/fabric-api-${encodeURIComponent(version)}.jar`, destPath);
 }

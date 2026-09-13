@@ -22,6 +22,7 @@
     "scripts/",
     "package.json",
     "README.md",
+    "TESTING.md",
     "LICENSE",
     "ATTRIBUTION.md"
   ],
@@ -33,6 +34,7 @@
     "setup": "npm run build && node dist/setup.js",
     "test": "vitest run",
     "test:package": "node scripts/test-package.mjs",
+    "test:minecraft:eras": "node scripts/test-minecraft-eras.mjs",
     "test:project:gradle": "node scripts/test-project-gradle.mjs",
     "test:project:http": "node scripts/test-project-http.mjs",
     "test:watch": "vitest",

@@ -1,24 +1,20 @@
-import { lookupBySha512, getProject as getMrProject, getLatestVersion as getMrLatest, searchProjects as searchModrinth } from "../modrinth.js";
-import { lookupByFingerprint, getLatestFile as getCfLatest, searchMods as searchCurseforge } from "../curseforge.js";
+import { lookupProjectByHash as lookupMrProject, getProject as getMrProject, getLatestVersion as getMrLatest, searchProjects as searchModrinth } from "../modrinth.js";
+import { lookupProjectByHash as lookupCfProject, getProject as getCfProject, getLatestFile as getCfLatest, searchMods as searchCurseforge } from "../curseforge.js";
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { ensureDir } from "../cache.js";
 import { findModById, updateMod, listModsForSync, getModMetadata } from "../repositories/mod.js";
-import { fileSha512, verifyFileHash, HashMismatchError, validatePath } from "../security.js";
+import { fileSha1, fileSha512, verifyFileHash, HashMismatchError, validatePath } from "../security.js";
 import { buildModGraph, ensureGraphify } from "./graphify.js";
 import { resolveAuto, type AutoBehaviorOpts } from "./ingest.js";
 
 export async function syncModrinth(dbId: number) {
     const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
-    if (!mod.sha512) throw new Error("Mod has no SHA-512 hash — re-ingest to compute it");
-
-    const version = await lookupBySha512(mod.sha512);
-    if (!version) return { matched: false };
-
-    const project = await getMrProject(version.project_id);
+    const project = mod.modrinthId ? await getMrProject(mod.modrinthId) : await lookupMrProject(await fileSha1(mod.jarPath));
+    if (!project) return { matched: false };
     await updateMod(dbId, {
-        modrinthId: version.project_id,
+        modrinthId: project.id,
         metadata: {
             ...(mod.metadata as object),
             modrinthSlug: project?.slug,
@@ -26,15 +22,13 @@ export async function syncModrinth(dbId: number) {
         },
     });
 
-    return { matched: true, projectId: version.project_id, slug: project?.slug, sourceUrl: project?.source_url };
+    return { matched: true, projectId: project.id, slug: project.slug, sourceUrl: project.source_url };
 }
 
 export async function syncCurseforge(dbId: number) {
     const mod = await findModById(dbId);
     if (!mod) throw new Error(`Mod #${dbId} not found`);
-    if (!mod.murmur2) throw new Error("Mod has no Murmur2 hash — re-ingest to compute it");
-
-    const project = await lookupByFingerprint(parseInt(mod.murmur2));
+    const project = mod.curseforgeId ? await getCfProject(mod.curseforgeId) : await lookupCfProject(await fileSha1(mod.jarPath));
     if (!project) return { matched: false };
 
     await updateMod(dbId, {
@@ -57,12 +51,14 @@ export async function checkUpdates(dbId: number) {
 
     if (mod.modrinthId) {
         try {
-            const latest = await getMrLatest(mod.modrinthId, mod.mcVersion || undefined);
+            const latest = await getMrLatest(mod.modrinthId, mod.mcVersion || undefined, mod.loader || undefined);
             if (latest) {
                 results.modrinth = {
                     latestVersion: latest.version_number,
                     currentVersion: mod.version,
-                    isLatest: latest.version_number === mod.version,
+                    isLatest: latest.version_number === mod.version
+                        || latest.id === (mod.metadata as Record<string, unknown>).modpacksChFileId
+                        || !!latest.files[0]?.hashes.sha1 && latest.files[0].hashes.sha1 === await fileSha1(mod.jarPath),
                     releaseDate: latest.date_published,
                     downloadUrl: latest.files.find((f) => f.primary)?.url,
                 };
@@ -72,10 +68,13 @@ export async function checkUpdates(dbId: number) {
 
     if (mod.curseforgeId) {
         try {
-            const latest = await getCfLatest(mod.curseforgeId, mod.mcVersion || undefined);
+            const latest = await getCfLatest(mod.curseforgeId, mod.mcVersion || undefined, mod.loader || undefined);
             if (latest) {
                 results.curseforge = {
                     latestFile: latest.displayName,
+                    isLatest: latest.displayName === mod.version
+                        || String(latest.id) === (mod.metadata as Record<string, unknown>).modpacksChFileId
+                        || !!latest.sha1 && latest.sha1 === await fileSha1(mod.jarPath),
                     releaseDate: latest.fileDate,
                     gameVersions: latest.gameVersions,
                     downloadUrl: latest.downloadUrl,
@@ -350,8 +349,11 @@ export async function batchCheckUpdates(opts: {
             // Modrinth check
             if (mod.modrinthId) {
                 try {
-                    const latest = await getMrLatest(mod.modrinthId, opts.mcVersion);
-                    if (latest && latest.version_number !== mod.version) {
+                    const latest = await getMrLatest(mod.modrinthId, opts.mcVersion ?? mod.mcVersion, opts.loader ?? mod.loader);
+                    const isLatest = latest && (latest.version_number === mod.version
+                        || latest.id === (mod.metadata as Record<string, unknown>).modpacksChFileId
+                        || !!latest.files[0]?.hashes.sha1 && latest.files[0].hashes.sha1 === await fileSha1(mod.jarPath));
+                    if (latest && !isLatest) {
                         row.modrinth = {
                             latestVersion: latest.version_number,
                             isNewer: true,
@@ -364,8 +366,11 @@ export async function batchCheckUpdates(opts: {
             // CurseForge check
             if (mod.curseforgeId) {
                 try {
-                    const latest = await getCfLatest(mod.curseforgeId, opts.mcVersion);
-                    if (latest) {
+                    const latest = await getCfLatest(mod.curseforgeId, opts.mcVersion ?? mod.mcVersion, opts.loader ?? mod.loader);
+                    const isLatest = latest && (latest.displayName === mod.version
+                        || String(latest.id) === (mod.metadata as Record<string, unknown>).modpacksChFileId
+                        || !!latest.sha1 && latest.sha1 === await fileSha1(mod.jarPath));
+                    if (latest && !isLatest) {
                         row.curseforge = {
                             latestFile: latest.displayName,
                             url: latest.downloadUrl ?? undefined,
@@ -410,6 +415,8 @@ interface UnifiedSearchHit {
     downloads: number;
     categories?: string[];
     mcVersions?: string[];
+    loaders?: string[];
+    loaderSource?: "jar";
     url: string;
 }
 
@@ -425,8 +432,8 @@ export async function searchPlatforms(
 
     // Search both platforms in parallel
     const [mrResults, cfResults] = await Promise.all([
-        searchModrinth(query, { loader: opts.loader, mcVersion: opts.mcVersion, limit }).catch(() => null),
-        searchCurseforge(query, { loader: opts.loader, mcVersion: opts.mcVersion, limit }).catch(() => null),
+        searchModrinth(query, { loader: opts.loader, mcVersion: opts.mcVersion, limit }),
+        searchCurseforge(query, { loader: opts.loader, mcVersion: opts.mcVersion, limit }),
     ]);
 
     const hits: UnifiedSearchHit[] = [];
@@ -443,6 +450,8 @@ export async function searchPlatforms(
                 downloads: h.downloads ?? 0,
                 categories: h.categories,
                 mcVersions: h.versions,
+                loaders: h.loaders,
+                ...(h.loaderSource ? { loaderSource: h.loaderSource } : {}),
                 url: `https://modrinth.com/mod/${h.slug}`,
             });
         }
@@ -458,6 +467,8 @@ export async function searchPlatforms(
                 platform: "curseforge",
                 projectId: h.id,
                 downloads: h.downloadCount ?? 0,
+                loaders: h.loaders,
+                ...(h.loaderSource ? { loaderSource: h.loaderSource } : {}),
                 url: `https://www.curseforge.com/minecraft/mc-mods/${h.slug}`,
             });
         }
@@ -493,7 +504,7 @@ export async function searchPlatforms(
         totalResults: deduped.length,
         modrinthResults: mrResults?.hits?.length ?? 0,
         curseforgeResults: cfResults?.length ?? 0,
-        note: "Results merged from Modrinth and CurseForge, deduplicated by slug, sorted by downloads. CurseForge requires CURSEFORGE_API_KEY env var.",
+        note: "Results supplied by modpacks.ch for Modrinth and CurseForge, deduplicated by slug and sorted by downloads. No CurseForge API key is required.",
         results: deduped.slice(0, limit),
     };
 }

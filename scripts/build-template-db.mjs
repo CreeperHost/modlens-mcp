@@ -13,6 +13,7 @@ import { execSync } from "child_process";
 import { existsSync, rmSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { initializeSqliteDatabase } from "../dist/sqlite-schema.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dbFile = join(ROOT, "prisma", "backends", "template.db");
@@ -36,4 +37,5 @@ if (!existsSync(dbFile)) {
     console.error(`[build-template-db] expected template at ${dbFile} but it was not created.`);
     process.exit(1);
 }
-console.log(`[build-template-db] built template database at ${dbFile}`);
+initializeSqliteDatabase(dbFile);
+console.log(`[build-template-db] built template database and FTS indexes at ${dbFile}`);

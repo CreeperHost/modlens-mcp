@@ -11,6 +11,8 @@ import { join } from "path";
 import { Readable } from "stream";
 import { paths, exists, CACHE_ROOT } from "../cache.js";
 import { getDb } from "../db.js";
+import { detectBackend } from "../db-backend.js";
+import { submitRegistryBundle } from "../registry-submission.js";
 import { findModById, findModByModIdLike } from "../repositories/mod.js";
 import {
     upsertModSourceEmbedding,
@@ -29,6 +31,13 @@ import { validateEmbeddingBundle, validateEmbedRegistryIndex } from "../security
 interface EmbeddingEntry {
     className: string;
     embedding: number[];
+}
+
+export function decodeStoredEmbedding(value: string | Uint8Array): number[] {
+    if (typeof value === "string") return JSON.parse(value) as number[];
+    if (value.byteLength % 4 !== 0) throw new Error("Invalid float32 embedding length");
+    const bytes = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    return Array.from({ length: bytes.length / 4 }, (_, index) => bytes.readFloatLE(index * 4));
 }
 
 interface EmbeddingBundle {
@@ -117,7 +126,10 @@ export async function exportModEmbeddings(
 
     // Query all embedded source files
     const db = await getDb();
-    const rows = await db.$queryRawUnsafe<Array<{ class_name: string; embedding: string }>>(
+    const rows: Array<{ class_name: string; embedding: string | Uint8Array }> = detectBackend() === "sqlite"
+        ? (await (db as any).modSourceFile.findMany({where:{modId:dbId,embedding:{not:null}},select:{className:true,embedding:true}}))
+            .map((row: {className:string;embedding:Uint8Array}) => ({class_name:row.className,embedding:row.embedding}))
+        : await db.$queryRawUnsafe<Array<{ class_name: string; embedding: string }>>(
         `SELECT class_name, embedding::text AS embedding FROM mod_source_files
          WHERE mod_id = $1 AND embedding IS NOT NULL`,
         dbId,
@@ -129,7 +141,7 @@ export async function exportModEmbeddings(
 
     const entries: EmbeddingEntry[] = rows.map(r => ({
         className: r.class_name,
-        embedding: JSON.parse(r.embedding) as number[],
+        embedding: decodeStoredEmbedding(r.embedding),
     }));
 
     const bundle: EmbeddingBundle = {
@@ -179,7 +191,10 @@ export async function exportVanillaEmbeddings(
     const chunkSize = parseInt(process.env.OLLAMA_EMBED_CHUNK ?? "1500", 10);
 
     const db = await getDb();
-    const rows = await db.$queryRawUnsafe<Array<{ class_name: string; embedding: string }>>(
+    const rows: Array<{ class_name: string; embedding: string | Uint8Array }> = detectBackend() === "sqlite"
+        ? (await (db as any).mcSourceFile.findMany({where:{mcVersionId:versionRow.id,embedding:{not:null}},select:{className:true,embedding:true}}))
+            .map((row: {className:string;embedding:Uint8Array}) => ({class_name:row.className,embedding:row.embedding}))
+        : await db.$queryRawUnsafe<Array<{ class_name: string; embedding: string }>>(
         `SELECT class_name, embedding::text AS embedding FROM mc_source_files
          WHERE mc_version_id = $1 AND embedding IS NOT NULL`,
         versionRow.id,
@@ -191,7 +206,7 @@ export async function exportVanillaEmbeddings(
 
     const entries: EmbeddingEntry[] = rows.map(r => ({
         className: r.class_name,
-        embedding: JSON.parse(r.embedding) as number[],
+        embedding: decodeStoredEmbedding(r.embedding),
     }));
 
     const bundle: EmbeddingBundle = {
@@ -255,7 +270,7 @@ export async function exportAllEmbeddings(
 
     // Find all mods with at least one embedded source file
     const mods = await db.$queryRawUnsafe<Array<{ mod_id: number; count: string }>>(
-        `SELECT mod_id, COUNT(*)::text AS count FROM mod_source_files
+        `SELECT mod_id, CAST(COUNT(*) AS TEXT) AS count FROM mod_source_files
          WHERE embedding IS NOT NULL GROUP BY mod_id`,
     );
 
@@ -666,8 +681,8 @@ export async function getEmbedStatus(
         if (!mod) throw new Error(`Mod #${target.dbId} not found`);
         scopeId = target.dbId;
         stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
-            `SELECT COUNT(*)::text AS total,
-                    COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
+            `SELECT CAST(COUNT(*) AS TEXT) AS total,
+                    CAST(COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END) AS TEXT) AS embedded
              FROM mod_source_files WHERE mod_id = $1`,
             target.dbId,
         );
@@ -679,8 +694,8 @@ export async function getEmbedStatus(
         scopeColumn = "mc_version_id";
         scopeId = versionRow.id;
         stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
-            `SELECT COUNT(*)::text AS total,
-                    COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
+            `SELECT CAST(COUNT(*) AS TEXT) AS total,
+                    CAST(COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END) AS TEXT) AS embedded
              FROM mc_source_files WHERE mc_version_id = $1`,
             versionRow.id,
         );
@@ -698,8 +713,8 @@ export async function getEmbedStatus(
         if (!mod) throw new Error(`Mod #${modDbId} not found`);
         scopeId = modDbId;
         stats = await db.$queryRawUnsafe<[{ total: string; embedded: string }]>(
-            `SELECT COUNT(*)::text AS total,
-                    COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)::text AS embedded
+            `SELECT CAST(COUNT(*) AS TEXT) AS total,
+                    CAST(COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END) AS TEXT) AS embedded
              FROM mod_source_files WHERE mod_id = $1`,
             modDbId,
         );
@@ -719,9 +734,9 @@ export async function getEmbedStatus(
     return { totalFiles: total, embeddedCount: embedded, model, coverage, sources };
 }
 
-// ── Community submission (groundwork — not yet functional) ────────────────────
+// ── Community submission ────────────────────
 
-/** Payload shape for future community embedding submissions. */
+/** Payload for a community embedding submission. */
 export interface EmbedSubmission {
     /** The exported bundle file path */
     bundlePath: string;
@@ -733,15 +748,8 @@ export interface EmbedSubmission {
 
 /**
  * Submit locally-generated embeddings for inclusion in the public registry.
- * NOT YET IMPLEMENTED — returns a stub response with groundwork details.
+ * Creates a draft pull request containing the validated bundle and registry index.
  */
-export async function submitEmbeddings(
-    _submission: EmbedSubmission,
-): Promise<{ status: string; message: string }> {
-    return {
-        status: "not_implemented",
-        message: "Community embedding submission is planned but not yet available. "
-            + "For now, export your embeddings with embed_export and share the bundle file manually. "
-            + "Future versions will support direct submission to the public registry.",
-    };
+export async function submitEmbeddings(submission: EmbedSubmission) {
+    return submitRegistryBundle("embed", EMBED_REGISTRY_URL, submission);
 }

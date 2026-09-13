@@ -5,6 +5,7 @@ vi.mock("../processor.js", () => ({ parseJar: vi.fn() }));
 vi.mock("../jar.js", () => ({ listEntries: vi.fn(), extractEntry: vi.fn() }));
 vi.mock("../repositories/mod.js", () => ({
     listModsSlim: vi.fn(),
+    listModsForMixinScan: vi.fn(),
 }));
 vi.mock("../security.js", () => ({ validatePath: vi.fn(), normalizeJarPath: (p: string) => p, assertJarPath: vi.fn() }));
 vi.mock("../db.js", () => ({
@@ -15,7 +16,7 @@ vi.mock("../db.js", () => ({
 
 import { parseJar } from "../processor.js";
 import { listEntries, extractEntry } from "../jar.js";
-import { listModsSlim } from "../repositories/mod.js";
+import { listModsSlim, listModsForMixinScan } from "../repositories/mod.js";
 import { getDb } from "../db.js";
 
 const BASE_MANIFEST = {
@@ -36,6 +37,7 @@ const EXISTING_MOD = {
 beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(listModsSlim).mockResolvedValue([]);
+    vi.mocked(listModsForMixinScan).mockResolvedValue([]);
     vi.mocked(listEntries).mockReturnValue([]);
     vi.mocked(extractEntry).mockReturnValue(null);
     vi.mocked(getDb).mockResolvedValue({ $queryRawUnsafe: vi.fn().mockResolvedValue([]) } as any);
@@ -90,9 +92,9 @@ describe("checkModCompat", () => {
             hasMixins: true,
             mixinTargets: ["net/minecraft/world/level/Level"],
         });
-        vi.mocked(getDb).mockResolvedValue({ $queryRawUnsafe: vi.fn().mockResolvedValue([
-            { mod_id: "existingmod", display_name: "Existing Mod", matched: ["net/minecraft/world/level/Level"] },
-        ]) } as any);
+        vi.mocked(listModsForMixinScan).mockResolvedValue([
+            { modId: "existingmod", displayName: "Existing Mod", mixinTargets: ["net/minecraft/world/level/Level"] },
+        ] as any);
 
         const result = await checkModCompat("/new.jar") as any;
 
@@ -110,10 +112,10 @@ describe("checkModCompat", () => {
             hasMixins: true,
             mixinTargets: ["net/minecraft/world/level/Level", "net/minecraft/server/level/ServerLevel"],
         });
-        vi.mocked(getDb).mockResolvedValue({ $queryRawUnsafe: vi.fn().mockResolvedValue([
-            { mod_id: "mod_a", display_name: "Mod A", matched: ["net/minecraft/world/level/Level"] },
-            { mod_id: "mod_b", display_name: "Mod B", matched: ["net/minecraft/server/level/ServerLevel"] },
-        ]) } as any);
+        vi.mocked(listModsForMixinScan).mockResolvedValue([
+            { modId: "mod_a", displayName: "Mod A", mixinTargets: ["net/minecraft/world/level/Level"] },
+            { modId: "mod_b", displayName: "Mod B", mixinTargets: ["net/minecraft/server/level/ServerLevel"] },
+        ] as any);
 
         const result = await checkModCompat("/new.jar") as any;
 
@@ -198,9 +200,9 @@ describe("checkModCompat", () => {
             hasMixins: true,
             mixinTargets: ["net/minecraft/world/level/Level"],
         });
-        vi.mocked(getDb).mockResolvedValue({ $queryRawUnsafe: vi.fn().mockResolvedValue([
-            { mod_id: "other", display_name: "Other", matched: ["net/minecraft/world/level/Level"] },
-        ]) } as any);
+        vi.mocked(listModsForMixinScan).mockResolvedValue([
+            { modId: "other", displayName: "Other", mixinTargets: ["net/minecraft/world/level/Level"] },
+        ] as any);
 
         const result = await checkModCompat("/new.jar") as any;
         expect(result.summary.safe).toBe(false);

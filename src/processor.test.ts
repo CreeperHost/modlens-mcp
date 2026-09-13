@@ -3,7 +3,7 @@ import AdmZip from "adm-zip";
 import { writeFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { parseJar, parseAtEntries, parseAwEntries, computeMurmur2, parseClassForModAnnotation } from "./processor.js";
+import { parseJar, inspectJarLoaders, parseAtEntries, parseAwEntries, computeMurmur2, parseClassForModAnnotation } from "./processor.js";
 
 // ── AT / AW entry parsing ──────────────────────────────────────────────────
 
@@ -363,6 +363,9 @@ function buildForgeModClassFile(opts: {
     name?: string;
     version?: string;
     elementNameForId?: string; // default "modid", can be "value" for alt format
+    dependencies?: string;
+    mcVersion?: string;
+    classVersion?: number;
 }): Buffer {
     const cpEntries: Buffer[] = [];
     function addUtf8(str: string): number {
@@ -395,6 +398,8 @@ function buildForgeModClassFile(opts: {
     pairs.push({ nameIdx: addUtf8(idLabel), valueIdx: addUtf8(opts.modId) });
     if (opts.name) pairs.push({ nameIdx: addUtf8("name"), valueIdx: addUtf8(opts.name) });
     if (opts.version) pairs.push({ nameIdx: addUtf8("version"), valueIdx: addUtf8(opts.version) });
+    if (opts.dependencies) pairs.push({ nameIdx: addUtf8("dependencies"), valueIdx: addUtf8(opts.dependencies) });
+    if (opts.mcVersion) pairs.push({ nameIdx: addUtf8("acceptedMinecraftVersions"), valueIdx: addUtf8(opts.mcVersion) });
 
     // Annotation data: num_annotations(2) + type_index(2) + num_pairs(2) + pairs*(name(2)+tag(1)+value(2))
     const annotLen = 2 + 2 + 2 + pairs.length * 5;
@@ -413,7 +418,7 @@ function buildForgeModClassFile(opts: {
     const header = Buffer.alloc(10);
     header.writeUInt32BE(0xCAFEBABE, 0);
     header.writeUInt16BE(0, 4);
-    header.writeUInt16BE(52, 6); // Java 8
+    header.writeUInt16BE(opts.classVersion ?? 52, 6);
     header.writeUInt16BE(cpEntries.length + 1, 8);
 
     // Class body: access(2) + this(2) + super(2) + ifaces_count(2) + fields_count(2) + methods_count(2) + attrs_count(2)
@@ -499,6 +504,28 @@ describe("parseClassForModAnnotation", () => {
 });
 
 describe("parseJar — @Mod annotation fallback", () => {
+    it.each([
+        ["1.4.7", "Lcpw/mods/fml/common/Mod;", 50],
+        ["1.6.4", "Lcpw/mods/fml/common/Mod;", 50],
+        ["1.7.10", "Lcpw/mods/fml/common/Mod;", 51],
+        ["1.8.9", "Lnet/minecraftforge/fml/common/Mod;", 52],
+        ["1.12.2", "Lnet/minecraftforge/fml/common/Mod;", 52],
+    ] as const)("keeps %s annotation dependencies and accepted MC range", async (version, descriptor, classVersion) => {
+        const zip = new AdmZip();
+        zip.addFile("example/Mod.class", buildForgeModClassFile({ descriptor, modId: "fixture", classVersion,
+            mcVersion: `[${version}]`, dependencies: "Required-after:library@[1,2);after:optional@[3,);required-after:Forge@[1,)" }));
+        const path = join(tmpdir(), `modlens-annotation-${version}-${Date.now()}.jar`);
+        zip.writeZip(path);
+        try {
+            const result = await parseJar(path);
+            expect(await inspectJarLoaders(path)).toEqual(["forge"]);
+            expect(result.mcVersion).toBe(`[${version}]`);
+            expect(result.dependencies).toEqual([
+                { id: "library", version: "[1,2)", required: true },
+                { id: "optional", version: "[3,)", required: false },
+            ]);
+        } finally { await unlink(path); }
+    });
     it("extracts mod metadata from @Mod annotation when no other metadata exists", async () => {
         const classFile = buildForgeModClassFile({
             descriptor: "Lcpw/mods/fml/common/Mod;",

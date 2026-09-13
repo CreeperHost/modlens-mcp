@@ -17,8 +17,8 @@
  *
  * All fetched files are cached to ~/.modlens-cache/mcmeta/{version}/{branch}/...
  */
-import { readFile, writeFile, readdir, mkdir } from "fs/promises";
-import { join, dirname, extname, resolve, sep } from "path";
+import { readFile, writeFile } from "fs/promises";
+import { join, extname, resolve, sep } from "path";
 import { CACHE_ROOT, exists, ensureDir } from "../cache.js";
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ async function fetchMcmetaJson<T>(ref: string, filePath: string): Promise<T> {
 
 /** Build the ref string for a specific MC version + branch. */
 function versionRef(version: string | undefined, branch: string): string {
-    return version ? `${version}-${branch}` : branch;
+    return version && version !== "latest" && version !== "_latest" ? `${version}-${branch}` : branch;
 }
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
@@ -197,38 +197,55 @@ export async function getMcAssetFile(
     }
 }
 
-/** List files within a directory on a specific branch/version by reading cache or using the GitHub tree API. */
-export async function listMcDataFiles(
+export type McmetaDirEntry = { name: string; type: "file" | "dir"; fullPath: string };
+
+/** Only cache a complete upstream directory. Downloaded files are a partial cache. */
+export async function listMcmetaDirectory(
     dirPath: string,
     version: string,
     branch: string,
-): Promise<object> {
-    // Try listing the local cache directory if it's already downloaded
-    const cacheDir = mcmetaCachePath(version, branch, dirPath);
-    if (await exists(cacheDir)) {
-        try {
-            const entries = await readdir(cacheDir, { withFileTypes: true });
-            const files = entries.map(e => ({ name: e.name, type: e.isDirectory() ? "dir" : "file" }));
-            return { version, branch, path: dirPath, source: "cache", entries: files };
-        } catch { /* fall through to API */ }
+): Promise<{ source: string; entries: McmetaDirEntry[] }> {
+    validateMcComponent(version, "version");
+    validateMcComponent(branch, "branch");
+    const parts = dirPath.replace(/\/$/, "").split("/").filter(Boolean);
+    for (const part of parts) {
+        validateMcComponent(part, "directory");
+        if (part === "." || part === "..") throw new Error("Invalid directory path");
     }
-
-    // Use GitHub API to list tree
-    const apiUrl = `https://api.github.com/repos/misode/mcmeta/git/trees/${version}-${branch}?recursive=0`;
-    try {
+    const normalizedPath = parts.join("/");
+    const indexPath = mcmetaCachePath(version, branch, join(normalizedPath, ".directory-index-v2.json"));
+    if (await exists(indexPath)) {
+        const entries = JSON.parse(await readFile(indexPath, "utf8")) as McmetaDirEntry[];
+        return { source: "cache", entries };
+    }
+    type Tree = { tree: Array<{ path: string; type: string; sha: string }>; truncated?: boolean };
+    const getTree = async (ref: string): Promise<Tree> => {
+        const apiUrl = `https://api.github.com/repos/misode/mcmeta/git/trees/${encodeURIComponent(ref)}`;
         const res = await fetch(apiUrl, { headers: { Accept: "application/vnd.github.v3+json" } });
         if (!res.ok) throw new Error(`GitHub API ${res.status}`);
-        const tree = await res.json() as { tree: Array<{ path: string; type: string }> };
-        const prefix = dirPath ? dirPath.replace(/\/?$/, "/") : "";
-        const entries = tree.tree
-            .filter(e => {
-                if (!prefix) return !e.path.includes("/");
-                if (!e.path.startsWith(prefix)) return false;
-                const rel = e.path.slice(prefix.length);
-                return !rel.includes("/");
-            })
-            .map(e => ({ name: e.path.replace(prefix, ""), type: e.type === "tree" ? "dir" : "file", fullPath: e.path }));
-        return { version, branch, path: dirPath, source: "github-api", entries };
+        const tree = await res.json() as Tree;
+        if (tree.truncated || !Array.isArray(tree.tree)) throw new Error("Incomplete mcmeta directory response");
+        return tree;
+    };
+    let tree = await getTree(versionRef(version, branch));
+    for (const part of parts) {
+        const entry = tree.tree.find(e => e.path === part && e.type === "tree");
+        if (!entry) throw new Error(`mcmeta directory not found: ${normalizedPath}`);
+        tree = await getTree(entry.sha);
+    }
+    const entries: McmetaDirEntry[] = tree.tree.map(e => ({
+        name: e.path,
+        type: e.type === "tree" ? "dir" : "file",
+        fullPath: [normalizedPath, e.path].filter(Boolean).join("/"),
+    }));
+    await ensureDir(indexPath);
+    await writeFile(indexPath, JSON.stringify(entries));
+    return { source: "github-api", entries };
+}
+
+export async function listMcDataFiles(dirPath: string, version: string, branch: string): Promise<object> {
+    try {
+        return { version, branch, path: dirPath, ...await listMcmetaDirectory(dirPath, version, branch) };
     } catch (err) {
         return { version, branch, path: dirPath, error: String(err) };
     }
@@ -256,7 +273,7 @@ export async function diffMcData(
 export async function getMcAtlas(version?: string, atlas?: string): Promise<object> {
     const ref = versionRef(version, "atlas");
     if (atlas) {
-        const path = atlas.includes(".") ? atlas : `${atlas}.json`;
+        const path = atlas.endsWith(".json") ? atlas : `${atlas}/data.json`;
         try {
             const data = await fetchMcmetaJson<unknown>(ref, path);
             return { version: version ?? "latest", atlas, data };

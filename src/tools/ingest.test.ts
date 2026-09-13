@@ -44,6 +44,7 @@ vi.mock("../java-tools.js", () => ({
 }));
 
 vi.mock("../cache.js", () => ({
+    CACHE_ROOT: "/tmp/modlens-ingest-test",
     paths:     { decompiled: "/tmp/decompiled", source: "/tmp/source", jars: "/tmp/jars" },
     ensureDir: vi.fn(),
 }));
@@ -427,4 +428,3 @@ describe("refreshDegradedMetadata", () => {
         expect(repo.updateMod).not.toHaveBeenCalled();
     });
 });
-

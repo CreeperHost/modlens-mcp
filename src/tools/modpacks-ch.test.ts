@@ -31,6 +31,7 @@ vi.mock("../modpacks-ch.js", () => ({
     searchMods: vi.fn(),
     getMod: vi.fn(),
     getModsBatch: vi.fn(),
+    providerVersions: vi.fn(),
     resolveModVersionUrl: vi.fn(),
     cfCdnUrl: vi.fn(),
     downloadManifestFile: vi.fn(),
@@ -39,9 +40,9 @@ vi.mock("../modpacks-ch.js", () => ({
 
 vi.mock("../modrinth.js", () => ({
     searchProjects: vi.fn(),
-    getProject: vi.fn(),
-    getProjectVersions: vi.fn(),
-    getProjectVersion: vi.fn(),
+    getPackProject: vi.fn(),
+    getPackVersions: vi.fn(),
+    getPackVersion: vi.fn(),
     getVersion: vi.fn(),
     getPrimaryFile: vi.fn(),
 }));
@@ -52,10 +53,27 @@ vi.mock("../feed-the-beast.js", () => ({
     getOfficialFtbPackManifest: vi.fn(),
 }));
 
-const { resolvePackAction, searchPacksAction, listRemotePackVersionsAction } = await import("./modpacks-ch.js");
+const { resolvePackAction, searchPacksAction, listRemotePackVersionsAction, modInfoAction } = await import("./modpacks-ch.js");
 const mpch = await import("../modpacks-ch.js");
 const mr = await import("../modrinth.js");
 const ftb = await import("../feed-the-beast.js");
+
+describe("mod_info version limits", () => {
+    beforeEach(() => {
+        vi.resetAllMocks();
+        vi.mocked(mpch.getMod).mockResolvedValue({ id: 1, name: "Fixture", links: [] } as any);
+        vi.mocked(mpch.providerVersions).mockResolvedValue([]);
+    });
+    it.each([undefined, 3])("passes the effective limit %s to the resolver", async limit => {
+        const result = await modInfoAction(1, { loader: "forge", mcVersion: "1.7.10", limit });
+        expect(result.versionLimit).toBe(limit ?? 20);
+        expect(mpch.providerVersions).toHaveBeenCalledWith("mod", 1, { loader: "forge", mcVersion: "1.7.10", limit: limit ?? 20 });
+    });
+    it("rejects invalid limits before requesting or downloading files", async () => {
+        await expect(modInfoAction(1, { limit: -1 })).rejects.toThrow("limit must be a positive integer");
+        expect(mpch.getMod).not.toHaveBeenCalled();
+    });
+});
 
 const cfPack = {
     id: 925200,
@@ -165,6 +183,15 @@ describe("modpacks_ch pack resolution", () => {
         expect(resolved.versionName).toBe("All the Mods 10-7.1");
     });
 
+    it("distinguishes a release token from older digits and prereleases", async () => {
+        vi.mocked(mpch.getCfPack).mockResolvedValue({...cfPack,versions:[
+            {...cfPack.versions[0],id:1,name:"Pack-0.48"},
+            {...cfPack.versions[0],id:2,name:"Pack-4.8-beta.1"},
+            {...cfPack.versions[0],id:3,name:"Pack-4.8"},
+        ]} as any);
+        expect((await resolvePackAction({namespace:"curseforge",packId:925200,versionRef:"4.8"})).versionId).toBe(3);
+    });
+
     it("lists remote CurseForge/modpacks.ch versions and marks versionRef matches", async () => {
         vi.mocked(mpch.getCfPack).mockResolvedValue(cfPack as any);
 
@@ -216,7 +243,7 @@ describe("modpacks_ch pack resolution", () => {
     });
 
     it("resolves a Modrinth pack by project search and version number", async () => {
-        vi.mocked(mr.getProject).mockResolvedValueOnce(null).mockResolvedValueOnce({
+        vi.mocked(mr.getPackProject).mockResolvedValueOnce(null).mockResolvedValueOnce({
             id: "mr-project",
             slug: "fabulously-optimized",
             title: "Fabulously Optimized",
@@ -245,8 +272,8 @@ describe("modpacks_ch pack resolution", () => {
             limit: 10,
             total_hits: 1,
         });
-        vi.mocked(mr.getProjectVersion).mockResolvedValue(null);
-        vi.mocked(mr.getProjectVersions).mockResolvedValue([{
+        vi.mocked(mr.getPackVersion).mockResolvedValue(null);
+        vi.mocked(mr.getPackVersions).mockResolvedValue([{
             id: "mr-version",
             project_id: "mr-project",
             name: "Pack 1.0.0",
@@ -279,7 +306,7 @@ describe("modpacks_ch pack resolution", () => {
     });
 
     it("resolves a Modrinth web URL with an embedded version ref", async () => {
-        vi.mocked(mr.getProject).mockResolvedValue({
+        vi.mocked(mr.getPackProject).mockResolvedValue({
             id: "mr-project",
             slug: "fabulously-optimized",
             title: "Fabulously Optimized",
@@ -288,7 +315,7 @@ describe("modpacks_ch pack resolution", () => {
             source_url: null,
             issues_url: null,
         });
-        vi.mocked(mr.getProjectVersion).mockResolvedValue({
+        vi.mocked(mr.getPackVersion).mockResolvedValue({
             id: "mr-version",
             project_id: "mr-project",
             name: "Pack 1.0.0",
@@ -306,8 +333,8 @@ describe("modpacks_ch pack resolution", () => {
             packRef: "https://modrinth.com/modpack/fabulously-optimized/version/mr-version",
         });
 
-        expect(mr.getProject).toHaveBeenCalledWith("fabulously-optimized");
-        expect(mr.getProjectVersion).toHaveBeenCalledWith("fabulously-optimized", "mr-version");
+        expect(mr.getPackProject).toHaveBeenCalledWith("fabulously-optimized");
+        expect(mr.getPackVersion).toHaveBeenCalledWith("fabulously-optimized", "mr-version");
         expect(resolved).toMatchObject({
             namespace: "modrinth",
             packName: "Fabulously Optimized",
@@ -318,7 +345,7 @@ describe("modpacks_ch pack resolution", () => {
     });
 
     it("resolves a Modrinth API project/version URL", async () => {
-        vi.mocked(mr.getProject).mockResolvedValue({
+        vi.mocked(mr.getPackProject).mockResolvedValue({
             id: "mr-project",
             slug: "fabulously-optimized",
             title: "Fabulously Optimized",
@@ -327,7 +354,7 @@ describe("modpacks_ch pack resolution", () => {
             source_url: null,
             issues_url: null,
         });
-        vi.mocked(mr.getProjectVersion).mockResolvedValue({
+        vi.mocked(mr.getPackVersion).mockResolvedValue({
             id: "mr-version",
             project_id: "mr-project",
             name: "Pack 1.0.0",
@@ -349,7 +376,7 @@ describe("modpacks_ch pack resolution", () => {
     });
 
     it("lists remote Modrinth versions and marks versionRef matches", async () => {
-        vi.mocked(mr.getProject).mockResolvedValue({
+        vi.mocked(mr.getPackProject).mockResolvedValue({
             id: "mr-project",
             slug: "fabulously-optimized",
             title: "Fabulously Optimized",
@@ -358,7 +385,7 @@ describe("modpacks_ch pack resolution", () => {
             source_url: null,
             issues_url: null,
         });
-        vi.mocked(mr.getProjectVersions).mockResolvedValue([{
+        vi.mocked(mr.getPackVersions).mockResolvedValue([{
             id: "mr-version",
             project_id: "mr-project",
             name: "Pack 1.0.0",
@@ -423,7 +450,7 @@ describe("modpacks_ch pack resolution", () => {
             downloads: 1,
             files: [],
         });
-        vi.mocked(mr.getProject).mockResolvedValue({
+        vi.mocked(mr.getPackProject).mockResolvedValue({
             id: "mr-project",
             slug: "fabulously-optimized",
             title: "Fabulously Optimized",

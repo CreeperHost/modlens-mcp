@@ -114,6 +114,11 @@ export async function fileSha512(filePath: string): Promise<string> {
     return createHash("sha512").update(buf).digest("hex");
 }
 
+/** SHA-1 is the file identity supported by the modpacks.ch mod lookup route. */
+export async function fileSha1(filePath: string): Promise<string> {
+    return createHash("sha1").update(await readFile(filePath)).digest("hex");
+}
+
 /**
  * Verify a file's SHA-512 against an expected value.
  * Throws `HashMismatchError` if they differ.
@@ -418,7 +423,7 @@ export function validateEmbeddingBundle(bundle: unknown): ValidationResult {
         // className validation
         if (typeof e.className !== "string") return { valid: false, reason: "entry missing className" };
         if (e.className.length > 500) return { valid: false, reason: "className too long" };
-        if (!JAVA_CLASS_PATTERN.test(e.className)) {
+        if (!JAVA_CLASS_PATTERN.test(e.className.replace(/\//g, "."))) {
             return { valid: false, reason: `invalid className format: ${e.className.slice(0, 50)}` };
         }
 

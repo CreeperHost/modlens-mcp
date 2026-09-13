@@ -8,6 +8,8 @@ import { Readable } from "stream";
 import { paths, exists, ensureDir } from "../cache.js";
 import { findModById, updateMod } from "../repositories/mod.js";
 import { validateDbId } from "../validate.js";
+import { submitRegistryBundle } from "../registry-submission.js";
+import { indexJar } from "../java-tools.js";
 
 const graphSentinelDone = (dir: string) => join(dir, ".graph.done");
 const graphSentinelErr = (dir: string) => join(dir, ".graph.error");
@@ -304,6 +306,32 @@ export async function buildModGraph(
         }
     }
 
+    const buildLocalGraph = async () => {
+        const index = await indexJar(mod.jarPath);
+        const nodes: GraphJson["nodes"] = Object.values(index.classes).map(c=>({id:c.name,
+            type:(c.accessFlags & 0x0200) ? "interface" : "class",src:c.name+".java"}));
+        const ids = new Set(nodes.map(n=>n.id));
+        const edges: GraphJson["edges"] = [];
+        for (const c of Object.values(index.classes)) {
+            for (const [target,relation] of [[c.superName,"extends"],...(c.interfaces ?? []).map(i=>[i,"implements"])]) {
+                if (!target) continue;
+                if (!ids.has(target)) { nodes.push({id:target,type:"external"}); ids.add(target); }
+                edges.push({source:c.name,target,relation});
+            }
+        }
+        await writeFile(join(graphDir,"graph.json"),JSON.stringify({engine:"modlens-bytecode",nodes,edges}));
+        await writeFile(join(graphDir,"GRAPH_REPORT.md"),`# ${mod.displayName}\n\n${Object.keys(index.classes).length} classes, ${edges.length} inheritance/interface relationships.\n\nThis local graph contains class structure. Semantic relationships can be added with graph_enrich_next and graph_enrich_submit.\n`);
+        await unlink(graphSentinelErr(graphDir)).catch(()=>{});
+        await unlink(graphRunning(graphDir)).catch(()=>{});
+        await writeFile(graphSentinelDone(graphDir),"0");
+        await updateMod(dbId,{graphPath:graphDir});
+        return {status:"done",graphDir,sourceType:"bytecode",backend:"ast-only",message:"Built a local class-structure graph. Use graph_query or graph_enrich_next."};
+    };
+    if (backendOverride === "ast-only" || process.env.GRAPHIFY_BACKEND === "ast-only") return buildLocalGraph();
+    let cli: string;
+    try { cli = await ensureGraphify(); }
+    catch { return buildLocalGraph(); }
+
     // Pick the best source directory — authored source preferred over decompiled
     let sourceDir: string;
     let sourceType: string;
@@ -319,8 +347,6 @@ export async function buildModGraph(
             `Decompile first (mod action=decompile) or download source (platform action=download_source).`
         );
     }
-
-    const cli = await ensureGraphify();
 
     // Clean stale sentinels (stored alongside source dir)
     await unlink(graphSentinelDone(graphDir)).catch(() => {});
@@ -502,7 +528,18 @@ export async function queryModGraph(
         };
     }
 
-    const cli = await ensureGraphify();
+    const graph = JSON.parse(await readFile(join(graphPath,"graph.json"),"utf8")) as GraphJson & {engine?:string};
+    let cli: string | null = null;
+    if (graph.engine !== "modlens-bytecode") cli = await ensureGraphify().catch(()=>null);
+    if (!cli) {
+        const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+        const matches = graph.nodes.filter(n=>words.some(w=>JSON.stringify(n).toLowerCase().includes(w)));
+        const ids = new Set(matches.map(n=>n.id));
+        const related = graph.edges.filter(e=>ids.has(e.source) || ids.has(e.target));
+        const lines = [...matches.map(n=>`${n.type ?? "node"}: ${n.id}`),...related.map(e=>`${e.source} --${e.relation ?? "related"}--> ${e.target}`)];
+        return {answer:lines.join("\n").slice(0,Math.max(1,budget ?? 2000)*4) || "No matching graph nodes.",graphUsed:true,
+            hint:"Local keyword and relationship search; use graph_enrich_next to add semantic relationships."};
+    }
     const cmdParts = cli.split(" ");
     const args = [
         ...cmdParts.slice(1),
@@ -846,16 +883,21 @@ export async function downloadGraph(
         throw new Error("Graph file too large (>100MB)");
     }
 
-    const graphData = await res.text();
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > 100_000_000) throw new Error("Graph file too large (>100MB)");
 
     // Verify SHA-256
-    const hash = createHash("sha256").update(graphData).digest("hex");
+    const hash = createHash("sha256").update(bytes).digest("hex");
     if (hash !== entry.sha256) {
         throw new Error(`SHA-256 mismatch: expected ${entry.sha256}, got ${hash}`);
     }
 
     // Parse and validate
-    const graphJson = JSON.parse(graphData) as GraphJson;
+    const { gunzipSync } = await import("zlib");
+    const raw = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes, {maxOutputLength:200_000_000}) : bytes;
+    const parsed = JSON.parse(raw.toString("utf8"));
+    const graphJson = (parsed.graph ?? parsed) as GraphJson;
+    const graphData = JSON.stringify(graphJson);
     const { validateGraphBundle } = await import("../security.js");
     const validation = validateGraphBundle(graphJson);
     if (!validation.valid) {
@@ -938,9 +980,9 @@ export async function exportGraph(
     };
 }
 
-// ── Community submission (groundwork — not yet functional) ────────────────────
+// ── Community submission ────────────────────
 
-/** Payload shape for future community graph submissions. */
+/** Payload for a community graph submission. */
 export interface GraphSubmission {
     /** The exported graph bundle file path */
     bundlePath: string;
@@ -952,15 +994,8 @@ export interface GraphSubmission {
 
 /**
  * Submit a locally-built graph for inclusion in the public registry.
- * NOT YET IMPLEMENTED — returns a stub response with groundwork details.
+ * Creates a draft pull request containing the validated bundle and registry index.
  */
-export async function submitGraph(
-    _submission: GraphSubmission,
-): Promise<{ status: string; message: string }> {
-    return {
-        status: "not_implemented",
-        message: "Community graph submission is planned but not yet available. "
-            + "For now, export your graph with graph_export and share the bundle file manually. "
-            + "Future versions will support direct submission to the public registry.",
-    };
+export async function submitGraph(submission: GraphSubmission) {
+    return submitRegistryBundle("graph", GRAPH_REGISTRY_URL, submission);
 }

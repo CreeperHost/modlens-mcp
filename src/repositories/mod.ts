@@ -7,6 +7,8 @@ import { getDb } from "../db.js";
 import type { Mod, Prisma } from "@prisma/client";
 import { ftsSearchModSource } from "../search-adapter.js";
 import { caseInsensitive, detectBackend } from "../db-backend.js";
+import { sqliteArrayMemberIds } from "./array-fields.js";
+import { matchesMcVersion } from "../version-ranges.js";
 
 // ── Projections ───────────────────────────────────────────────────────────────
 
@@ -31,6 +33,7 @@ export type DepModRow = {
 /** Projection for batch platform-sync operations. */
 export type SyncModRow = {
     id: number; modId: string; version: string;
+    mcVersion: string; loader: string; jarPath: string;
     sha512: string | null; murmur2: string | null;
     modrinthId: string | null; curseforgeId: number | null;
     sourcePath: string | null; metadata: unknown;
@@ -42,8 +45,10 @@ export type SyncModRow = {
  * "1.21.1" from matching "1.21.11" — different patch releases are not
  * cross-compatible, so a query for one must never pull in the other.
  */
-export function mcVersionWhere(mcVersion: string): Prisma.ModWhereInput {
-    return { OR: [{ mcVersion }, { mcVersion: { startsWith: mcVersion + "." } }] };
+export async function mcVersionWhere(mcVersion: string): Promise<Prisma.ModWhereInput> {
+    const db = await getDb();
+    const declarations = await db.mod.findMany({ select: { mcVersion: true }, distinct: ["mcVersion"] });
+    return { mcVersion: { in: declarations.map(row => row.mcVersion).filter(range => matchesMcVersion(range, mcVersion)) } };
 }
 
 // ── Mod queries ───────────────────────────────────────────────────────────────
@@ -70,8 +75,9 @@ export async function findModByModIdLike(modId: string): Promise<Mod | null> {
 
 /** Resolve mod by string or number. Numeric strings try findById first. */
 export async function resolveModRef(ref: string | number): Promise<Mod | null> {
+    if (ref == null || ref === "") return null;
     if (typeof ref === "number") return findModById(ref);
-    const n = parseInt(ref, 10);
+    const n = /^\d+$/.test(ref) ? Number(ref) : NaN;
     if (!isNaN(n)) {
         const byId = await findModById(n);
         if (byId) return byId;
@@ -81,12 +87,13 @@ export async function resolveModRef(ref: string | number): Promise<Mod | null> {
 
 /** Slim resolveModRef — returns only id, modId, displayName, version, jarPath. */
 export async function resolveModRefSlim(ref: string | number): Promise<ModRef | null> {
+    if (ref == null || ref === "") return null;
     const sel = { id: true, modId: true, displayName: true, version: true, jarPath: true, loader: true, mcVersion: true } as const;
     const db = await getDb();
     if (typeof ref === "number") {
         return db.mod.findUnique({ where: { id: ref }, select: sel });
     }
-    const n = parseInt(String(ref), 10);
+    const n = /^\d+$/.test(ref) ? Number(ref) : NaN;
     if (!isNaN(n)) {
         const byId = await db.mod.findUnique({ where: { id: n }, select: sel });
         if (byId) return byId;
@@ -125,7 +132,7 @@ export async function listMods(opts: {
     return db.mod.findMany({
         where: {
             ...(opts.loader ? { loader: opts.loader } : {}),
-            ...(opts.mcVersion ? mcVersionWhere(opts.mcVersion) : {}),
+            ...(opts.mcVersion ? await mcVersionWhere(opts.mcVersion) : {}),
             ...(opts.hasMixins !== undefined ? { hasMixins: opts.hasMixins } : {}),
             ...(opts.decompiled !== undefined ? { decompiled: opts.decompiled } : {}),
             ...(opts.modIdFilter ? { modId: { contains: opts.modIdFilter, ...caseInsensitive() } } : {}),
@@ -143,7 +150,7 @@ export async function listModsSlim(opts?: {
     return db.mod.findMany({
         where: {
             ...(opts?.loader ? { loader: opts.loader } : {}),
-            ...(opts?.mcVersion ? mcVersionWhere(opts.mcVersion) : {}),
+            ...(opts?.mcVersion ? await mcVersionWhere(opts.mcVersion) : {}),
             ...(opts?.hasMixins !== undefined ? { hasMixins: opts.hasMixins } : {}),
             ...(opts?.decompiled !== undefined ? { decompiled: opts.decompiled } : {}),
             ...(opts?.modIdFilter ? { modId: { contains: opts.modIdFilter } } : {}),
@@ -160,7 +167,7 @@ export async function listModsForMixinScan(opts?: {
         where: {
             ...(opts?.hasMixins !== undefined ? { hasMixins: opts.hasMixins } : {}),
             ...(opts?.loader ? { loader: opts.loader } : {}),
-            ...(opts?.mcVersion ? mcVersionWhere(opts.mcVersion) : {}),
+            ...(opts?.mcVersion ? await mcVersionWhere(opts.mcVersion) : {}),
         },
         select: {
             id: true, modId: true, displayName: true, version: true,
@@ -173,7 +180,7 @@ export async function listModsForMixinScan(opts?: {
 export async function listModsForDepGraph(mcVersion?: string): Promise<DepModRow[]> {
     const db = await getDb();
     return db.mod.findMany({
-        where: mcVersion ? mcVersionWhere(mcVersion) : undefined,
+        where: mcVersion ? await mcVersionWhere(mcVersion) : undefined,
         select: {
             id: true, modId: true, displayName: true, version: true,
             mcVersion: true, loader: true, dependencies: true, metadata: true,
@@ -184,7 +191,7 @@ export async function listModsForDepGraph(mcVersion?: string): Promise<DepModRow
 
 export async function listModsForConflictCheck(opts?: { mcVersion?: string; loader?: string }): Promise<DepModRow[]> {
     const where: Record<string, unknown> = {};
-    if (opts?.mcVersion) where["mcVersion"] = opts.mcVersion;
+    if (opts?.mcVersion) Object.assign(where, await mcVersionWhere(opts.mcVersion));
     if (opts?.loader)    where["loader"]    = opts.loader;
     const db = await getDb();
     return db.mod.findMany({
@@ -205,6 +212,7 @@ export async function listModsForSync(opts?: {
         where: opts?.modIdFilter ? { modId: { contains: opts.modIdFilter } } : {},
         select: {
             id: true, modId: true, version: true,
+            mcVersion: true, loader: true, jarPath: true,
             sha512: true, murmur2: true,
             modrinthId: true, curseforgeId: true,
             sourcePath: true, metadata: true,
@@ -245,7 +253,7 @@ export async function searchModsFts(query: string, opts?: {
                     ],
                 },
                 ...(opts?.loader ? [{ loader: opts.loader }] : []),
-                ...(opts?.mcVersion ? [mcVersionWhere(opts.mcVersion)] : []),
+                ...(opts?.mcVersion ? [await mcVersionWhere(opts.mcVersion)] : []),
             ],
         },
         orderBy: { ingestedAt: "desc" },
@@ -335,6 +343,11 @@ export async function findModClassesForCrossModSearch(
     limit: number,
 ) {
     const db = await getDb();
+    const iface = where2.interfaces as { has?: string } | undefined;
+    if (detectBackend() === "sqlite" && iface?.has !== undefined) {
+        const { interfaces: _interfaces, ...rest } = where2;
+        where2 = { ...rest, id: { in: await sqliteArrayMemberIds("mod_classes", "interfaces", iface.has) } };
+    }
     const sel = { mod: { select: { modId: true, displayName: true, version: true } } } as const;
     return Promise.all([
         db.modClass.findMany({ where: where1, include: sel, take: limit }),
@@ -483,7 +496,7 @@ export async function findModSourceFilesUnembedded(
 export async function countUnembeddedModSourceFiles(modId: number): Promise<number> {
     const db = await getDb();
     const rows = await db.$queryRawUnsafe<[{ count: string }]>(
-        `SELECT COUNT(*)::text AS count FROM mod_source_files WHERE mod_id = $1 AND embedding IS NULL`,
+        `SELECT CAST(COUNT(*) AS TEXT) AS count FROM mod_source_files WHERE mod_id = $1 AND embedding IS NULL`,
         modId,
     );
     return parseInt(rows[0].count, 10);

@@ -59,6 +59,7 @@ function listJsonEntries(jarPath: string, prefix: string): string[] {
 type DataTypeDescriptor = {
     type: string;
     root: "data" | "assets";
+    legacyRoot?: "assets";
     subPath: string;
     altSubPaths?: string[];
     idPattern: RegExp;
@@ -66,9 +67,9 @@ type DataTypeDescriptor = {
 };
 
 const DATA_TYPES: DataTypeDescriptor[] = [
-    { type: "recipe",      root: "data",   subPath: "recipe/",            altSubPaths: ["recipes/"],        idPattern: /^data\/([^/]+)\/recipes?\/(.*?)\.json$/,          resultKey: "recipes"     },
-    { type: "loot_table",  root: "data",   subPath: "loot_tables/",       altSubPaths: ["loot_table/"],     idPattern: /^data\/([^/]+)\/loot_tables?\/(.*?)\.json$/,       resultKey: "lootTables"  },
-    { type: "advancement", root: "data",   subPath: "advancement/",       altSubPaths: ["advancements/"],   idPattern: /^data\/([^/]+)\/advancements?\/(.*?)\.json$/,      resultKey: "advancements"},
+    { type: "recipe",      root: "data", legacyRoot: "assets", subPath: "recipe/",      altSubPaths: ["recipes/"],      idPattern: /^(?:data|assets)\/([^/]+)\/recipes?\/(.*?)\.json$/,     resultKey: "recipes" },
+    { type: "loot_table",  root: "data", legacyRoot: "assets", subPath: "loot_table/",  altSubPaths: ["loot_tables/"],  idPattern: /^(?:data|assets)\/([^/]+)\/loot_tables?\/(.*?)\.json$/, resultKey: "lootTables" },
+    { type: "advancement", root: "data", legacyRoot: "assets", subPath: "advancement/", altSubPaths: ["advancements/"], idPattern: /^(?:data|assets)\/([^/]+)\/advancements?\/(.*?)\.json$/, resultKey: "advancements" },
     { type: "blockstate",  root: "assets", subPath: "blockstates/",                                         idPattern: /^assets\/([^/]+)\/blockstates\/(.*?)\.json$/,      resultKey: "blockstates" },
     { type: "model",       root: "assets", subPath: "models/",                                              idPattern: /^assets\/([^/]+)\/models\/(.*?)\.json$/,           resultKey: "models"      },
     { type: "biome",       root: "data",   subPath: "worldgen/biome/",                                      idPattern: /^data\/([^/]+)\/worldgen\/biome\/(.*?)\.json$/,    resultKey: "biomes"      },
@@ -92,25 +93,23 @@ export async function listModData(
     opts?: { namespace?: string; filter?: string },
 ): Promise<object> {
     const descriptor = getDescriptor(type);
+    if (!descriptor && GENERIC_DATA_DIRS[type]) return listModGenericDataType(modId, type, opts?.namespace, opts?.filter);
     if (!descriptor) return { error: `Unknown data type: "${type}". Known types: ${DATA_TYPES.map(d => d.type).join(", ")}` };
 
     const mod = await resolveMod(modId);
     if (!mod) return { error: `Mod not found: ${modId}` };
 
-    const { root, subPath, altSubPaths = [], idPattern, resultKey } = descriptor;
+    const { root, legacyRoot, subPath, altSubPaths = [], idPattern, resultKey } = descriptor;
+    const roots = legacyRoot ? [root, legacyRoot] : [root];
     const ns = opts?.namespace ?? mod.modId;
+    const entriesInNamespace = (namespace: string) => roots.flatMap(root =>
+        [subPath, ...altSubPaths].flatMap(path => listJsonEntries(mod.jarPath, `${root}/${namespace}/${path}`)));
+    let entries = entriesInNamespace(ns);
 
-    let entries = listJsonEntries(mod.jarPath, `${root}/${ns}/${subPath}`);
-    for (const alt of altSubPaths) {
-        if (entries.length === 0) entries = listJsonEntries(mod.jarPath, `${root}/${ns}/${alt}`);
-    }
-
-    if (entries.length === 0) {
-        const allNs = detectNamespaces(mod.jarPath, root);
+    if (entries.length === 0 && !opts?.namespace) {
+        const allNs = new Set(roots.flatMap(root => detectNamespaces(mod.jarPath, root)));
         for (const n of allNs) {
-            for (const sp of [subPath, ...altSubPaths]) {
-                entries.push(...listJsonEntries(mod.jarPath, `${root}/${n}/${sp}`));
-            }
+            entries.push(...entriesInNamespace(n));
         }
     }
 
@@ -119,7 +118,7 @@ export async function listModData(
         entries = entries.filter(e => e.toLowerCase().includes(f));
     }
 
-    const ids = entries.map(e => { const m = e.match(idPattern); return m ? `${m[1]}:${m[2]}` : e; });
+    const ids = [...new Set(entries.map(e => { const m = e.match(idPattern); return m ? `${m[1]}:${m[2]}` : e; }))];
     return { mod: mod.modId, type, count: ids.length, [resultKey]: ids };
 }
 
@@ -140,13 +139,15 @@ export async function getModData(
     const mod = await resolveMod(modId);
     if (!mod) return { error: `Mod not found: ${modId}` };
 
-    const { root, subPath, altSubPaths = [] } = descriptor;
+    const { root, legacyRoot, subPath, altSubPaths = [] } = descriptor;
     const ns = opts?.namespace ?? (id.includes(":") ? id.split(":")[0] : mod.modId);
     const path = id.includes(":") ? id.split(":")[1] : id;
 
-    for (const sp of [subPath, ...altSubPaths]) {
-        const data = readJson(mod.jarPath, `${root}/${ns}/${sp}${path}.json`);
-        if (data) return { mod: mod.modId, type, id: `${ns}:${path}`, data };
+    for (const base of legacyRoot ? [root, legacyRoot] : [root]) {
+        for (const sp of [subPath, ...altSubPaths]) {
+            const data = readJson(mod.jarPath, `${base}/${ns}/${sp}${path}.json`);
+            if (data) return { mod: mod.modId, type, id: `${ns}:${path}`, data };
+        }
     }
     return { mod: mod.modId, type, id, found: false };
 }
@@ -239,13 +240,23 @@ export async function getModLang(
     let lang: Record<string, string> | null = null;
     let usedNs = "";
 
-    for (const ns of allNs) {
-        for (const name of ["en_us.json", "en_US.json"]) {
-            const buf = extractEntry(mod.jarPath, `assets/${ns}/lang/${name}`);
+    // Before 1.13, language files use key=value text. Pre-1.6 mods can use lang/.
+    const locations = [...allNs.map(ns => ({ ns, path: `assets/${ns}/lang` })), { ns: mod.modId, path: "lang" }];
+    for (const location of locations) {
+        for (const name of ["en_us.json", "en_US.json", "en_us.lang", "en_US.lang"]) {
+            const buf = extractEntry(mod.jarPath, `${location.path}/${name}`);
             if (buf) {
                 try {
-                    lang = JSON.parse(buf.toString("utf8"));
-                    usedNs = ns;
+                    if (name.endsWith(".json")) lang = JSON.parse(buf.toString("utf8"));
+                    else {
+                        lang = {};
+                        for (const line of buf.toString("utf8").split(/\r?\n/)) {
+                            if (!line.trim() || line.trimStart().startsWith("#")) continue;
+                            const separator = line.indexOf("=");
+                            if (separator > 0) lang[line.slice(0, separator).trim()] = line.slice(separator + 1);
+                        }
+                    }
+                    usedNs = location.ns;
                     break;
                 } catch { /* skip */ }
             }
@@ -253,7 +264,7 @@ export async function getModLang(
         if (lang) break;
     }
 
-    if (!lang) return { mod: mod.modId, found: false, note: "No en_us.json lang file found." };
+    if (!lang) return { mod: mod.modId, found: false, note: "No English JSON or .lang file found." };
 
     let entries = Object.entries(lang);
     if (filter) {
@@ -681,7 +692,7 @@ export async function traceRecipeChain(
     const recipeIndex = new Map<string, Array<{ mod: string; recipeId: string; type: string; ingredients: string[]; resultCount: number }>>();
 
     for (const mod of allMods) {
-        const entries = listEntries(mod.jarPath, "data/").filter(e => e.includes("/recipes/") && e.endsWith(".json"));
+        const entries = listEntries(mod.jarPath, "data/").filter(e => /^data\/[^/]+\/recipes?\/.+\.json$/.test(e));
         for (const entry of entries) {
             const buf = extractEntry(mod.jarPath, entry);
             if (!buf) continue;
