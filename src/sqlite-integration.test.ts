@@ -1,5 +1,8 @@
-import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { beforeAll, beforeEach, afterEach, afterAll, describe, it, expect, vi } from "vitest";
+import { copyFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
@@ -14,22 +17,54 @@ import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import { downloadGraph } from "./tools/graphify.js";
 import { gzipSync } from "node:zlib";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
-let root: string;
+// Cache paths are captured at module import time, before beforeAll runs.
+const { root } = await vi.hoisted(async () => {
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const root = await mkdtemp(join(tmpdir(), "modlens-sqlite-regression-"));
+    vi.stubEnv("MODLENS_CACHE_ROOT", join(root, "cache"));
+    return { root };
+});
+const require = createRequire(import.meta.url);
+const templatePath = join(root, "template.db");
 let path: string;
 beforeAll(async () => {
-    root = await mkdtemp(join(tmpdir(), "modlens-sqlite-regression-"));
-    path = join(root,"test.db");
-    vi.stubEnv("DATABASE_URL",`file:${path.replaceAll("\\","/")}`);
+    // Build a fixture directly from the schema, without dist/ or the package's
+    // generated template.db. This also exercises initialization before a build.
+    await writeFile(templatePath, "");
+    execFileSync(process.execPath, [
+        require.resolve("prisma/build/index.js"), "db", "push", "--skip-generate",
+        "--schema", fileURLToPath(new URL("../prisma/backends/schema.sqlite.prisma", import.meta.url)),
+    ], { env: { ...process.env, DATABASE_URL: `file:${templatePath.replaceAll("\\", "/")}`, PRISMA_HIDE_UPDATE_MESSAGE: "1" }, stdio: "pipe" });
+    initializeSqliteDatabase(templatePath, templatePath);
+}, 30_000);
+beforeEach(async () => {
+    path = join(root, `${randomUUID()}.db`);
+    await copyFile(templatePath, path);
+    vi.stubEnv("DATABASE_URL", `file:${path.replaceAll("\\", "/")}`);
+    vi.stubEnv("MODLENS_CACHE_ROOT", join(root, "cache"));
+});
+afterEach(async () => {
+    await disconnect();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
 });
 afterAll(async () => {
     await disconnect();
-    vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     if (!resolve(root).startsWith(resolve(tmpdir())+sep)) throw new Error("Unexpected test directory");
     await rm(root,{recursive:true,force:true});
 });
+
+async function createFixtureMod() {
+    return (await getDb()).mod.create({ data: {
+        modId: "fixture", displayName: "Fixture", version: "1", mcVersion: "1.21.1", loader: "fabric", jarPath: join(root, "fixture.jar"),
+    } });
+}
+
 describe("SQLite application schema and public model shapes", () => {
     it("round-trips arrays, objects and included relations", async () => {
         const db = await getDb();
@@ -68,13 +103,15 @@ describe("SQLite application schema and public model shapes", () => {
         expect(await ftsSearchDocs('"')).toEqual([]);
     });
     it("repairs missing pack and FTS tables without replacing existing mods", async () => {
+        const existing = await createFixtureMod();
         await disconnect();
         const raw = new Database(path);
         raw.exec("DROP TABLE pack_files; DROP TABLE pack_versions; DROP TABLE fts_mod_source;");
         raw.close();
-        initializeSqliteDatabase(path);
+        initializeSqliteDatabase(path, templatePath);
         const db = await getDb();
         expect(await db.mod.count()).toBe(1);
+        expect((await db.mod.findUnique({ where: { id: existing.id } }))?.modId).toBe("fixture");
         expect(await db.packVersion.count()).toBe(0);
         expect(await db.$queryRawUnsafe("SELECT count(*) AS n FROM fts_mod_source")).toHaveLength(1);
     });
@@ -85,18 +122,19 @@ describe("SQLite application schema and public model shapes", () => {
     });
     it("dispatches vectors to SQLite, scopes cosine search before limiting, and exports portable vectors", async () => {
         const db = await getDb();
+        const fixture = await createFixtureMod();
         vi.stubEnv("OLLAMA_EMBED_DIM", "2");
         const other = await db.mod.create({data:{modId:"other",displayName:"Other",version:"1",mcVersion:"1.21.1",loader:"fabric",jarPath:join(root,"other.jar")}});
-        const a = await db.modSourceFile.create({data:{modId:1,className:"fixture/Scoped",content:"class Scoped {}"}});
+        const a = await db.modSourceFile.create({data:{modId:fixture.id,className:"fixture/Scoped",content:"class Scoped {}"}});
         const b = await db.modSourceFile.create({data:{modId:other.id,className:"fixture/Other",content:"class Other {}"}});
         await upsertModSourceEmbedding(a.id, [0.8,0.6], "registry");
         await upsertModSourceEmbedding(b.id, [1,0]);
-        const found = await searchModSourceByVector([1,0],1,1,"registry");
+        const found = await searchModSourceByVector([1,0],1,fixture.id,"registry");
         expect(found).toHaveLength(1);
         expect(found[0].id).toBe(a.id);
         expect(found[0].similarity).toBeCloseTo(0.8);
         expect((await getEmbedSources("mod_source_files",[a.id])).get(a.id)?.source).toBe("registry");
-        const exported = await exportModEmbeddings(1,root);
+        const exported = await exportModEmbeddings(fixture.id,root);
         const bundle = JSON.parse(gunzipSync(await readFile(exported.path)).toString());
         expect(bundle.entries).toHaveLength(1);
         expect(bundle.entries[0].embedding[0]).toBeCloseTo(0.8);
@@ -104,6 +142,7 @@ describe("SQLite application schema and public model shapes", () => {
         expect(await importEmbeddingsBundle(exported.path,{force:true})).toMatchObject({status:"ok",imported:1});
     });
     it("downloads a wrapped gzip graph bundle and verifies the compressed checksum", async () => {
+        const fixture = await createFixtureMod();
         const graph = {nodes:[{id:"fixture/Scoped"}],edges:[]};
         const bytes = gzipSync(JSON.stringify({version:1,graph}));
         const graphUrl = "https://example.org/graph.json.gz";
@@ -112,8 +151,8 @@ describe("SQLite application schema and public model shapes", () => {
             ? new Response(bytes) : Response.json({version:1,graphs:[entry]}));
         const db = await getDb();
         // Force all graph output into this test's disposable directory.
-        await db.mod.update({where:{id:1},data:{sourcePath:root}});
-        expect(await downloadGraph(1)).toMatchObject({status:"downloaded",nodeCount:1});
+        await db.mod.update({where:{id:fixture.id},data:{sourcePath:root}});
+        expect(await downloadGraph(fixture.id)).toMatchObject({status:"downloaded",nodeCount:1});
         expect(JSON.parse(await readFile(join(root,"graphify-out","graph.json"),"utf8"))).toEqual(graph);
     });
 });

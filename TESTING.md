@@ -2,6 +2,8 @@
 
 Run the deterministic regressions with `npm test`. Run `npm run build` before the MCP and package checks below.
 
+`npm test` works directly after `npm ci`, before a build. Vitest generates the SQLite client before importing the tests. SQLite integration tests create a temporary template from the Prisma schema, use a fresh database for each test, and isolate their artifact cache. They do not depend on `dist/`, the packaged `template.db`, or earlier test results.
+
 ## Minecraft era matrix
 
 `npm run test:minecraft:eras` starts a local MCP server with a fresh temporary SQLite database, home and cache. It downloads public artifacts using the application's configured source policy. Every interaction with game/mod source goes through MCP. Results and the server log are retained in the printed temporary directory.
@@ -56,7 +58,9 @@ The unit suite builds small disposable JARs and mapping archives. Assertions cov
 
 ## Current coverage and upstream gaps
 
-The 2026-09-13 housekeeping and loader-fallback passes verified the matrix above. An isolated copy of the committed changes built successfully and passed 523 tests across 28 files. These are selected compatibility boundaries, not an exhaustive test of every Minecraft release or mod.
+The 2026-09-13 housekeeping and loader-fallback passes verified the matrix above. These are selected compatibility boundaries, not an exhaustive test of every Minecraft release or mod.
+
+Clean-install validation on 2026-09-13 passed `npm ci` → `npm test` (523 tests across 28 files) → `npm run build` on Ubuntu 24.04 and Windows using Node 22.21.1. The SQLite suite also passed in shuffled order, and the schema-repair test passed on its own.
 
 The final mod matrix passed 116 MCP checks across all eight builds, including filtered search, mismatch rejection and database isolation. The installed npm-consumer checks also passed.
 
