@@ -807,7 +807,7 @@ server.tool(
 
 server.tool(
     "primers",
-    "Minecraft version migration primers and porting guides. action=ingest|seed|get|by_version|search|list|delete|semantic_search|backfill_embeddings. semantic_search requires Ollama running.",
+    "Minecraft migration primers. by_version finds each migration step, including vanilla changes for the selected loader; includeContent=true bundles the Markdown with a shared maxChars budget. Continue with nextCursor until null, keeping the same range and loader. get reads one guide (follow nextStartLine). Missing content is fetched and cached unless fetchContent=false. seed populates the catalogue. Bundles report per-guide failures; retry failed IDs with get. Published guides may leave coverage gaps. semantic_search requires Ollama.",
     {
         action: z.enum(["ingest","seed","get","by_version","search","list","delete","semantic_search","backfill_embeddings"]),
         entries: z.array(z.object({
@@ -821,28 +821,35 @@ server.tool(
             tags:         z.array(z.string()).optional(),
             source:       z.string().optional(),
             fetchContent: z.boolean().optional(),
-        })).optional().describe("Primer entries to ingest (ingest)"),
-        id:          z.number().optional(),
+        })).min(1).optional().describe("Primer entries to ingest; set entries[].fetchContent=true to fetch before saving"),
+        id:          z.number().int().positive().optional(),
         fromVersion: z.string().optional(),
         toVersion:   z.string().optional(),
-        modloader:   z.string().optional().describe("neoforge|forge|fabric|quilt"),
+        modloader:   z.string().optional().describe("neoforge|forge|fabric|quilt|vanilla; discovery includes vanilla guides"),
         query:       z.string().optional(),
-        limit:       z.number().optional(),
+        limit:       z.number().int().min(1).max(200).optional(),
+        fetchContent: z.boolean().optional().describe("get/seed/by_version: fetch missing content (default true); false permits cached/offline reads"),
+        includeContent: z.boolean().optional().describe("by_version: bundle guide bodies (default false); includes vanilla guides for the selected loader"),
+        maxChars:     z.number().int().min(1000).max(200000).optional().describe("by_version with includeContent: combined text budget (default 60000); up to 20 guides per page"),
+        cursor:       z.string().min(1).max(2048).optional().describe("by_version with includeContent: nextCursor from the previous page; retain the same range and loader"),
+        refresh:      z.boolean().optional().describe("get: re-fetch even if cached; failed refresh preserves the cached guide"),
+        startLine:    z.number().int().positive().optional().describe("get: first line, 1-based (default 1)"),
+        maxLines:     z.number().int().min(1).max(2000).optional().describe("get: page size (default 400); follow nextStartLine until null"),
     },
-    safe(async ({ action, entries, id, fromVersion, toVersion, modloader, query, limit }) => {
+    safe(async ({ action, entries, id, fromVersion, toVersion, modloader, query, limit, fetchContent, includeContent, maxChars, cursor, refresh, startLine, maxLines }) => {
         let result: unknown;
         switch (action) {
             case "ingest":     result = await ingestPrimer(entries!); break;
-            case "seed":       result = await seedDefaultPrimers(); break;
-            case "get":        result = await getPrimer(id!); break;
-            case "by_version": result = await getPrimersByVersionRange(fromVersion!, toVersion!, modloader); break;
+            case "seed":       result = await seedDefaultPrimers(fetchContent); break;
+            case "get":        result = await getPrimer(id!, { fetchContent, refresh, startLine, maxLines }); break;
+            case "by_version": result = await getPrimersByVersionRange(fromVersion!, toVersion!, modloader, { includeContent, fetchContent, maxChars, cursor }); break;
             case "search":     result = await searchPrimers(query!, modloader, fromVersion, toVersion, limit); break;
             case "list":       result = await listPrimers(modloader, limit); break;
             case "delete":     result = await deletePrimer(id!); break;
             case "semantic_search":     result = await semanticSearchPrimers(query!, limit ?? 10); break;
             case "backfill_embeddings": result = await backfillPrimerEmbeddings(); break;
         }
-        return out(result);
+        return { ...out(result), ...(result && typeof result === "object" && "failed" in result && Number(result.failed) > 0 ? { isError: true } : {}) };
     })
 );
 

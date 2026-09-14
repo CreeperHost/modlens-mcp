@@ -30,9 +30,9 @@ Object.assign(env, {
     MODLENS_CACHE_ROOT: join(root, "modlens-cache"),
 });
 
-function start(args, home) {
+function start(args, home, extraEnv = {}) {
     const child = spawn(process.execPath, [npm, ...args], {
-        cwd: consumer, env: { ...env, MODLENS_HOME: home }, stdio: ["pipe", "pipe", "pipe"],
+        cwd: consumer, env: { ...env, MODLENS_HOME: home, ...extraEnv }, stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
     });
     let output = "";
@@ -122,8 +122,28 @@ try {
     assert.match(require("better-sqlite3/package.json").version, /^12\./);
 
     const dataHome = join(root, "server-home");
+    // Deterministic upstream responses still exercise the installed Markdown dependencies,
+    // MCP argument schema, error flag, database writes, and reads after restart.
+    const primerFetchFixture = join(root, "primer-fetch-fixture.mjs");
+    writeFileSync(primerFetchFixture, `
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (input, init) => {
+            const url = String(input);
+            if (url === 'https://docs.neoforged.net/package-primer-missing') return new Response('missing', { status: 404 });
+            if (url === 'https://docs.neoforged.net/package-primer') return new Response(
+                '<article><h1>Package migration guide</h1><pre class="language-java"><code>' +
+                '<div class="token-line"><span>update();</span><br></div><div class="token-line"><span>finish();</span><br></div></code></pre>' +
+                '<p>Detailed instructions for migration and keeping code examples readable.</p><h2>Final section</h2></article>',
+                { headers: { 'content-type': 'text/html' } });
+            if (url.includes('misode/mcmeta/summary/versions/data.json')) return Response.json([
+                { id: '1.21.1', data_version: 3955 }, { id: '1.21.5', data_version: 4325 }
+            ]);
+            if (url.endsWith('/api/tags')) return new Response(null, { status: 503 });
+            return originalFetch(input, init);
+        };
+    `);
     async function checkServer() {
-        const run = start(args, dataHome);
+        const run = start(args, dataHome, { NODE_OPTIONS: `--import=${pathToFileURL(primerFetchFixture).href}` });
         const pending = new Map();
         let buffer = "";
         let id = 0;
@@ -166,6 +186,75 @@ try {
             const stats = await request("tools/call", { name: "mod", arguments: { action: "stats" } });
             assert.ok(!stats.isError, JSON.stringify(stats));
             assert.equal(JSON.parse(stats.content.find(item => item.type === "text").text).total, 0);
+            const primerTool = list.tools.find(tool => tool.name === "primers");
+            assert.ok(primerTool.inputSchema.properties.refresh, "Packaged primer tool must expose cache refresh");
+            for (const field of ["includeContent", "maxChars", "cursor"]) {
+                assert.ok(primerTool.inputSchema.properties[field], `Packaged primer tool must expose ${field}`);
+            }
+            const decode = response => JSON.parse(response.content.find(item => item.type === "text").text);
+            const primerCall = arguments_ => request("tools/call", { name: "primers", arguments: arguments_ });
+            const saved = await primerCall({ action: "ingest", entries: [{
+                fromVersion: "1.21.1", toVersion: "1.21.5", title: "Package primer", url: "https://docs.neoforged.net/package-primer",
+            }] });
+            assert.ok(!saved.isError, JSON.stringify(saved));
+            const primerId = decode(saved).primers[0].id;
+            const page = await primerCall({ action: "get", id: primerId, maxLines: 3 });
+            assert.ok(!page.isError, JSON.stringify(page));
+            assert.equal(decode(page).contentStatus, "ready");
+            assert.match(decode(page).content, /# Package migration guide/);
+            assert.equal(decode(page).nextStartLine, 4);
+            const tail = decode(await primerCall({ action: "get", id: primerId, startLine: 4 }));
+            assert.match(tail.content, /update\(\);\nfinish\(\);/);
+            assert.match(tail.content, /## Final section/);
+            assert.equal(tail.nextStartLine, null);
+            const longContent = "# Long migration guide\n\n" + "x".repeat(2500) + "😀\nEnd.";
+            const added = decode(await primerCall({ action: "ingest", entries: [{
+                fromVersion: "1.21.5", toVersion: "26.1", title: "Long package primer",
+                url: "https://docs.neoforged.net/package-primer-long", content: longContent,
+            }] }));
+            const rangeArgs = { action: "by_version", fromVersion: "1.21.1", toVersion: "26.1", modloader: "neoforge" };
+            const metadata = decode(await primerCall(rangeArgs));
+            assert.equal(metadata.count, 2);
+            assert.ok(metadata.primers.every(primer => !("content" in primer)));
+            const chunks = new Map();
+            let cursor;
+            let pages = 0;
+            do {
+                const response = await primerCall({ ...rangeArgs, includeContent: true, maxChars: 1000, ...(cursor ? { cursor } : {}) });
+                assert.ok(!response.isError, JSON.stringify(response));
+                const bundle = decode(response);
+                assert.equal(bundle.count, 2);
+                assert.ok(bundle.contentChars <= 1000);
+                for (const primer of bundle.primers) chunks.set(primer.id, (chunks.get(primer.id) ?? "") + primer.content);
+                cursor = bundle.nextCursor;
+                assert.ok(++pages < 10);
+            } while (cursor);
+            assert.equal(chunks.get(added.primers[0].id), longContent);
+            assert.match(chunks.get(primerId), /update\(\);\nfinish\(\);/);
+            const cliRange = JSON.parse(execFileSync(process.execPath, [join(installed, "dist/cli.js"),
+                "primers", "by-version", "1.21.1", "26.1", "--modloader=neoforge", "--include-content", "--fetch-content=false"], {
+                env: { ...env, DATABASE_URL: `file:${join(dataHome, "data/modlens.db")}` }, encoding: "utf8", timeout: 30_000,
+            }));
+            assert.equal(cliRange.count, 2);
+            assert.equal(cliRange.nextCursor, null);
+            assert.equal(cliRange.primers.find(primer => primer.id === added.primers[0].id).content, longContent);
+            assert.equal((await primerCall({ ...rangeArgs, includeContent: true, cursor: "invalid" })).isError, true);
+            const failed = await primerCall({ action: "ingest", entries: [{
+                fromVersion: "1.21.1", toVersion: "1.21.5", title: "Missing primer",
+                url: "https://docs.neoforged.net/package-primer-missing", fetchContent: true,
+            }] });
+            assert.equal(failed.isError, true, "Requested content fetch failures must be MCP errors");
+            assert.equal(decode(failed).failed, 1);
+            const missing = decode(await primerCall({ action: "ingest", entries: [{
+                fromVersion: "1.21.1", toVersion: "1.21.5", title: "Missing bundled primer",
+                url: "https://docs.neoforged.net/package-primer-missing",
+            }] }));
+            const partial = await primerCall({ ...rangeArgs, includeContent: true });
+            assert.equal(partial.isError, true, "Bundle fetch failures must be MCP errors with successful content retained");
+            assert.equal(decode(partial).failed, 1);
+            assert.equal(decode(partial).primers.filter(primer => primer.contentStatus === "ready").length, 2);
+            await primerCall({ action: "delete", id: added.primers[0].id });
+            await primerCall({ action: "delete", id: missing.primers[0].id });
             return run.output();
         } finally { await stop(run); }
     }
@@ -174,7 +263,7 @@ try {
     assert.match(first, /First run/);
     const database = join(dataHome, "data/modlens.db");
     assert.ok(statSync(database).size > 0);
-    console.log("PASS: first-run SQLite bootstrap, MCP handshake, tools/list, database stats");
+    console.log("PASS: first-run SQLite bootstrap, MCP handshake, primer bundles/pagination/errors, CLI ranges, database stats");
 
     // Check the actual installed client/adapter with dates, BLOBs, and transactions.
     // Use a child so Windows releases the native .node file before cleanup.
@@ -212,6 +301,9 @@ try {
     console.log("PASS: second npx run preserves existing database contents");
     passed = true;
 } finally {
-    if (passed) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+    if (passed) {
+        assert.equal(dirname(resolve(root)), resolve(tmpdir()), "Cleanup must stay within the test temp directory");
+        rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+    }
     else console.error(`Package test artifacts retained at ${root}`);
 }

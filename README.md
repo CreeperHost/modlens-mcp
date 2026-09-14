@@ -718,12 +718,22 @@ All tool actions have been consolidated into **24 grouped tools** to stay within
 | action | Key params | Description |
 |--------|-----------|-------------|
 | `ingest` | entries[] | Add migration guide entries |
-| `seed` | — | Populate built-in NeoForge/Forge/Fabric guides |
-| `get` | id | Get primer by DB id |
-| `by_version` | fromVersion, toVersion, modloader | All guides covering a version span |
+| `seed` | fetchContent=true | Populate the official Minecraft/Forge/NeoForge primer catalogue and cache missing guide bodies |
+| `get` | id, startLine=1, maxLines=400, fetchContent=true, refresh=false | Read cached Markdown; fetch missing content automatically |
+| `by_version` | fromVersion, toVersion, modloader, includeContent=false, maxChars=60000, cursor, fetchContent=true | Ordered migration steps; optionally bundle their Markdown, including vanilla changes for the selected loader |
 | `search` | query, modloader, fromVersion, toVersion, limit | Full-text search |
 | `list` | modloader, limit | List all primers |
 | `delete` | id | Remove by DB id |
+
+Start with `{"action":"seed"}` on a fresh database, then use `{"action":"by_version","fromVersion":"1.21.1","toVersion":"1.21.5","modloader":"neoforge"}`. This returns the vanilla and NeoForge guides for the intervening transitions. Call `{"action":"get","id":<returned id>}` for each guide, following `nextStartLine` until it is null. Guides retain headings, tables, links and code blocks; pagination does not truncate the cached document. The catalogue contains the steps published upstream, so a result is not a guarantee of coverage for every release or loader.
+
+To read a whole migration range, request `{"action":"by_version","fromVersion":"1.21.1","toVersion":"26.1","modloader":"neoforge","includeContent":true}`. The server fetches missing bodies and returns the original Markdown with each guide's ID, title, source URL, loader and version boundaries. Small ranges fit in one response. Larger ranges return `nextCursor`; repeat the same request with `cursor` set to that value until it is null. `count` is the total number of matching guides; `primers` contains the current page. Existing calls without `includeContent` retain their metadata-only response.
+
+Bundled pages share a `maxChars` text budget (1,000–200,000, default 60,000) and contain at most 20 guides. Long guides may span pages: concatenate `content` chunks for the same ID directly, without inserting separators. `startOffset`, `endOffset` (exclusive), `totalChars` and `contentChars` count UTF-16 code units; pagination preserves Unicode characters. Each guide reports `contentStatus` and `truncated`; the outer `truncated` reports whether another page remains. Cursors detect changes to the selected catalogue or partly read content and ask you to restart. `fetchContent:false` reads only cached bodies and reports missing ones with `contentStatus:"missing"` and a page-level `missing` count. Fetch failures retain successful guides, report `contentStatus:"fetch_failed"` and an error per failed guide, and set the page-level `failed` count and MCP error flag. Retry those IDs with `get`. The CLI equivalent is `primers by-version 1.21.1 26.1 --modloader=neoforge --include-content`, with optional `--max-chars=`, `--cursor=` and `--fetch-content=false`; fetch failures set a nonzero exit code after printing the page.
+
+`get` and `seed` fetch missing content on the MCP server and store it in its configured database, so this also works with a remote server. Cached reads work without Internet access. Use `fetchContent:false` for metadata-only reads/seeding, or `refresh:true` on `get` to replace cached content. Fetch failures return an error; failed refreshes preserve the previous content. `ingest` still accepts supplied content or an explicit `entries[].fetchContent:true`, and reports failed entries without saving them. The CLI equivalents are `primers seed --fetch-content=false` and `primers get <id> --refresh --start-line=401`.
+
+Existing installations repair the old built-in placeholder URLs on the first primer operation; no database reset is needed. IDs are retained where possible, and obsolete duplicates or placeholders are marked superseded with replacement guides. Custom entries and existing content are preserved.
 
 ### 10. `mc_registry` — MC Registry & Meta Data
 
@@ -1037,9 +1047,9 @@ node dist/cli.js check-updates 2
 - **[Mojang](https://www.minecraft.net)** — for publishing official Mojmap mappings and the Piston Meta API used for version discovery and JAR downloads.
 
 ### Modloader teams
-- **[NeoForged team](https://github.com/neoforged/NeoForge)** — for NeoForge, the [NeoForge documentation](https://docs.neoforged.net) seeded into the docs database, and the migration changelogs seeded into the primers database.
+- **[NeoForged team](https://github.com/neoforged/NeoForge)** — for NeoForge, the [NeoForge documentation](https://docs.neoforged.net) seeded into the docs database, and the [migration primer catalogue](https://docs.neoforged.net/primer/docs/) used by the primers tool.
 - **[FabricMC team](https://github.com/FabricMC)** — for the [Fabric Wiki](https://fabricmc.net/wiki) and [Yarn mappings](https://github.com/FabricMC/yarn) seeded into the docs database, Intermediary mappings used by the `mappings` tool, and [mcsrc.dev](https://mcsrc.dev) whose source browsing and class analysis features inspired our `mc_source` tool.
-- **[MinecraftForge team](https://github.com/MinecraftForge)** — for the pre-fork Forge migration changelogs (1.18.2 → 1.20.1) seeded into the primers database.
+- **[MinecraftForge team](https://github.com/MinecraftForge)** — for Forge and the API changes documented in the Forge migration primers.
 
 ### Community contributors
 - **[MCPHackers](https://mcphackers.org/)** — for [RetroMCP](https://github.com/MCPHackers/RetroMCP-Java), providing the Tiny v2 mappings that enable decompilation of legacy Minecraft versions (Alpha, Beta, and pre-1.7.10 releases).

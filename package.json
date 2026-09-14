@@ -35,6 +35,7 @@
     "test": "vitest run",
     "test:package": "node scripts/test-package.mjs",
     "test:minecraft:eras": "node scripts/test-minecraft-eras.mjs",
+    "test:primers:live": "node scripts/test-primers-live.mjs",
     "test:project:gradle": "node scripts/test-project-gradle.mjs",
     "test:project:http": "node scripts/test-project-http.mjs",
     "test:watch": "vitest",
@@ -61,12 +62,15 @@
     "better-sqlite3": "^12.11.1",
     "prisma": "^6.0.0",
     "smol-toml": "^1.6.1",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.7",
     "@types/better-sqlite3": "^7.0.0",
     "@types/node": "^22.0.0",
+    "@types/turndown": "^5.0.6",
     "typescript": "^5.6.0",
     "vitest": "^4.1.6"
   },

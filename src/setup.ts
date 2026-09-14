@@ -740,10 +740,14 @@ if (sections.has("seed")) {
         s.start("Seeding docs and primers");
         try {
             await seedDefaultDocumentation();
-            await seedDefaultPrimers();
-            s.stop("Docs and primers seeded");
-        } catch {
-            s.stop("Seed had warnings (data may already exist — that is fine)");
+            const primers = await seedDefaultPrimers();
+            s.stop(primers.failed
+                ? `Docs seeded; ${primers.ready} primers fetched, ${primers.failed} fetches failed`
+                : "Docs and primers seeded");
+            if (primers.failed) p.log.warn("Some primer content could not be fetched. Retry primers seed or primers get after restoring connectivity.");
+        } catch (error) {
+            s.stop("Seeding failed");
+            p.log.warn(error instanceof Error ? error.message : String(error));
         }
     }
 }

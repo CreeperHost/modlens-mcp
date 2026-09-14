@@ -267,9 +267,11 @@ DOCS
   docs semantic-search <query>       Semantic search (requires Ollama)  [--limit=10]
 
 PRIMERS (version migration guides)
-  primers seed                       Seed built-in porting primers
-  primers get <id>                   Get primer by ID
+  primers seed                       Seed and fetch built-in primers  [--fetch-content=false]
+  primers get <id>                   Read cached/fetched Markdown  [--refresh] [--fetch-content=false]
+                                     [--start-line=1] [--max-lines=400]
   primers by-version <from> <to>     Get primers for a version range  [--modloader=]
+                                     [--include-content] [--max-chars=60000] [--cursor=] [--fetch-content=false]
   primers search <query>             Keyword search  [--modloader=] [--limit=]
   primers list                       List all primers  [--modloader=] [--limit=]
   primers delete <id>                Delete a primer by ID
@@ -1089,19 +1091,36 @@ try {
         case "primers": {
             const sub = requireArg(positional[0], "primers action");
             switch (sub) {
-                case "seed":
-                    out(await seedDefaultPrimers());
+                case "seed": {
+                    const seeded = await seedDefaultPrimers(flags.fetchContent !== "false" && flags.fetchContent !== false);
+                    out(seeded);
+                    if (seeded.failed) process.exitCode = 1;
                     break;
+                }
                 case "get":
-                    out(await getPrimer(numArg(positional[1], "id")));
+                    out(await getPrimer(numArg(positional[1], "id"), {
+                        fetchContent: flags.fetchContent !== "false" && flags.fetchContent !== false,
+                        refresh: flags.refresh === true || flags.refresh === "true",
+                        startLine: flags.startLine as number | undefined,
+                        maxLines: flags.maxLines as number | undefined,
+                    }));
                     break;
-                case "by-version":
-                    out(await getPrimersByVersionRange(
+                case "by-version": {
+                    const range = await getPrimersByVersionRange(
                         requireArg(positional[1], "fromVersion"),
                         requireArg(positional[2], "toVersion"),
                         flags.modloader as string | undefined,
-                    ));
+                        {
+                            includeContent: flags.includeContent === true || flags.includeContent === "true",
+                            fetchContent: flags.fetchContent !== "false" && flags.fetchContent !== false,
+                            maxChars: flags.maxChars as number | undefined,
+                            cursor: flags.cursor as string | undefined,
+                        },
+                    );
+                    out(range);
+                    if ("failed" in range && range.failed) process.exitCode = 1;
                     break;
+                }
                 case "search":
                     out(await searchPrimers(
                         requireArg(positional[1], "query"),
