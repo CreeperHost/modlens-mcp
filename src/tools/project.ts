@@ -107,6 +107,13 @@ export class ProjectStore {
         catch { throw new Error("Project environment not found for this projectKey; import a bundle first."); }
     }
 
+    async licenseArtifact(key: string, environmentId: string, input: string): Promise<string> {
+        const snapshot = await this.snapshot(key, environmentId);
+        const binary = snapshot.index.classes[className(input)];
+        if (!binary) throw new Error("Class is not in this environment's compile classpath");
+        return join(this.dir(key, environmentId), binary.artifact);
+    }
+
     async list(key: string) {
         const root = join(projectRoot(this.root, key), "environments");
         const ids = await readdir(root).catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return []; throw e; });
@@ -350,13 +357,24 @@ export class ProjectStore {
             result: await (bytecode ? getBytecode(path, name) : inspectClass(path, name)) };
     }
 
-    async search(key: string, environmentId: string, query: string, limit = 20) {
+    async search(key: string, environmentId: string, query: string, limit = 20, canRead?: (jar: string) => Promise<boolean>) {
         if (!query || query.length > 500) throw new Error("query must contain 1 to 500 characters");
         const s = await this.snapshot(key, environmentId);
         const dir = this.dir(key, environmentId);
         const results: Array<{ className: string; line: number; text: string; origin: string }> = [];
         const needle = query.toLowerCase();
         let searchedFiles = 0;
+        const checked = new Map<string, boolean>();
+        let skippedArtifacts = 0;
+        const permitted = async (artifact: string) => {
+            if (!canRead) return true;
+            if (!checked.has(artifact)) {
+                const allowed = await canRead(join(dir, artifact));
+                checked.set(artifact, allowed);
+                if (!allowed) skippedArtifacts++;
+            }
+            return checked.get(artifact)!;
+        };
         const byArtifact = new Map<string, Array<[string, SourceEntry]>>();
         for (const entry of Object.entries(s.index.sources)) {
             const group = byArtifact.get(entry[1].artifact) ?? [];
@@ -373,6 +391,7 @@ export class ProjectStore {
             if (results.length >= limit) break;
             const jar = new AdmZip(await readFile(join(dir, artifact)));
             for (const [name, source] of entries) {
+                if (!await permitted(source.binary)) continue;
                 searchText(name, entryData(jar, source.entry, 2 * MB).toString("utf8"), "gradle-sources");
                 if (results.length >= limit) break;
             }
@@ -394,9 +413,11 @@ export class ProjectStore {
         };
         for (const a of s.manifest.artifacts) {
             if (a.kind !== "classpath" || results.length >= limit) continue;
+            if (!await permitted(a.path)) continue;
             await walkCached(join(dir, "decompiled", a.path.slice("artifacts/".length, -4)));
         }
         return { environmentId, results, searchedFiles, limitReached: results.length >= limit,
+            ...(canRead ? { skippedArtifacts, licenseCoverage: "Only artifacts approved for hosted source access. For skipped classes use mod_license local_plan and complete the local consent workflow." } : {}),
             coverage: "Supplied Gradle sources and cached on-demand decompiles only. Use classes/members for the full compile classpath." };
     }
 }
@@ -415,7 +436,8 @@ export const projectToolSchema = {
 const requestSchema = z.object(projectToolSchema);
 export type ProjectRequest = z.infer<typeof requestSchema>;
 const defaultStore = new ProjectStore();
-export async function projectAction(input: ProjectRequest, store = defaultStore): Promise<unknown> {
+export const projectLicenseArtifact = (key: string, environmentId: string, name: string) => defaultStore.licenseArtifact(key, environmentId, name);
+export async function projectAction(input: ProjectRequest, store = defaultStore, hosted = false): Promise<unknown> {
     const p = requestSchema.parse(input);
     const required = <T>(value: T | undefined, name: string): T => { if (value === undefined) throw new Error(`${name} is required for ${p.action}`); return value; };
     const key = p.projectKey;
@@ -430,7 +452,21 @@ export async function projectAction(input: ProjectRequest, store = defaultStore)
         case "info": return store.describe(key, env());
         case "classes": return store.classes(key, env(), p.query, p.offset, p.limit);
         case "source": return store.source(key, env(), required(p.className, "className"), p.startLine, p.maxLines);
-        case "search": return store.search(key, env(), required(p.query, "query"), p.limit);
+        case "search": {
+            if (!hosted) return store.search(key, env(), required(p.query, "query"), p.limit);
+            const { cachedModLicense } = await import("../mod-license.js");
+            const { compactNotices } = await import("../license-notices.js");
+            const notices: unknown[] = [];
+            const result = await store.search(key, env(), required(p.query, "query"), p.limit, async jar => {
+                const decision = await cachedModLicense(jar);
+                if (decision.disposition !== "hosted_allowed") return false;
+                notices.push({ sha256: decision.sha256, license: decision.selectedLicense, notices: compactNotices(decision.notices),
+                    conditions: decision.conditions, sourceUrl: decision.sourceUrl, modifiedAt: new Date().toISOString(),
+                    notice: `ModLens reconstructed or excerpted these results; any ModLens contributions to the output are offered under ${decision.selectedLicense}. No warranty is provided. Retain all notices; recipients retain their licence rights.` });
+                return true;
+            });
+            return { ...result, licenseCompliance: notices };
+        }
         case "members": return store.members(key, env(), required(p.className, "className"));
         case "bytecode": return store.members(key, env(), required(p.className, "className"), true);
     }

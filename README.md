@@ -4,6 +4,33 @@ MCP server and CLI for browsing, decompiling, and analyzing Minecraft mod JARs.
 
 Store mod metadata, class indexes, mixin targets, AT/AW entries, and decompiled source in a local database — **embedded SQLite by default** (zero setup), or PostgreSQL/PGlite if you want them. Query everything via AI (MCP) or command line (CLI).
 
+## Optional live development client
+
+The `runtime` MCP tool can prepare and launch a **Minecraft 26.3 / Java 25** dev
+client, detect IntelliJ launches, monitor JVM failures and memory pressure, and
+control input without desktop automation. It supports normal, visible watch-only,
+and hidden windows. Ask the AI to call `runtime` with `action:"help"` or set it up
+for your mod project. With remote MCP, Codex runs the local `--runtime` helper;
+with local stdio MCP, the tools execute directly. No second MCP connection is needed.
+See [runtime setup, examples, and compatibility limits](RUNTIME.md).
+
+## Reporting an issue from your coding agent
+
+Ask your agent to **report a ModLens issue on GitHub**. The `report_issue` MCP tool
+works locally and remotely: `action:"help"` explains the workflow, and
+`action:"prepare"` produces a draft from a title, summary, reproduction steps,
+expected/actual behavior, environment and an optional sanitized diagnostic excerpt.
+It includes the ModLens server version automatically.
+
+The tool directs the agent to check for duplicates and submit to
+[CreeperHost/modlens-mcp](https://github.com/CreeperHost/modlens-mcp/issues) using
+its existing GitHub connector or `gh issue create --body-file`. Without GitHub
+access, it returns a draft and a manual submission link. ModLens needs no GitHub
+credentials and does not publish the report itself; `executed:false` means only
+the draft was prepared. Remove credentials, private source and personal details
+before supplying diagnostic excerpts. Reports are submitted when the user requests
+it, rather than automatically for every error.
+
 ## Installation
 
 ### Option A — npx (recommended, no clone required)
@@ -1035,6 +1062,46 @@ node dist/cli.js check-updates 2
 ```
 
 ---
+
+## Hosted access limits
+
+HTTP MCP (`MCP_PORT`) enables hosted limits by default. Local stdio retains its existing access. Hosted developers can browse source in pages, search, inspect bytecode and members, compare versions, inspect mixins and data, and upload their private Gradle environments. Bulk decompile/index commands, source/graph/embedding exports, raw JAR reads, host paths and filesystem administration are reserved for the local operator. KubeJS directory access and compatibility checks using host-local JAR paths are also local-only.
+
+| Setting | Default | Scope |
+| --- | --- | --- |
+| `MODLENS_HOSTED_SOURCE_LINES` | 200 | Source/bytecode lines per response, shared across search snippets |
+| `MODLENS_HOSTED_RESPONSE_BYTES` | 131072 (128 KiB) | Serialized text content per tool response |
+| `MODLENS_HOSTED_DAILY_BYTES` | 5242880 (5 MiB) | Delivered tool content per account per UTC day |
+| `MODLENS_HOSTED_PERIOD_BYTES` | 52428800 (50 MiB) | Delivered tool content per account per fixed 30-day period |
+| `MODLENS_HOSTED_DAILY_REQUESTS` | 1000 | Tool calls per account per UTC day |
+| `MODLENS_HOSTED_MINUTE_REQUESTS` | 120 | Tool calls per account per minute |
+
+The byte allowance includes all successful tool content, including metadata, search snippets and bytecode. It measures UTF-8 JSON content before transport compression. Cached files and inbound upload bytes are excluded. Each source text field has a 32 KiB cap. Searches with `limit`/`top` are capped at 50 results; responses exceeding the byte limit require a narrower query.
+
+Use `startLine` (1-based) and `maxLines` for `mc_source get_source/bytecode`, `mod source/decompile_class`, `mod_bytecode bytecode`, and `project source/bytecode`. A range may start anywhere; the hosted cap bounds its length. Prepare shared indexes and ingest mods through the operator's local interface; hosted clients can upload their own Gradle environment through `project`.
+
+### Mod source access
+
+Hosted mod source responses include licence and attribution notices. Use `mod_license` with `action=check` and `modId`/`dbId` to check availability. For uploaded projects, supply `projectKey`, `environmentId` and `className` instead.
+
+When hosted source is unavailable, `action=local_plan` provides instructions for decompiling your local JAR with your explicit consent. Run the returned request on your computer:
+
+```bash
+npx -y @creeperhost/modlens-mcp --local-mod --request-file local-request.json
+```
+
+### Bind allowances to authenticated accounts
+
+For public HTTP access, put an authenticated HTTPS gateway in front of the server. Set `MODLENS_HOSTED_PROXY_SECRET` to a random secret of at least 32 characters. The gateway must remove caller-provided `x-modlens-*` headers and inject:
+
+- `x-modlens-proxy-secret`: the server's secret, never sent to clients.
+- `x-modlens-user-id`: a stable, verified account identifier selected by the gateway. Reconnecting, rotating tokens, or using another client must retain this identifier.
+
+Restrict network access to the origin to that gateway and protect the gateway-to-server connection. The server checks the secret and account on every MCP request and binds each session to its account. The gateway manages authentication and account access. Multiple login methods for one account must use the same identifier.
+
+Without the proxy secret, callers share a single global allowance, regardless of self-asserted user IDs or tokens. This fallback provides limits, **not authentication**, and one caller can exhaust it for everyone. `MODLENS_HOSTED_LIMITS=0` disables these controls and gateway-secret checking entirely; use it only for trusted private HTTP deployments.
+
+Usage persists in `hosted_usage` in the configured database. Checks and updates are atomic, including parallel calls; reconnects and server restarts do not reset usage. All replicas must use the same persistent database and account mapping. The 30-day periods align to Unix-epoch boundaries, rather than rolling with each request. Restoring an older database restores its older counters. Database failures reject hosted tool calls before releasing output.
 
 ## Acknowledgements
 

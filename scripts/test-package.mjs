@@ -113,6 +113,36 @@ try {
     assert.equal(initScript, join(installed, "scripts/gradle/modlens.init.gradle"));
     assert.ok(statSync(initScript).size > 0, "Gradle exporter must ship in the npm package");
     assert.ok(statSync(join(installed, "scripts/project-upload.mjs")).size > 0, "Remote uploader must ship in the npm package");
+    assert.ok(statSync(join(installed, "dist/runtime/modlens-agent.jar")).size > 0, "Optional runtime agent must ship prebuilt");
+    assert.ok(statSync(join(installed, "scripts/gradle/modlens-runtime.init.gradle")).size > 0, "Runtime launch integration must ship");
+    assert.ok(statSync(join(installed, "RUNTIME.md")).size > 0, "Runtime instructions must ship");
+    assert.ok(statSync(join(installed, "dist/license-templates.js")).size > 0, "License reference data must ship");
+    const localModRequest = join(root, "local-mod-request.json");
+    writeFileSync(localModRequest, JSON.stringify({ localJarPath: join(root, "not-opened.jar"), sha256: "a".repeat(64), className: "example.Fixture", acceptedLocalDecompilation: false }));
+    assert.throws(() => execFileSync(process.execPath, [join(installed, "dist/launcher.js"), "--local-mod", "--request-file", localModRequest], {
+        env: { ...env, MODLENS_HOME: join(root, "local-mod-home"), MCP_PORT: "9999" }, encoding: "utf8", stdio: "pipe", timeout: 30000,
+    }), error => error.status === 1 && String(error.stderr).includes("User acceptance required"));
+    assert.ok(!existsSync(join(root, "local-mod-home", "data")), "Local helper must not bootstrap a hosted database");
+    console.log("PASS: installed local decompilation helper refuses execution without user acceptance");
+    const runtimeHome=join(root,"runtime-only-home");
+    const runtimeEnv={...env,MODLENS_HOME:runtimeHome,MODLENS_CACHE_ROOT:join(root,"runtime-only-cache"),MCP_PORT:"9999"};
+    const runtime=(...arguments_)=>JSON.parse(execFileSync(process.execPath,[join(installed,"dist/launcher.js"),"--runtime",...arguments_],{env:runtimeEnv,encoding:"utf8",timeout:30000}));
+    const runtimeProject=join(root,"runtime project");
+    mkdirSync(join(runtimeProject,"gradle/wrapper"),{recursive:true});
+    writeFileSync(join(runtimeProject,"gradle/wrapper/gradle-wrapper.jar"),"fixture");
+    const runtimeRequest=join(root,"runtime-request.json");
+    writeFileSync(runtimeRequest,JSON.stringify({action:"setup",projectDir:runtimeProject,mode:"hidden"}));
+    try {
+        assert.ok(runtime("help").execution.includes("Remote MCP"));
+        const configuredRuntime = runtime("--request-file",runtimeRequest);
+        assert.equal(configuredRuntime.state,"configured");
+        assert.deepEqual(configuredRuntime.vmOptions,[configuredRuntime.vmOption,"-XX:StackShadowPages=32"]);
+        assert.equal(runtime("status").projects.length,1);
+        assert.deepEqual(runtime("sessions"),[]);
+        assert.ok(!existsSync(join(runtimeHome,"data")),"Runtime helper must not create a source database");
+        assert.ok(!existsSync(join(runtimeHome,".env")),"Runtime helper must not create MCP configuration");
+    } finally {runtime("stop");}
+    console.log("PASS: installed runtime helper setup, persistence and stop without local MCP/database setup");
     const keyFile = join(root, "project-key.txt");
     writeFileSync(keyFile, "a".repeat(64));
     assert.deepEqual(JSON.parse(execFileSync(process.execPath, [join(installed, "dist/launcher.js"), "--project", "list", `--key-file=${keyFile}`], { env, encoding: "utf8" })), []);
@@ -181,6 +211,20 @@ try {
             assert.ok(initialized.serverInfo);
             send({ method: "notifications/initialized" });
             const list = await request("tools/list", {});
+            assert.ok(list.tools.some(tool => tool.name === "runtime" && tool.description.includes("setup")), "AI must discover runtime setup through MCP");
+            assert.match(initialized.instructions, /runtime/);
+            assert.ok(list.tools.some(tool => tool.name === "report_issue"), "AI must discover GitHub issue reporting");
+            const issueDraft = await request("tools/call", { name: "report_issue", arguments: {
+                action: "prepare", title: "Package test fixture", summary: "A synthetic report; do not publish.",
+            } });
+            assert.ok(!issueDraft.isError);
+            const issuePlan = JSON.parse(issueDraft.content[0].text);
+            assert.equal(issuePlan.executed, false);
+            assert.equal(issuePlan.state, "draft_prepared");
+            assert.equal(issuePlan.repository.repo, "modlens-mcp");
+            const runtimeHelp = await request("tools/call", { name: "runtime", arguments: { action: "help" } });
+            assert.ok(!runtimeHelp.isError);
+            assert.match(runtimeHelp.content[0].text, /26\.3/);
             assert.ok(list.tools.some(tool => tool.name === "mod"));
             assert.ok(list.tools.some(tool => tool.name === "project"));
             const stats = await request("tools/call", { name: "mod", arguments: { action: "stats" } });
