@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -88,6 +88,10 @@ import { mcPaths } from "./minecraft.js";
 import { findModById, resolveModRefSlim } from "./repositories/mod.js";
 import { CACHE_ROOT } from "./cache.js";
 import { projectAction, projectToolSchema } from "./tools/project.js";
+import { runtimeAction, runtimeToolSchema, runtimeHub } from "./tools/runtime.js";
+import { reportIssue, reportIssueSchema } from "./tools/report-issue.js";
+import { HOSTED_ACTIONS, HostedBudget, HostedPolicyError, hostedLimits, hostedPrincipal, runHostedTool } from "./hosted-policy.js";
+import { reviewHostedMod, localModPlan } from "./hosted-mod-license.js";
 
 // Load .env — try ~/.modlens/.env first (npx/installed users), then local .env (git-clone users)
 import { readFileSync, existsSync } from "fs";
@@ -211,12 +215,82 @@ function safe<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeof
 class JsonBodyParseError extends Error {}
 class HttpBodyTooLargeError extends Error {}
 
-function createMcpServer(): McpServer {
-    const server = new McpServer({ name: "modlens", version: pkg.version });
+const hostedBudget = new HostedBudget();
+
+function createMcpServer(principal?: string): McpServer {
+    const server = new McpServer({ name: "modlens", version: pkg.version }, {
+        instructions: "ModLens supports optional Minecraft 26.3 runtime control. Call runtime help/setup. On remote MCP, runtime returns executed:false and a local execution plan: use your local terminal/file tools to run the --runtime helper on the Minecraft PC. No second MCP connection or tunnel is needed. Local stdio executes directly. Inspect sessions/capabilities after launch; use events/command/artifact for input, screenshots, crashes and allocation reports. Never describe a returned plan as an executed action. Idle AI wake-up is not provided. To report a ModLens bug, use report_issue help/prepare for a GitHub draft and submission instructions; the caller files it using existing GitHub access when requested by the user.",
+    });
+    const limits = principal === undefined ? undefined : hostedLimits();
+    function registerTool<S extends z.ZodRawShape>(name: string, description: string, schema: S, handler: ToolCallback<S>): void {
+        if (!limits || principal === undefined) { server.tool(name, description, schema, handler); return; }
+        const actions = HOSTED_ACTIONS[name];
+        if (!actions) return;
+        const actionSchema = schema.action;
+        let publicSchema = actionSchema instanceof z.ZodEnum
+            ? { ...schema, action: z.enum(actions.filter(a => actionSchema.options.includes(a)) as [string, ...string[]]) } as S
+            : schema;
+        if (name === "mod_bytecode") publicSchema = { ...publicSchema,
+            startLine: z.number().int().positive().optional().describe("First bytecode line, 1-based"),
+            maxLines: z.number().int().positive().optional().describe("Bytecode lines to return (hosted cap applies)"),
+        };
+        // Do not advertise host paths, cache jobs, registry exports or unavailable operations.
+        const publicDescription = `${description.split(". ")[0]}. Hosted access: ${actions.filter(Boolean).join(", ") || "analysis"}. Responses and cumulative usage are bounded; use focused queries and source ranges.`;
+        server.tool(name, publicDescription, publicSchema, (async (args: Record<string, unknown>, extra: unknown) =>
+            runHostedTool(name, args, principal, limits, hostedBudget,
+                async bounded => (handler as (args: Record<string, unknown>, extra: unknown) => any)(bounded, extra))) as ToolCallback<S>);
+    }
+
+registerTool("report_issue",
+    "Prepare a ModLens GitHub issue and direct the coding agent to submit it using its own GitHub tools or gh CLI; this tool does not publish anything. " +
+    "Use help for guidance or prepare with title/summary and sanitized reproduction details. Available locally and remotely; always returns executed:false. The caller separately reports the GitHub URL after submission.",
+    reportIssueSchema, safe(async args => out(reportIssue(args, pkg.version))));
+
+registerTool("mod_license",
+    "Inspect a mod's license evidence before hosted source access, or request consent for local decompilation. " +
+    "Precedence: applicable GitHub version, mod JAR, CurseForge. action=check|local_plan. " +
+    "Provide modId/dbId or projectKey+environmentId+className. Local plans must run on the user's computer; never claim a plan has executed.",
+    {
+        action: z.enum(["check", "local_plan"]),
+        modId: z.union([z.string(), z.number()]).optional(), dbId: z.number().int().positive().optional(),
+        projectKey: z.string().optional(), environmentId: z.string().optional(), className: z.string().optional(),
+        operation: z.enum(["source", "bytecode"]).optional(),
+        startLine: z.number().int().positive().optional(), maxLines: z.number().int().positive().max(10000).optional(),
+    },
+    safe(async args => {
+        const decision = await reviewHostedMod(args);
+        if (args.action === "check") return out(decision);
+        let accepted = false;
+        if (server.server.getClientCapabilities()?.elicitation?.form !== undefined) {
+            const consent = await server.server.elicitInput({
+                mode: "form",
+                message: `Allow local decompilation of ${args.className ?? "this mod"} from JAR SHA-256 ${decision.sha256}? ${decision.reason} This does not grant redistribution rights; source stays on your computer.`,
+                requestedSchema: { type: "object", properties: {
+                    acceptLocal: { type: "boolean", title: "I accept local decompilation of this artifact", default: false },
+                }, required: ["acceptLocal"] },
+            });
+            if (consent.action !== "accept" || consent.content?.acceptLocal !== true) return out({ executed: false, declined: true });
+            accepted = true;
+        }
+        return out({ licenseReview: decision, local: localModPlan(decision, { ...args, action: args.operation ?? "source" }, accepted) });
+    }));
+
+registerTool("runtime",
+    "Optional Minecraft 26.3 live dev runtime: help/setup/status/sessions/launch/events/command/artifact. " +
+    "The AI can set up the Java agent and IntelliJ Gradle launch itself with setup(projectDir), then launch or detect a user launch. Remote MCP returns a local execution plan for the --runtime CLI helper; execute it using local terminal/file tools. " +
+    "Monitor JVM metrics/crashes and allocation hotspots filtered by mod package, control keyboard/mouse internally, capture screenshots, and switch visible watch-only/hidden/human modes. " +
+    "No desktop control or extra local MCP connection required. Plans have executed:false; verify local results. Call help for setup. Poll events with a cursor to actively monitor.",
+    runtimeToolSchema, safe(async args => {
+        const result = await runtimeAction(args);
+        if (args.action === "artifact" && result && typeof result === "object" && "mimeType" in result && "data" in result) {
+            return { content: [{ type: "image", mimeType: "image/png", data: result.data }] } as unknown as ReturnType<typeof out>;
+        }
+        return out(result);
+    }));
 
 // ── 1. mod ────────────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mod",
     "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|refresh_metadata|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). refresh_metadata: re-parse all mods with degraded metadata (filename/@Mod annotation) and upgrade if a higher-quality manifest is found. graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: validate an exported bundle and open a draft GitHub registry PR (bundlePath required). embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: validate an exported bundle and open a draft GitHub registry PR (bundlePath required). Auto-behaviors: decompile_status auto-queues embedding (MODLENS_AUTO_EMBED) and graph build (MODLENS_AUTO_GRAPH). Pass autoEmbed/autoGraph to override per-call.",
     {
@@ -234,6 +308,8 @@ server.tool(
         dbId:         z.number().optional().describe("DB id"),
         query:        z.string().optional(),
         path:         z.string().optional(),
+        startLine:    z.number().int().positive().optional().describe("First source line, 1-based"),
+        maxLines:     z.number().int().positive().optional().describe("Source lines to return"),
         className:    z.string().optional(),
         loader:       z.string().optional().describe("fabric|neoforge|forge|quilt"),
         mcVersion:    z.string().optional(),
@@ -267,7 +343,7 @@ server.tool(
         autoGraph:    z.boolean().optional().describe("Override auto-graph-build on decompile/source-download (default: env MODLENS_AUTO_GRAPH, true)"),
         provenance:   z.enum(["local", "registry", "community"]).optional().describe("Filter search_semantic results by embedding source (default: all sources)"),
     },
-    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model, autoEmbed, autoGraph, provenance, bundlePath, contributor, note }) => {
+    safe(async ({ action, jarPath, modId, dbId: rawDbId, query, path, startLine, maxLines, className, loader, mcVersion, hasMixins, decompiled, recursive, skipSource, isRegex, force, limit, directory, indexClasses, replace, budget, backend, chunkIndex, nodes, edges, outputDir, modVersion, targetType, targetId, targetVersion, targetLoader, targetMcVersion, model, autoEmbed, autoGraph, provenance, bundlePath, contributor, note }) => {
         const dbId = await resolveDbIdAsync(rawDbId, modId);
         const resolvedTargetType = targetType ?? "mod";
         const resolvedTargetId = targetId ?? (typeof modId === "string" ? modId : undefined) ?? (resolvedTargetType === "vanilla" ? "minecraft" : undefined);
@@ -297,7 +373,7 @@ server.tool(
                 break;
             case "source":
                 if (dbId == null) throw new Error(`Mod not found: ${String(modId ?? rawDbId ?? "")}`);
-                result = await getModSource(dbId, path);
+                result = await getModSource(dbId, path, startLine, maxLines);
                 break;
             case "search_source":    result = await searchSource(query!, dbId, isRegex ?? false, limit ?? 50); break;
             case "reindex":
@@ -377,7 +453,7 @@ server.tool(
 
 // ── 2. mod_bytecode ───────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mod_bytecode",
     "Mod JAR bytecode and class analysis — for INGESTED MODS only (requires dbId or modId of an ingested mod). For vanilla Minecraft classes use mc_source instead. action=search_class|class_members|bytecode|find_refs|cross_refs|inheritance|diff|diff_detailed|cache_diff|find_implementors|scan_registrations|annotated_by|event_listeners|optional_integrations|network_payloads|config_schema. Most actions require dbId or modId. cross_refs/find_implementors/annotated_by/event_listeners can omit modId to search all mods. diff/diff_detailed/cache_diff require dbIdA+dbIdB. diff_detailed gives AST-level method/field changes with breaking-change flags (add semantic=true for cosine similarity, requires mod index_semantic). cache_diff forces a (re)compute and writes to DB. Set env AUTO_CACHE_MOD_DIFFS=1 to auto-cache all diff_detailed calls.",
     {
@@ -428,7 +504,7 @@ server.tool(
 
 // ── 3. mod_mixins ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mod_mixins",
     "Mod mixin and access transformer analysis. action=targets|resolve|conflicts|targets_in_package|at_conflicts|at_entries|aw_entries.",
     {
@@ -458,7 +534,7 @@ server.tool(
 
 // ── 4. platform ───────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "platform",
     "Modrinth/CurseForge platform sync and source download. action=sync_modrinth|sync_curseforge|check_updates|batch_sync|download_source|search|batch_check_updates. " +
     "action=search: unified mod search across both Modrinth and CurseForge — deduplicated, sorted by downloads (query required, loader, mcVersion, limit). Missing modpacks.ch loader labels are recovered by inspecting cached/downloaded JARs. " +
@@ -495,7 +571,7 @@ server.tool(
 
 // ── 5. modpacks_ch ───────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "modpacks_ch",
     "Search, resolve, list versions for, and ingest arbitrary modpacks so other ModLens tools can analyze the exact pack contents. General workflow: when the user names a modpack and possibly a fuzzy version like 7.1, call action=list_versions with packRef/versionRef, choose the best matching version, then call action=ingest_pack before using analyze_crash_log, reports, pack_tools, dependency checks, mixin scans, source search, or other pack-aware analysis. Crash triage is one common use, not the only use. " +
     "Metadata comes from modpacks.ch for all providers; downloads use the supplied URLs and Modrinth .mrpack archives. Loader-filtered mod queries automatically download and inspect unlabeled JARs; recovered labels report loaderSource=jar. No CurseForge API key is required. Modrinth packRef may be a slug/project ID, a modrinth.com modpack/version URL, an api.modrinth.com project/version URL, a cdn.modrinth.com .mrpack URL, or any direct HTTPS .mrpack URL. " +
@@ -598,7 +674,7 @@ server.tool(
 
 // ── 6. mc_versions ────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mc_versions",
     "Minecraft and mod loader version management. action=list_mc|list_neoforge|list_forge|list_fabric|ingest_neoforge|ingest_forge|ingest_fabric.",
     {
@@ -651,7 +727,7 @@ server.tool(
 
 // ── 6. mc_source ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mc_source",
     "Vanilla Minecraft source code, decompilation, and validation — use this for vanilla MC classes (net/minecraft/...), NOT mod_bytecode. Requires version param. action=search_class|get_source|bytecode|class_members|find_refs|inheritance|diff|diff_detailed|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin|index_semantic|search_semantic|get_paths. get_paths returns the on-disk jar, decompiled source directory, and index paths so the agent can grep/search files natively. diff_detailed gives AST-level method/field changes with breaking-change flags per class; add semantic=true for cosine similarity scoring (requires Ollama + index_semantic run first). index_semantic/search_semantic require Ollama running.",
     {
@@ -718,7 +794,7 @@ server.tool(
 
 // ── 7. mappings ───────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mappings",
     "Minecraft name mappings and Parchment parameter docs. action=find translates one symbol between namespaces; action=remap rewrites a mod JAR and requires inputJar/outputJar/toMapping; action=parchment|list_parchment|parchment_summary reads Parchment docs.",
     {
@@ -765,7 +841,7 @@ server.tool(
 
 // ── 8. docs ───────────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "docs",
     "Minecraft modding documentation database. action=ingest|seed|get|search|list|delete|semantic_search|backfill_embeddings. semantic_search requires Ollama running.",
     {
@@ -805,7 +881,7 @@ server.tool(
 
 // ── 9. primers ────────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "primers",
     "Minecraft migration primers. by_version finds each migration step, including vanilla changes for the selected loader; includeContent=true bundles the Markdown with a shared maxChars budget. Continue with nextCursor until null, keeping the same range and loader. get reads one guide (follow nextStartLine). Missing content is fetched and cached unless fetchContent=false. seed populates the catalogue. Bundles report per-guide failures; retry failed IDs with get. Published guides may leave coverage gaps. semantic_search requires Ollama.",
     {
@@ -855,7 +931,7 @@ server.tool(
 
 // ── 10. mc_registry ───────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mc_registry",
     "Vanilla MC registry and meta data (blocks, commands, registries, sounds, item components). action=blocks|commands|registries|sounds|item_components|registry_entries|mcmeta_versions.",
     {
@@ -881,7 +957,7 @@ server.tool(
 
 // ── 11. mc_data ───────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mc_data",
     "Vanilla MC data browser — tags, recipes, loot tables, lang, blockstates, models, biomes, enchantments, advancements, structures, particles, entity attributes. action=tags|find_tags_for|recipes|get_recipe|find_recipes_for|loot_tables|get_loot_table|lang|blockstate|model|model_tree|biomes|get_biome|damage_types|enchantments|get_enchantment|advancements|get_advancement|structures|get_structure|particles|get_particle|entity_attributes.",
     {
@@ -946,7 +1022,7 @@ server.tool(
 
 // ── 12. mc_files ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mc_files",
     "Vanilla MC file access via misode/mcmeta (data packs, assets, atlases, diffs, changelogs). action=get_data|get_asset|list_files|diff|atlas|raw|compare|changelog. list_files requires dirPath+version+branch. diff requires filePath+versionA+versionB. get_data/get_asset require filePath.",
     {
@@ -979,7 +1055,7 @@ server.tool(
 
 // ── 13. mod_jar ───────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mod_jar",
     "Mod JAR file access and registry discovery (lang, sounds, atlases, configs, manifests). action=list_files|get_file|lang|sounds|atlas|registry_entries|manifest|list_configs|get_config.",
     {
@@ -1012,7 +1088,7 @@ server.tool(
 
 // ── 14. mod_data ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mod_data",
     "Mod JAR structured data — list/get/diff JSON (recipes, loot tables, advancements, blockstates, models, biomes, tags, etc.) or trace a crafting dependency tree. action=list|get|diff|trace_item.",
     {
@@ -1054,7 +1130,7 @@ server.tool(
 
 // ── 15. mod_tags ──────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mod_tags",
     "Cross-mod data-pack tag indexing — index, browse, expand, find contributors, and detect replace:true conflicts. action=index|index_all|namespaces|contributors|expand|mod_list|find_conflicts|search.",
     {
@@ -1084,7 +1160,7 @@ server.tool(
 
 // ── 16. mixin_scan ────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "mixin_scan",
     "Cross-mod mixin conflict analysis. action=list_mods|conflict_matrix|class_detail|hotspots|batch_resolve.",
     {
@@ -1110,7 +1186,7 @@ server.tool(
 
 // ── 17. gradle ────────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "gradle",
     "Gradle build file analysis — extract deps/plugins, search across mods, compare dependency versions. action=get_files|search|compare_deps.",
     {
@@ -1134,7 +1210,7 @@ server.tool(
 
 // ── 18. reports ───────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "project",
     "Import and query a private Gradle compile environment, including prepared ATs, mappings and loader patches. " +
     "Use this instead of mc_source/mod source or member tools when answering about an imported project. " +
@@ -1143,10 +1219,10 @@ server.tool(
     "action=import_local|upload_begin|upload_chunk|upload_finish|upload_abort|list|info|classes|source|search|members|bytecode. " +
     "list is restricted to the supplied private key. Search covers provided sources and cached decompiles, not all runtime transformations.",
     projectToolSchema,
-    safe(async (params) => out(await projectAction(params))),
+    safe(async (params) => out(await projectAction(params, undefined, principal !== undefined))),
 );
 
-server.tool(
+registerTool(
     "reports",
     "Generate Markdown reports. report=mixin_conflicts|tag_conflicts|version_conflicts|mod_overview|gradle_deps|pack_compat|dep_graph|sidedness|mod_complexity|pack_changelog. savePath to write to disk.",
     {
@@ -1171,7 +1247,7 @@ server.tool(
 
 // ── 20. pack_tools ────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "pack_tools",
     "Modpack-specific analysis tools. " +
     "action=asset_conflicts: find assets/ paths shipped by 2+ mods \u2014 last-loaded mod silently wins, causing visual/audio corruption (assetType, mcVersion, loader, limit). " +
@@ -1219,7 +1295,7 @@ server.tool(
 
 // ── 21. kubejs ────────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "kubejs",
     "KubeJS script analysis \u2014 index a kubejs/ directory or text-search scripts. action=index|search|semantic_search. semantic_search requires Ollama running.",
     {
@@ -1241,7 +1317,7 @@ server.tool(
 
 // ── 22. analyze_crash_log ────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "analyze_crash_log",
     "Parse a NeoForge/Forge/Fabric crash log and return suspect mods ranked by stack-frame hits against the indexed class DB.",
     {
@@ -1255,7 +1331,7 @@ server.tool(
 
 // ── 23. find_missing_deps ────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "find_missing_deps",
     "Find declared mod dependencies not satisfied by any ingested mod in the DB. Skips loader pseudo-deps (minecraft, neoforge, java, etc.).",
     {
@@ -1270,7 +1346,7 @@ server.tool(
 
 // ── 24. check_mod_compat ──────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
     "check_mod_compat",
     "Pre-flight check a candidate JAR against the DB — mixin conflicts, AT/AW overlaps, asset conflicts, missing deps, sidedness. Does not require prior ingestion.",
     {
@@ -1289,8 +1365,10 @@ server.tool(
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-process.on("SIGINT", async () => { await disconnect(); process.exit(0); });
-process.on("SIGTERM", async () => { await disconnect(); process.exit(0); });
+process.on("SIGINT", async () => { await runtimeHub.close(); await disconnect(); process.exit(0); });
+process.on("SIGTERM", async () => { await runtimeHub.close(); await disconnect(); process.exit(0); });
+// No listener or JVM is started until a project has opted in through setup.
+if (!process.env.MCP_PORT) await runtimeHub.initialize().catch(e => console.error("[modlens] runtime:", String(e)));
 
 // Transport selection:
 //   • MCP_PORT set  → Streamable HTTP transport (for k8s / remote deployments).
@@ -1326,9 +1404,14 @@ if (process.env.MODLENS_AUTO_EMBED !== "0") {
 async function startHttpServer(port: number): Promise<void> {
     const mcpPath = process.env.MCP_PATH ?? "/mcp";
     const host = process.env.MCP_HOST ?? "0.0.0.0";
+    const restricted = process.env.MODLENS_HOSTED_LIMITS !== "0";
+    if (restricted) hostedLimits(); // Reject invalid operator configuration at startup.
+    const proxySecret = process.env.MODLENS_HOSTED_PROXY_SECRET;
+    if (proxySecret && proxySecret.length < 32) throw new Error("MODLENS_HOSTED_PROXY_SECRET must have at least 32 characters");
 
     // Active sessions keyed by Mcp-Session-Id header.
     const transports = new Map<string, StreamableHTTPServerTransport>();
+    const sessionOwners = new Map<string, string>();
 
     const readBody = (req: IncomingMessage): Promise<unknown> =>
         new Promise((resolve, reject) => {
@@ -1384,10 +1467,11 @@ async function startHttpServer(port: number): Promise<void> {
         const sessionId = getHeader(req, "mcp-session-id");
 
         try {
+            const principal = restricted ? hostedPrincipal(req.headers, proxySecret) : undefined;
             // Existing session — route to its transport.
             if (sessionId) {
                 const transport = transports.get(sessionId);
-                if (!transport) {
+                if (!transport || (restricted && sessionOwners.get(sessionId) !== principal)) {
                     return sendJson(res, 404, {
                         jsonrpc: "2.0",
                         error: { code: -32001, message: "Session not found" },
@@ -1411,12 +1495,18 @@ async function startHttpServer(port: number): Promise<void> {
                 }
                 const transport = new StreamableHTTPServerTransport({
                     sessionIdGenerator: () => randomUUID(),
-                    onsessioninitialized: (id) => { transports.set(id, transport); },
+                    onsessioninitialized: (id) => {
+                        transports.set(id, transport);
+                        if (principal !== undefined) sessionOwners.set(id, principal);
+                    },
                 });
                 transport.onclose = () => {
-                    if (transport.sessionId) transports.delete(transport.sessionId);
+                    if (transport.sessionId) {
+                        transports.delete(transport.sessionId);
+                        sessionOwners.delete(transport.sessionId);
+                    }
                 };
-                const server = createMcpServer();
+                const server = createMcpServer(principal);
                 await server.connect(transport);
                 await transport.handleRequest(req, res, body);
                 return;
@@ -1429,6 +1519,7 @@ async function startHttpServer(port: number): Promise<void> {
             });
         } catch (err) {
             if (!res.headersSent) {
+                if (err instanceof HostedPolicyError) return sendJson(res, 401, { error: err.message });
                 if (err instanceof HttpBodyTooLargeError) return sendJson(res, 413, { error: err.message });
                 if (err instanceof JsonBodyParseError) {
                     return sendJson(res, 400, {

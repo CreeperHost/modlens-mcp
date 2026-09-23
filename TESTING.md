@@ -2,6 +2,14 @@
 
 Run the deterministic regressions with `npm test`. Run `npm run build` before the MCP and package checks below.
 
+For a package that includes live runtime support, also run `npm run build:agent`
+with JDK 25 before `npm run test:package`. The npm release workflow does this
+automatically. Runtime protocol tests are part of `npm test`; native SDL and real
+26.3 client checks are described in [RUNTIME.md](RUNTIME.md).
+The packaged-consumer test also exercises the persistent `--runtime` helper.
+`node scripts/test-runtime-remote.mjs` validates HTTP MCP guidance followed by local
+CLI execution against a real Java agent; Minecraft and Gradle tests accept `--helper`.
+
 `npm test` works directly after `npm ci`, before a build. Vitest generates the SQLite client before importing the tests. SQLite integration tests create a temporary template from the Prisma schema, use a fresh database for each test, and isolate their artifact cache. They do not depend on `dist/`, the packaged `template.db`, or earlier test results.
 
 ## Minecraft era matrix

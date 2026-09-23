@@ -19,15 +19,28 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
+import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Runtime-only local helper: no DB bootstrap, server .env, or MCP configuration.
+if (process.argv[2] === "--local-mod") {
+    delete process.env.MCP_PORT;
+    const { localModCli } = await import("./local-mod.js");
+    process.exitCode = await localModCli(process.argv.slice(3));
+} else if (process.argv[2] === "--runtime") {
+    delete process.env.MCP_PORT;
+    const { runtimeCli } = await import("./runtime/cli.js");
+    process.exitCode = await runtimeCli(process.argv.slice(3));
+} else await startMcp();
+
+async function startMcp() {
 
 // ── Resolve paths (mirrors env-path.ts but without importing it so we can
 //    load the .env before any other imports trigger DB connections) ──────────
 const PKG_ROOT = join(__dirname, "..");
 const IS_INSTALLED = !existsSync(join(PKG_ROOT, ".git"));
 
-import { homedir } from "os";
 const MODLENS_HOME = process.env.MODLENS_HOME ?? (IS_INSTALLED ? join(homedir(), ".modlens") : PKG_ROOT);
 const ENV_FILE = IS_INSTALLED ? join(MODLENS_HOME, ".env") : join(PKG_ROOT, ".env");
 const VERSION_FILE = join(MODLENS_HOME, "version");
@@ -140,3 +153,4 @@ if (IS_INSTALLED) {
 // Dynamic import so all the above env-loading completes before any module
 // that reads process.env at import time (e.g. db.ts) is evaluated.
 await import("./server.js");
+}

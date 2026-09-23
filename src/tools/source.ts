@@ -26,7 +26,7 @@ async function getDecompPath(dbId: number): Promise<string> {
     throw new Error(`Decompile timed out for mod #${dbId}`);
 }
 
-export async function getModSource(dbId: number, path?: string): Promise<string> {
+export async function getModSource(dbId: number, path?: string, startLine?: number, maxLines?: number): Promise<string> {
     validateDbId(dbId);
     const decompPath = await getDecompPath(dbId);
     if (!path) {
@@ -42,6 +42,10 @@ export async function getModSource(dbId: number, path?: string): Promise<string>
         return entries.join("\n");
     }
     const content = await readFile(filePath, "utf8");
+    if (startLine !== undefined || maxLines !== undefined) {
+        const start = Math.max(0, (startLine ?? 1) - 1);
+        return content.split(/\r\n|\n|\r/).slice(start, start + (maxLines ?? 200)).join("\n");
+    }
     return content.slice(0, 50_000); // cap at 50KB
 }
 

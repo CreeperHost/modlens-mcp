@@ -1,0 +1,17 @@
+// Opt-in launch only. Never instrument Gradle itself or every JavaExec task.
+gradle.projectsEvaluated {
+    def configFile = new File(gradle.rootProject.projectDir, '.modlens/runtime/launch.properties')
+    if (!configFile.isFile()) throw new GradleException('Call ModLens runtime.setup for this project first')
+    def config = new Properties()
+    configFile.withInputStream { config.load(it) }
+    def taskPath = config.getProperty('task')
+    if (!taskPath.startsWith(':')) taskPath = ':' + taskPath
+    def target = gradle.rootProject.tasks.findByPath(taskPath)
+    if (!(target instanceof JavaExec)) {
+        throw new GradleException("ModLens requires a JavaExec dev run task; ${taskPath} is ${target?.class?.name ?: 'missing'}. Use every returned vmOptions entry on the actual game launch instead.")
+    }
+    target.jvmArgs("-javaagent:${config.getProperty('agent')}=${config.getProperty('connection')}")
+    // Minecraft 26.3 client startup needs this even without the agent.
+    target.jvmArgs('-XX:StackShadowPages=32')
+    target.jvmArgs("-XX:ErrorFile=${new File(configFile.parentFile, 'hs_err_pid%p.log').absolutePath}")
+}

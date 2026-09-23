@@ -1,0 +1,154 @@
+[
+  {
+    "name": "ModMenu",
+    "version": "v6Xx3fbU",
+    "release": "11.0.4",
+    "hash": "a88e0d67c82b0434cbf56776c482587c275ed660f635d33f53ba485dfa30dcc3",
+    "license": "MIT",
+    "expected": "hosted_allowed",
+    "target": "com.terraformersmc.modmenu.ModMenu"
+  },
+  {
+    "name": "FerriteCore",
+    "version": "sOzRw3CG",
+    "release": "7.0.3-fabric",
+    "hash": "98c3ab1d5aab8f14b5d082d3f1a467727fd335f02d124555c94339761c4c18f2",
+    "license": "MIT",
+    "expected": "hosted_allowed",
+    "target": "malte0811.ferritecore.IPlatformHooks"
+  },
+  {
+    "name": "MouseTweaks",
+    "version": "9I21YYxf",
+    "release": "1.21-2.26.1-neoforge",
+    "hash": "68e6f4201c5de97b77929a7215c9552495696ca6a3bf3ae4eacc34e135f6cc8b",
+    "license": "BSD-3-Clause",
+    "expected": "hosted_allowed",
+    "target": "yalter.mousetweaks.Constants"
+  },
+  {
+    "name": "DynamicFPS",
+    "version": "LqevwKp5",
+    "release": "3.11.4",
+    "hash": "0929d2b9e164a08d25a7ba8a5f0750081b66dea9171cec52d2f0fdc792fc7e5e",
+    "license": "MIT",
+    "expected": "hosted_allowed",
+    "target": "architectury_inject_dynamicfps_common_96ad272d90fa4fcc8d67753a3449cf6d_48138490a95625983251b45ac7336d8a7e463234a1fad5dfdc4c144b1c5f439adynamicfps3114devjar.PlatformMethods"
+  },
+  {
+    "name": "Controlling",
+    "version": "FaNppCJJ",
+    "release": "19.0.5",
+    "hash": "cc525fb6b030d9e4d33176983f278919e17b33935e2ca568929bdfa98f2b44a0",
+    "license": "MIT",
+    "expected": "hosted_allowed",
+    "target": "com.blamejared.controlling.Controlling"
+  },
+  {
+    "name": "Clumps",
+    "version": "jo7lDoK4",
+    "release": "19.0.0.1",
+    "hash": "b524ccdace2ef8fd19f5b2074f7de1103ac5065c52553f064c00e098346c293e",
+    "license": "MIT",
+    "expected": "hosted_allowed",
+    "target": "com.blamejared.clumps.helper.IClumpedOrb"
+  },
+  {
+    "name": "AppleSkin",
+    "version": "uAKA6Laj",
+    "release": "3.0.9+mc1.21",
+    "hash": "38b48dd6231341c9f964ce6e42c57ec866c6cc8f72bec938390a59bafb3922df",
+    "license": "Unlicense",
+    "expected": "hosted_allowed",
+    "target": "squeek.appleskin.ModInfo"
+  },
+  {
+    "name": "Architectury",
+    "version": "1IiqEQGl",
+    "release": "13.0.11+neoforge",
+    "hash": "9cc92f2c09533fc5482c60f993bd891c655a0e32b637037cdcb7c2b23adedeeb",
+    "license": "LGPL-3.0-only",
+    "expected": "local_only",
+    "target": "architectury_inject_architectury_common_d9fb27da44a148dfa43566d20897d6de_f4ed98e062c0e85c5cc998c6fbbab16b146fa1f727cd0f469b44c896e896070earchitectury13011devjar.PlatformMethods"
+  },
+  {
+    "name": "ClothConfig",
+    "version": "izKINKFg",
+    "release": "15.0.140+neoforge",
+    "hash": "65e722e0d98431a07c45f8bdd8d529a217cc8c175fde1740248bd5c1b4f3c0d4",
+    "license": "LGPL-3.0-only",
+    "expected": "local_only",
+    "target": "architectury_inject_clothconfig_common_d551de04735c42148ec07a78c43007d1_c487a9cf12e7d5bea169da255b814f03602bdeb8b51cff67162252c24f285789clothconfig150140devjar.PlatformMethods"
+  },
+  {
+    "name": "ModernFix",
+    "version": "5HLHxQ2F",
+    "release": "5.27.24+mc1.21.1",
+    "hash": "e6e9446890f0feb3aab3f6e73ae18cb17575c370f232179fef7baa30e61538fe",
+    "license": "LGPL-3.0-only",
+    "expected": "local_only",
+    "target": "org.embeddedt.modernfix.ModernFix"
+  },
+  {
+    "name": "Spark",
+    "version": "v5qtqRQi",
+    "release": "1.10.124-neoforge-1.21.1",
+    "hash": "647e8a81afbe414dba1df4ba15fd06c5d32d4cb544e68828405e8e074c2e16db",
+    "license": "GPL-3.0-only",
+    "expected": "local_only",
+    "target": "me.lucko.spark.neoforge.NeoForgePlatformInfo"
+  },
+  {
+    "name": "Sodium",
+    "version": "uMOpc5uV",
+    "release": "mc1.21.1-0.8.13-neoforge",
+    "hash": "575d187b15328d7bddd8a9b1bee64333c22c14735f5780ec49eac0cd5503c08d",
+    "license": "LicenseRef-Polyform-Shield-1.0.0",
+    "expected": "local_only",
+    "target": "net.caffeinemc.mods.sodium.service.SodiumServiceModLocator"
+  },
+  {
+    "name": "Iris",
+    "version": "t3ruzodq",
+    "release": "1.8.12+1.21.1-neoforge",
+    "hash": "3e3f94d2d5cdcb8145c4385d521974aa2d8669b2cc212351f70cf06488182e83",
+    "license": "LGPL-3.0-only",
+    "expected": "local_only",
+    "target": "de.odysseus.ithaka.digraph.Digraph"
+  },
+  {
+    "name": "Lithium",
+    "version": "N08Z8wog",
+    "release": "mc1.21.1-0.15.4-fabric",
+    "hash": "92329d98c57f5a22091a0adb509fdb1d60113a5602c708b799b13134bad13baa",
+    "license": "LGPL-3.0-only",
+    "expected": "local_only",
+    "target": "net.caffeinemc.mods.lithium.api.inventory.LithiumCooldownReceivingInventory"
+  },
+  {
+    "name": "EntityCulling",
+    "version": "8w8FfUPs",
+    "release": "1.11.2",
+    "hash": "3983b981da4a0583c7e58184a8631a23e56cc3b81f4cb53491ca600382879b82",
+    "license": "LicenseRef-tr7zw-Protective-License",
+    "expected": "local_only",
+    "target": "com.logisticscraft.occlusionculling.DataProvider"
+  },
+  {
+    "name": "JourneyMap",
+    "version": "CtFE7hwT",
+    "release": "1.21.1-6.0.9+neoforge",
+    "hash": "9bd7734542233d5281750572f17a9258449e826650c081e9a67dc426262c2fde",
+    "license": "LicenseRef-All-Rights-Reserved",
+    "expected": "local_only",
+    "target": "earcut4j.Earcut"
+  },
+  {
+    "name": "FabricAPI",
+    "version": "Mys3P7lK",
+    "release": "0.116.17+1.21.1",
+    "hash": "79ac44b40780acbd884b34c50be1e39af682847e5f5cb3b1fddeeaa768dce800",
+    "license": "Apache-2.0",
+    "expected": "hosted_allowed"
+  }
+]

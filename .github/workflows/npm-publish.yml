@@ -51,6 +51,15 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Set up Java for optional runtime agent
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Build optional runtime agent
+        run: npm run build:agent
+
       # npm pack does not create --pack-destination, so make it first.
       - name: Pack tarball
         run: |

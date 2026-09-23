@@ -22,6 +22,7 @@
     "scripts/",
     "package.json",
     "README.md",
+    "RUNTIME.md",
     "TESTING.md",
     "LICENSE",
     "ATTRIBUTION.md"
@@ -29,6 +30,8 @@
   "scripts": {
     "postinstall": "prisma generate",
     "build": "npm run db:generate:sqlite && tsc && node scripts/build-template-db.mjs",
+    "build:agent": "node scripts/build-runtime-agent.mjs",
+    "test:runtime:native": "node scripts/test-runtime-native.mjs",
     "dev": "tsc --watch",
     "start": "node dist/server.js",
     "setup": "npm run build && node dist/setup.js",

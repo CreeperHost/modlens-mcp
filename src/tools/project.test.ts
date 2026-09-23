@@ -71,6 +71,18 @@ describe("private project environments", () => {
         expect((await store.search(key, imported.environmentId, "WRONG")).results).toEqual([]);
     });
 
+    it("filters hosted project source searches before reading restricted artifacts", async () => {
+        const imported = await store.importBuffer(key, bundle("RESTRICTED_SOURCE"));
+        const deny = vi.fn(async () => false);
+        const blocked = await store.search(key, imported.environmentId, "RESTRICTED", 20, deny);
+        expect(blocked.results).toEqual([]);
+        expect(blocked.skippedArtifacts).toBe(1);
+        expect(deny).toHaveBeenCalledTimes(1);
+        const allowed = await store.search(key, imported.environmentId, "RESTRICTED", 20, async () => true);
+        expect(allowed.results).toHaveLength(1);
+        expect(allowed.skippedArtifacts).toBe(0);
+    });
+
     it("pairs separate sources only with the winning binary", async () => {
         const data = bundle("first", (m, zip) => {
             const bytes = jar({ "example/Target.java": "separate source" });
