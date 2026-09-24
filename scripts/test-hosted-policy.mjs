@@ -24,6 +24,7 @@ const secret = randomBytes(32).toString("hex");
 const env = { ...process.env, MCP_PORT: String(port), MCP_HOST: "127.0.0.1", MODLENS_HOME: root,
     MODLENS_CACHE_ROOT: join(root, "cache"), DATABASE_URL: `file:${join(root, "usage.db")}`,
     MODLENS_HOSTED_LIMITS: "1", MODLENS_HOSTED_PROXY_SECRET: secret, MODLENS_HOSTED_SOURCE_LINES: "200",
+    MODLENS_HOSTED_MC_SOURCE: "1", MODLENS_HOSTED_MC_SOURCE_TEAMS: "partner",
     MODLENS_HOSTED_DAILY_BYTES: "15000", MODLENS_HOSTED_PERIOD_BYTES: "100000",
     MODLENS_HOSTED_DAILY_REQUESTS: "1000", MODLENS_HOSTED_MINUTE_REQUESTS: "120",
     MODLENS_HOSTED_RESPONSE_BYTES: "131072", MODLENS_AUTO_EMBED: "0", MODLENS_AUTO_GRAPH: "0" };
@@ -31,7 +32,9 @@ const source = Array.from({ length: 600 }, (_, i) => `// Synthetic fixture line 
 const fixtureDir = join(env.MODLENS_CACHE_ROOT, "mc-decompiled-named", "1.21.1", "example");
 await mkdir(fixtureDir, { recursive: true });
 await writeFile(join(fixtureDir, "Fixture.java"), source);
-const headers = user => ({ "x-modlens-proxy-secret": secret, "x-modlens-user-id": user });
+await writeFile(join(env.MODLENS_CACHE_ROOT, "mc-decompiled-named", "1.21.1", ".decompile.done"), "0");
+const headers = (user, team) => ({ "x-modlens-proxy-secret": secret, "x-modlens-user-id": user,
+    ...(team ? { "x-modlens-team-id": team } : {}) });
 let server, exited;
 const clients = [];
 async function start() {
@@ -50,10 +53,10 @@ async function start() {
         ready();
     });
 }
-async function connect(user) {
+async function connect(user, team) {
     const client = new Client({ name: "hosted-policy-test", version: "1" });
     clients.push(client);
-    const transport = new StreamableHTTPClientTransport(endpoint, { requestInit: { headers: headers(user) } });
+    const transport = new StreamableHTTPClientTransport(endpoint, { requestInit: { headers: headers(user, team) } });
     await client.connect(transport);
     return { client, transport };
 }
@@ -65,7 +68,29 @@ try {
     await start();
     const unauthorized = await fetch(endpoint, { method: "POST", headers: { "x-modlens-user-id": "spoof" }, body: "{}" });
     assert.equal(unauthorized.status, 401);
-    const { client, transport } = await connect("developer-a");
+    const publicUser = await connect("public-developer");
+    const publicTools = await publicUser.client.listTools();
+    const publicMc = publicTools.tools.find(t => t.name === "mc_source");
+    assert.ok(publicMc.inputSchema.properties.action.enum.includes("source_info"));
+    assert.ok(!publicMc.inputSchema.properties.action.enum.includes("get_source"));
+    assert.ok(!publicMc.inputSchema.properties.action.enum.includes("bytecode"));
+    const info = await publicUser.client.callTool({ name: "mc_source", arguments: {
+        action: "source_info", version: "1.21.1", className: "example.Fixture",
+    } });
+    assert.deepEqual(JSON.parse(info.content[0].text), { version: "1.21.1", className: "example/Fixture", cached: true, totalLines: 600 });
+    const missingInfo = await publicUser.client.callTool({ name: "mc_source", arguments: {
+        action: "source_info", version: "1.21.1", className: "example.Missing",
+    } });
+    assert.deepEqual(JSON.parse(missingInfo.content[0].text), { version: "1.21.1", className: "example/Missing", cached: false, totalLines: null });
+    const publicSearch = await publicUser.client.callTool({ name: "mc_source", arguments: {
+        action: "search_code", version: "1.21.1", query: "Synthetic fixture line 319",
+    } });
+    assert.ok(!publicSearch.isError, JSON.stringify(publicSearch));
+    assert.deepEqual(JSON.parse(publicSearch.content[0].text), [{ file: "example/Fixture.java", line: 319 }]);
+    const publicSource = await read(publicUser.client);
+    assert.ok(publicSource.isError);
+    assert.ok(!JSON.stringify(publicSource).includes("Synthetic fixture"));
+    const { client, transport } = await connect("developer-a", "partner");
     const listed = await client.listTools();
     assert.ok(listed.tools.some(t => t.name === "report_issue"), "Hosted users must discover issue reporting");
     const reporter = await connect("issue-reporter");
@@ -88,6 +113,8 @@ try {
     assert.ok(denied.isError);
     const wrongOwner = await fetch(endpoint, { headers: { ...headers("developer-b"), "mcp-session-id": transport.sessionId, accept: "text/event-stream" } });
     assert.equal(wrongOwner.status, 404);
+    const wrongTeam = await fetch(endpoint, { headers: { ...headers("developer-a"), "mcp-session-id": transport.sessionId, accept: "text/event-stream" } });
+    assert.equal(wrongTeam.status, 404);
     const first = await read(client);
     assert.ok(!first.isError, JSON.stringify(first));
     assert.equal(first.content[0].text, source.split("\n").slice(0, 200).join("\n"));
@@ -97,14 +124,14 @@ try {
     const exhausted = await read(client, 401);
     assert.ok(exhausted.isError);
     assert.ok(!JSON.stringify(exhausted).includes("Synthetic fixture"));
-    const reconnected = await connect("developer-a");
+    const reconnected = await connect("developer-a", "partner");
     assert.ok((await read(reconnected.client)).isError, "reconnect must retain quota");
     for (const c of clients.splice(0)) await c.close();
     server.kill(); await exited;
     await start();
-    const restarted = await connect("developer-a");
+    const restarted = await connect("developer-a", "partner");
     assert.ok((await read(restarted.client)).isError, "restart must retain quota");
-    const different = await connect("developer-b");
+    const different = await connect("developer-b", "partner");
     assert.ok(!(await read(different.client)).isError, "separate verified accounts have separate allowances");
     const local = new Client({ name: "hosted-local-test", version: "1" });
     clients.push(local);
@@ -114,7 +141,7 @@ try {
     assert.ok(!localResult.isError, JSON.stringify(localResult));
     assert.equal(localResult.content[0].text, source, "local source access remains unrestricted");
     passed = true;
-    console.log("PASS: hosted discovery, authentication, account/session binding, source paging, cumulative release limits, reconnect/restart persistence and unrestricted local access");
+    console.log("PASS: public metadata-only access, team source access, authentication, account/session binding, source paging, cumulative limits, reconnect/restart persistence and unrestricted local access");
 } finally {
     for (const client of clients) await client.close().catch(() => {});
     if (server && server.exitCode === null) { server.kill(); await exited; }

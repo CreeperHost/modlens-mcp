@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { sqliteRawArgs } from "./sqlite-parameters.js";
-import { boundHostedResult, HostedBudget, hostedLimits, hostedPrincipal, prepareHostedArgs, runHostedTool, type BudgetDatabase } from "./hosted-policy.js";
+import { boundHostedResult, hostedActions, hostedMinecraftSourceAccess, hostedMinecraftSourceTeams, HostedBudget, hostedLimits, hostedPrincipal, prepareHostedArgs, runHostedTool, type BudgetDatabase } from "./hosted-policy.js";
 
 const limits = hostedLimits({});
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
@@ -44,10 +44,10 @@ describe("hosted identity and arguments", () => {
     it("validates configuration and clamps ranges without changing their start", () => {
         expect(limits.dailyBytes).toBe(5 * 1024 * 1024);
         expect(() => hostedLimits({ MODLENS_HOSTED_DAILY_BYTES: "NaN" })).toThrow();
-        expect(prepareHostedArgs("mc_source", { action: "get_source", startLine: 401, maxLines: 5000, endLine: 9000 }, limits))
+        expect(prepareHostedArgs("mc_source", { action: "get_source", startLine: 401, maxLines: 5000, endLine: 9000 }, limits, true))
             .toMatchObject({ startLine: 401, maxLines: 200, endLine: 600 });
         for (const startLine of [-1, 0, 1.2, Infinity, Number.MAX_SAFE_INTEGER]) {
-            expect(() => prepareHostedArgs("mc_source", { action: "get_source", startLine }, limits)).toThrow();
+            expect(() => prepareHostedArgs("mc_source", { action: "get_source", startLine }, limits, true)).toThrow();
         }
     });
     it("blocks bulk, raw-file, export and unreviewed routes", () => {
@@ -60,12 +60,26 @@ describe("hosted identity and arguments", () => {
         expect(() => prepareHostedArgs("mc_files", { action: "list_files", branch: "source" }, limits)).toThrow();
     });
     it("preserves ordinary development actions and rejects empty extraction queries", () => {
-        for (const [tool, action] of [["mc_source", "class_members"], ["mc_source", "bytecode"], ["mc_data", "get_recipe"],
+        for (const [tool, action] of [["mc_source", "class_members"], ["mc_source", "source_info"], ["mc_data", "get_recipe"],
             ["mod_mixins", "targets"], ["project", "upload_chunk"], ["mc_files", "get_data"]]) {
             expect(prepareHostedArgs(tool, { action }, limits).action).toBe(action);
         }
         expect(() => prepareHostedArgs("mc_source", { action: "search_code", query: " " }, limits)).toThrow();
         expect(prepareHostedArgs("mc_source", { action: "search_code", query: "getBlock", limit: 10000 }, limits).limit).toBe(50);
+    });
+    it("requires gateway-assigned team membership for hosted Minecraft source", () => {
+        const env = { MODLENS_HOSTED_MC_SOURCE: "1", MODLENS_HOSTED_MC_SOURCE_TEAMS: "trusted,partner" };
+        expect(() => hostedMinecraftSourceTeams(env)).toThrow();
+        const teams = hostedMinecraftSourceTeams(env, "x".repeat(32));
+        expect(hostedMinecraftSourceAccess({ "x-modlens-team-id": "partner" }, teams)).toBe(true);
+        expect(hostedMinecraftSourceAccess({ "x-modlens-team-id": "other" }, teams)).toBe(false);
+        expect(hostedMinecraftSourceTeams({ MODLENS_HOSTED_MC_SOURCE: "0", MODLENS_HOSTED_MC_SOURCE_TEAMS: "partner" }, "x".repeat(32)).size).toBe(0);
+        expect(hostedActions("mc_source")).not.toContain("get_source");
+        expect(hostedActions("mc_source", true)).toContain("get_source");
+        expect(() => prepareHostedArgs("mc_source", { action: "get_source" }, limits)).toThrow();
+        expect(() => prepareHostedArgs("mc_source", { action: "bytecode" }, limits)).toThrow();
+        expect(() => prepareHostedArgs("project", { action: "source", className: "net.minecraft.world.Level" }, limits)).toThrow();
+        expect(prepareHostedArgs("mc_source", { action: "get_source" }, limits, true).action).toBe("get_source");
     });
 });
 
@@ -91,12 +105,26 @@ describe("hosted output boundary", () => {
     it("shares the line cap across snippets and content blocks without breaking JSON", () => {
         const result = boundHostedResult("mc_source", { action: "search_indexed" }, {
             content: [...json([{ snippet: lines(150) }, { snippet: lines(150) }]).content, ...text(lines(50)).content],
-        }, limits);
+        }, limits, true);
         const snippets = JSON.parse((result.content[0] as any).text);
         expect(snippets[0].snippet.split("\n")).toHaveLength(150);
         expect(snippets[1].snippet.split("\n")).toHaveLength(50);
         expect(result.content[1]).toMatchObject({ text: "" });
         expect(result.content.at(-1)).toMatchObject({ text: expect.stringContaining("Response limited") });
+    });
+    it("projects public Minecraft searches to source-free locations", () => {
+        const code = boundHostedResult("mc_source", { action: "search_code" }, json([{ file: "net/minecraft/Test.java", line: 42, text: "SECRET_SOURCE" }]), limits);
+        expect(JSON.parse((code.content[0] as any).text)).toEqual([{ file: "net/minecraft/Test.java", line: 42 }]);
+        const indexed = boundHostedResult("mc_source", { action: "search_indexed" }, json([{ className: "net/minecraft/Test", snippet: "SECRET_SOURCE" }]), limits);
+        expect(JSON.parse((indexed.content[0] as any).text)).toEqual([{ className: "net/minecraft/Test" }]);
+        expect(JSON.stringify(code) + JSON.stringify(indexed)).not.toContain("SECRET_SOURCE");
+    });
+    it("omits Minecraft source matches from public project search", () => {
+        const result = boundHostedResult("project", { action: "search" }, json({ results: [
+            { className: "net/minecraft/Test", line: 1, text: "SECRET_SOURCE" },
+            { className: "org/example/Mod", line: 2, text: "mod code" },
+        ] }), limits);
+        expect(JSON.parse((result.content[0] as any).text).results).toEqual([{ className: "org/example/Mod", line: 2, text: "mod code" }]);
     });
     it("retains complete class member lists within the byte cap", () => {
         const members = Array.from({ length: 150 }, (_, i) => ({ name: `method${i}`, descriptor: "()V" }));

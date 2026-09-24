@@ -712,7 +712,8 @@ All tool actions have been consolidated into **24 grouped tools** to stay within
 | `diff` | versionA, versionB | Added/removed classes between MC versions |
 | `decompile` | version, force | Bulk decompile MC JAR (background) |
 | `decompile_status` | version | Poll bulk decompile job |
-| `search_code` | version, query, searchType, isRegex, limit | Regex/text search across MC source |
+| `search_code` | version, query, searchType, isRegex, limit | Regex/text search across MC source; public HTTP returns file and line only |
+| `source_info` | version, className | Cached class availability and total line count, without source text |
 | `index` | version, force | Index decompiled MC into PostgreSQL FTS |
 | `search_indexed` | version, query, limit | Fast FTS search |
 | `search_events` | version, query?, modloader? | Find Event subclasses in decompiled source |
@@ -1065,7 +1066,7 @@ node dist/cli.js check-updates 2
 
 ## Hosted access limits
 
-HTTP MCP (`MCP_PORT`) enables hosted limits by default. Local stdio retains its existing access. Hosted developers can browse source in pages, search, inspect bytecode and members, compare versions, inspect mixins and data, and upload their private Gradle environments. Bulk decompile/index commands, source/graph/embedding exports, raw JAR reads, host paths and filesystem administration are reserved for the local operator. KubeJS directory access and compatibility checks using host-local JAR paths are also local-only.
+HTTP MCP (`MCP_PORT`) enables hosted limits by default. Local stdio retains its existing access. Public HTTP users can search Minecraft class locations and inspect source metadata (`mc_source source_info` returns cache availability and total lines), members, references, version differences, mixins, and data. Minecraft search responses contain locations without source excerpts; `search_code` provides line numbers when available (`0` means the FTS index has no line location). Line numbers refer to the server's cached decompilation and may differ from local output. Minecraft source and bytecode are unavailable on public HTTP. Operators may decompile and index Minecraft through the local interface. Bulk decompile/index commands, source/graph/embedding exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access are local-only.
 
 | Setting | Default | Scope |
 | --- | --- | --- |
@@ -1079,6 +1080,8 @@ HTTP MCP (`MCP_PORT`) enables hosted limits by default. Local stdio retains its 
 The byte allowance includes all successful tool content, including metadata, search snippets and bytecode. It measures UTF-8 JSON content before transport compression. Cached files and inbound upload bytes are excluded. Each source text field has a 32 KiB cap. Searches with `limit`/`top` are capped at 50 results; responses exceeding the byte limit require a narrower query.
 
 Use `startLine` (1-based) and `maxLines` for `mc_source get_source/bytecode`, `mod source/decompile_class`, `mod_bytecode bytecode`, and `project source/bytecode`. A range may start anywhere; the hosted cap bounds its length. Prepare shared indexes and ingest mods through the operator's local interface; hosted clients can upload their own Gradle environment through `project`.
+
+To allow Minecraft source for specific teams, set `MODLENS_HOSTED_MC_SOURCE=1` and `MODLENS_HOSTED_MC_SOURCE_TEAMS` to comma-separated team IDs. This requires `MODLENS_HOSTED_PROXY_SECRET`; the authenticated gateway must inject `x-modlens-team-id` for verified members and remove caller-provided `x-modlens-*` headers. Other users retain metadata-only Minecraft access. Team access uses the same source and usage limits above. Local stdio is unaffected.
 
 ### Mod source access
 

@@ -156,6 +156,17 @@ export async function getMinecraftSource(
     return lines.slice(from, to).join("\n");
 }
 
+/** Metadata from the operator's existing cache; never starts a decompile or returns source text. */
+export async function getMinecraftSourceInfo(version: string, className: string) {
+    validateVersion(version);
+    validateClassName(className);
+    const internal = className.replace(/\./g, "/");
+    const cached = mcPaths.classFile(version, internal);
+    if (!await exists(cached)) return { version, className: internal, cached: false, totalLines: null };
+    const source = await readFile(cached, "utf8");
+    return { version, className: internal, cached: true, totalLines: source.split("\n").length };
+}
+
 /** get_mc_class_bytecode */
 export async function getMcClassBytecode(version: string, className: string): Promise<string> {
     validateVersion(version);

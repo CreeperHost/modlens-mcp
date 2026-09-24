@@ -47,6 +47,22 @@ export function hostedPrincipal(headers: IncomingHttpHeaders, secret?: string): 
     return digest(user).toString("hex");
 }
 
+/** Team claims are accepted only from the authenticated gateway. */
+export function hostedMinecraftSourceTeams(env: NodeJS.ProcessEnv = process.env, secret?: string): Set<string> {
+    if (env.MODLENS_HOSTED_MC_SOURCE !== "1") return new Set();
+    if (!secret || secret.length < 32) throw new Error("MODLENS_HOSTED_MC_SOURCE requires MODLENS_HOSTED_PROXY_SECRET");
+    const teams = (env.MODLENS_HOSTED_MC_SOURCE_TEAMS ?? "").split(",").map(value => value.trim()).filter(Boolean);
+    if (!teams.length || teams.some(value => !/^[a-zA-Z0-9._:-]{1,128}$/.test(value))) {
+        throw new Error("MODLENS_HOSTED_MC_SOURCE_TEAMS requires valid comma-separated team IDs");
+    }
+    return new Set(teams);
+}
+
+export function hostedMinecraftSourceAccess(headers: IncomingHttpHeaders, teams: ReadonlySet<string>): boolean {
+    const team = headers["x-modlens-team-id"];
+    return typeof team === "string" && teams.has(team);
+}
+
 // Fail closed: new tools/actions must be reviewed before becoming remotely available.
 // Cache population and filesystem/registry administration stay on the operator's local interface.
 export const HOSTED_ACTIONS: Record<string, readonly string[]> = {
@@ -59,7 +75,7 @@ export const HOSTED_ACTIONS: Record<string, readonly string[]> = {
     platform: ["search", "check_updates", "batch_check_updates"],
     modpacks_ch: ["search", "featured", "info", "manifest", "resolve_pack", "list_versions", "search_mods", "mod_info", "search_ftb_mods", "ftb_mod_info", "list_pack_versions", "list_pack_files", "find_mod_in_packs"],
     mc_versions: ["list_mc", "list_neoforge", "list_forge", "list_fabric"],
-    mc_source: ["search_class", "get_source", "bytecode", "class_members", "find_refs", "inheritance", "diff", "diff_detailed", "search_code", "search_indexed", "search_events", "validate_aw", "analyze_mixin", "search_semantic"],
+    mc_source: ["search_class", "source_info", "get_source", "bytecode", "class_members", "find_refs", "inheritance", "diff", "diff_detailed", "search_code", "search_indexed", "search_events", "validate_aw", "analyze_mixin", "search_semantic"],
     mappings: ["find", "parchment", "list_parchment", "parchment_summary"],
     docs: ["get", "search", "list", "semantic_search"],
     primers: ["get", "by_version", "search", "list", "semantic_search"],
@@ -78,16 +94,26 @@ export const HOSTED_ACTIONS: Record<string, readonly string[]> = {
     find_missing_deps: [""],
 };
 
+export function hostedActions(tool: string, allowMinecraftSource = false): readonly string[] | undefined {
+    const actions = HOSTED_ACTIONS[tool];
+    if (tool !== "mc_source" || allowMinecraftSource) return actions;
+    return actions.filter(action => action !== "get_source" && action !== "bytecode");
+}
+
 const rawSource = (tool: string, action: unknown) =>
     (tool === "mc_source" && ["get_source", "bytecode"].includes(String(action)))
     || (tool === "mod" && ["source", "decompile_class"].includes(String(action)))
     || (tool === "mod_bytecode" && action === "bytecode")
     || (tool === "project" && ["source", "bytecode"].includes(String(action)));
 
-export function prepareHostedArgs(tool: string, input: Record<string, unknown>, limits: HostedLimits): Record<string, unknown> {
+export function prepareHostedArgs(tool: string, input: Record<string, unknown>, limits: HostedLimits, allowMinecraftSource = false): Record<string, unknown> {
     const args = { ...input };
-    if (!HOSTED_ACTIONS[tool]?.includes(String(args.action ?? ""))) {
+    if (!hostedActions(tool, allowMinecraftSource)?.includes(String(args.action ?? ""))) {
         throw new HostedPolicyError("This operation is available only to the server operator locally.");
+    }
+    if (tool === "project" && !allowMinecraftSource && ["source", "bytecode"].includes(String(args.action))
+        && /^net[./]minecraft[./]/i.test(String(args.className ?? ""))) {
+        throw new HostedPolicyError("Minecraft source is unavailable on public hosted access.");
     }
     if (args.savePath !== undefined || args.scriptsDir !== undefined || args.configDir !== undefined) {
         throw new HostedPolicyError("Host filesystem operations are unavailable remotely.");
@@ -171,8 +197,42 @@ export class HostedBudget {
 const privateKeys = /^(?:jarPath|decompPath|sourcePath|graphPath|cacheRoot|indexPath|cachedAt|outDir|outputDir|savedTo|decompiled|indexed|embeddedCount|embedSource|embedUpdatedAt)$/i;
 const sourceKeys = /^(?:source|content|text|snippet|answer|bytecode|result|raw)$/i;
 
-export function boundHostedResult(tool: string, args: Record<string, unknown>, result: CallToolResult, limits: HostedLimits): CallToolResult {
+export function boundHostedResult(tool: string, args: Record<string, unknown>, result: CallToolResult, limits: HostedLimits,
+    allowMinecraftSource = false): CallToolResult {
     if (result.isError) return failure("Request failed. Check the arguments or ask the operator to inspect the server log.");
+    if (tool === "mc_source" && !allowMinecraftSource && ["search_code", "search_indexed"].includes(String(args.action))) {
+        result = { content: result.content.map(block => {
+            if (block.type !== "text") throw new HostedPolicyError("This response format is unavailable remotely.");
+            let rows: unknown;
+            try { rows = JSON.parse(block.text); } catch { throw new HostedPolicyError("Minecraft search response unavailable."); }
+            if (!Array.isArray(rows)) throw new HostedPolicyError("Minecraft search response unavailable.");
+            const projected = rows.map(row => {
+                if (!row || typeof row !== "object") throw new HostedPolicyError("Minecraft search response unavailable.");
+                const item = row as Record<string, unknown>;
+                if (args.action === "search_indexed") {
+                    if (typeof item.className !== "string") throw new HostedPolicyError("Minecraft search response unavailable.");
+                    return { className: item.className };
+                }
+                if (typeof item.file !== "string" || typeof item.line !== "number") throw new HostedPolicyError("Minecraft search response unavailable.");
+                return { file: item.file.replace(/\\/g, "/"), line: item.line };
+            });
+            return { type: "text" as const, text: JSON.stringify(projected) };
+        }) };
+    }
+    if (tool === "project" && !allowMinecraftSource && args.action === "search") {
+        result = { content: result.content.map(block => {
+            if (block.type !== "text") throw new HostedPolicyError("This response format is unavailable remotely.");
+            let value: unknown;
+            try { value = JSON.parse(block.text); } catch { throw new HostedPolicyError("Project search response unavailable."); }
+            if (!value || typeof value !== "object" || !Array.isArray((value as Record<string, unknown>).results))
+                throw new HostedPolicyError("Project search response unavailable.");
+            const data = value as Record<string, unknown>;
+            return { type: "text" as const, text: JSON.stringify({ ...data,
+                results: (data.results as Array<Record<string, unknown>>).filter(row =>
+                    typeof row?.className === "string" && !/^net[./]minecraft[./]/i.test(row.className)),
+            }) };
+        }) };
+    }
     let truncated = false;
     let remainingLines = limits.lines;
     const clip = (text: string) => {
@@ -232,14 +292,15 @@ function failure(text: string): CallToolResult {
 }
 
 export async function runHostedTool(tool: string, input: Record<string, unknown>, subject: string,
-    limits: HostedLimits, budget: HostedBudget, run: (args: Record<string, unknown>) => Promise<CallToolResult>): Promise<CallToolResult> {
+    limits: HostedLimits, budget: HostedBudget, run: (args: Record<string, unknown>) => Promise<CallToolResult>,
+    allowMinecraftSource = false): Promise<CallToolResult> {
     try {
         await budget.charge(subject, limits, 1, 0);
-        const args = prepareHostedArgs(tool, input, limits);
+        const args = prepareHostedArgs(tool, input, limits, allowMinecraftSource);
         const review = await guardHostedMod(tool, args);
         const result = review.blocked
             ? boundHostedResult("mod_license", { action: "check" }, review.blocked, limits)
-            : attachLicenseNotices(boundHostedResult(tool, args, await run(args), limits), review.notices ?? []);
+            : attachLicenseNotices(boundHostedResult(tool, args, await run(args), limits, allowMinecraftSource), review.notices ?? []);
         // License notices must remain complete even when all 200 source lines are
         // used. Reject the whole response if source plus notices exceeds the cap.
         if (Buffer.byteLength(JSON.stringify(result.content)) > limits.responseBytes) {

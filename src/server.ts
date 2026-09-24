@@ -35,7 +35,7 @@ import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolve
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources, searchPlatforms, batchCheckUpdates } from "./tools/platform.js";
 import { listMcVersions, listNeoForgeVersions, listFabricApiVersions, listForgeVersions, downloadNeoForge, downloadFabricApi, downloadForge } from "./platform.js";
 import {
-    searchMinecraftClass, getMinecraftSource, getMcClassBytecode, getMcClassMembers,
+    searchMinecraftClass, getMinecraftSource, getMinecraftSourceInfo, getMcClassBytecode, getMcClassMembers,
     findMcReferences, getMcInheritance, diffMcVersions,
     decompileMcVersion, decompileMcVersionStatus, searchMcCode,
     validateAccessWidener, analyzeMixin, searchEvents,
@@ -90,7 +90,7 @@ import { CACHE_ROOT } from "./cache.js";
 import { projectAction, projectToolSchema } from "./tools/project.js";
 import { runtimeAction, runtimeToolSchema, runtimeHub } from "./tools/runtime.js";
 import { reportIssue, reportIssueSchema } from "./tools/report-issue.js";
-import { HOSTED_ACTIONS, HostedBudget, HostedPolicyError, hostedLimits, hostedPrincipal, runHostedTool } from "./hosted-policy.js";
+import { hostedActions, hostedMinecraftSourceAccess, hostedMinecraftSourceTeams, HostedBudget, HostedPolicyError, hostedLimits, hostedPrincipal, runHostedTool } from "./hosted-policy.js";
 import { reviewHostedMod, localModPlan } from "./hosted-mod-license.js";
 
 // Load .env — try ~/.modlens/.env first (npx/installed users), then local .env (git-clone users)
@@ -217,14 +217,14 @@ class HttpBodyTooLargeError extends Error {}
 
 const hostedBudget = new HostedBudget();
 
-function createMcpServer(principal?: string): McpServer {
+function createMcpServer(principal?: string, allowMinecraftSource = false): McpServer {
     const server = new McpServer({ name: "modlens", version: pkg.version }, {
         instructions: "ModLens supports optional Minecraft 26.3 runtime control. Call runtime help/setup. On remote MCP, runtime returns executed:false and a local execution plan: use your local terminal/file tools to run the --runtime helper on the Minecraft PC. No second MCP connection or tunnel is needed. Local stdio executes directly. Inspect sessions/capabilities after launch; use events/command/artifact for input, screenshots, crashes and allocation reports. Never describe a returned plan as an executed action. Idle AI wake-up is not provided. To report a ModLens bug, use report_issue help/prepare for a GitHub draft and submission instructions; the caller files it using existing GitHub access when requested by the user.",
     });
     const limits = principal === undefined ? undefined : hostedLimits();
     function registerTool<S extends z.ZodRawShape>(name: string, description: string, schema: S, handler: ToolCallback<S>): void {
         if (!limits || principal === undefined) { server.tool(name, description, schema, handler); return; }
-        const actions = HOSTED_ACTIONS[name];
+        const actions = hostedActions(name, allowMinecraftSource);
         if (!actions) return;
         const actionSchema = schema.action;
         let publicSchema = actionSchema instanceof z.ZodEnum
@@ -238,7 +238,8 @@ function createMcpServer(principal?: string): McpServer {
         const publicDescription = `${description.split(". ")[0]}. Hosted access: ${actions.filter(Boolean).join(", ") || "analysis"}. Responses and cumulative usage are bounded; use focused queries and source ranges.`;
         server.tool(name, publicDescription, publicSchema, (async (args: Record<string, unknown>, extra: unknown) =>
             runHostedTool(name, args, principal, limits, hostedBudget,
-                async bounded => (handler as (args: Record<string, unknown>, extra: unknown) => any)(bounded, extra))) as ToolCallback<S>);
+                async bounded => (handler as (args: Record<string, unknown>, extra: unknown) => any)(bounded, extra),
+                allowMinecraftSource)) as ToolCallback<S>);
     }
 
 registerTool("report_issue",
@@ -729,9 +730,9 @@ registerTool(
 
 registerTool(
     "mc_source",
-    "Vanilla Minecraft source code, decompilation, and validation — use this for vanilla MC classes (net/minecraft/...), NOT mod_bytecode. Requires version param. action=search_class|get_source|bytecode|class_members|find_refs|inheritance|diff|diff_detailed|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin|index_semantic|search_semantic|get_paths. get_paths returns the on-disk jar, decompiled source directory, and index paths so the agent can grep/search files natively. diff_detailed gives AST-level method/field changes with breaking-change flags per class; add semantic=true for cosine similarity scoring (requires Ollama + index_semantic run first). index_semantic/search_semantic require Ollama running.",
+    "Vanilla Minecraft source code, decompilation, and validation — use this for vanilla MC classes (net/minecraft/...), NOT mod_bytecode. Requires version param. action=search_class|source_info|get_source|bytecode|class_members|find_refs|inheritance|diff|diff_detailed|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin|index_semantic|search_semantic|get_paths. source_info returns cached line count without source text or decompilation. get_paths returns the on-disk jar, decompiled source directory, and index paths so the agent can grep/search files natively. diff_detailed gives AST-level method/field changes with breaking-change flags per class; add semantic=true for cosine similarity scoring (requires Ollama + index_semantic run first). index_semantic/search_semantic require Ollama running.",
     {
-        action:     z.enum(["search_class","get_source","bytecode","class_members","find_refs","inheritance","diff","diff_detailed","decompile","decompile_status","search_code","index","search_indexed","search_events","validate_aw","analyze_mixin","index_semantic","search_semantic","get_paths"]),
+        action:     z.enum(["search_class","source_info","get_source","bytecode","class_members","find_refs","inheritance","diff","diff_detailed","decompile","decompile_status","search_code","index","search_indexed","search_events","validate_aw","analyze_mixin","index_semantic","search_semantic","get_paths"]),
         version:    z.string().optional(),
         versionA:   z.string().optional(),
         versionB:   z.string().optional(),
@@ -759,6 +760,7 @@ registerTool(
         let result: unknown;
         switch (action) {
             case "search_class":    result = await searchMinecraftClass(v!, query ?? className); break;
+            case "source_info":     result = await getMinecraftSourceInfo(v!, className!); break;
             case "get_source":      result = await getMinecraftSource(v!, className!, startLine, endLine, maxLines); break;
             case "bytecode":        result = await getMcClassBytecode(v!, className!); break;
             case "class_members":   result = await getMcClassMembers(v!, className!); break;
@@ -1408,10 +1410,12 @@ async function startHttpServer(port: number): Promise<void> {
     if (restricted) hostedLimits(); // Reject invalid operator configuration at startup.
     const proxySecret = process.env.MODLENS_HOSTED_PROXY_SECRET;
     if (proxySecret && proxySecret.length < 32) throw new Error("MODLENS_HOSTED_PROXY_SECRET must have at least 32 characters");
+    const sourceTeams = restricted ? hostedMinecraftSourceTeams(process.env, proxySecret) : new Set<string>();
 
     // Active sessions keyed by Mcp-Session-Id header.
     const transports = new Map<string, StreamableHTTPServerTransport>();
     const sessionOwners = new Map<string, string>();
+    const sessionSourceAccess = new Map<string, boolean>();
 
     const readBody = (req: IncomingMessage): Promise<unknown> =>
         new Promise((resolve, reject) => {
@@ -1468,10 +1472,12 @@ async function startHttpServer(port: number): Promise<void> {
 
         try {
             const principal = restricted ? hostedPrincipal(req.headers, proxySecret) : undefined;
+            const allowMinecraftSource = restricted && hostedMinecraftSourceAccess(req.headers, sourceTeams);
             // Existing session — route to its transport.
             if (sessionId) {
                 const transport = transports.get(sessionId);
-                if (!transport || (restricted && sessionOwners.get(sessionId) !== principal)) {
+                if (!transport || (restricted && (sessionOwners.get(sessionId) !== principal
+                    || sessionSourceAccess.get(sessionId) !== allowMinecraftSource))) {
                     return sendJson(res, 404, {
                         jsonrpc: "2.0",
                         error: { code: -32001, message: "Session not found" },
@@ -1498,15 +1504,17 @@ async function startHttpServer(port: number): Promise<void> {
                     onsessioninitialized: (id) => {
                         transports.set(id, transport);
                         if (principal !== undefined) sessionOwners.set(id, principal);
+                        if (principal !== undefined) sessionSourceAccess.set(id, allowMinecraftSource);
                     },
                 });
                 transport.onclose = () => {
                     if (transport.sessionId) {
                         transports.delete(transport.sessionId);
                         sessionOwners.delete(transport.sessionId);
+                        sessionSourceAccess.delete(transport.sessionId);
                     }
                 };
-                const server = createMcpServer(principal);
+                const server = createMcpServer(principal, allowMinecraftSource);
                 await server.connect(transport);
                 await transport.handleRequest(req, res, body);
                 return;
