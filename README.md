@@ -1068,12 +1068,17 @@ node dist/cli.js check-updates 2
 
 ## Hosted access limits
 
-HTTP MCP (`MCP_PORT`) enables hosted limits by default; local stdio retains full access. Public HTTP returns Minecraft class locations, members, references, mixin and version analysis, and source metadata, without Minecraft source text or bytecode. `source_info` reports cached line counts; `search_code` reports matching files and lines (`0` when no exact line is available). Line numbers may differ from a client's local decompilation.
+HTTP MCP (`MCP_PORT`) enables hosted limits by default; local stdio retains full access. Direct HTTP connections from RFC 1918 IPv4 peers (`10/8`, `172.16/12`, `192.168/16`) also get full tool access by default, including whole-mod and whole-Minecraft decompilation, without gateway or OAuth authentication. Set `MODLENS_RFC1918_BYPASS=0` to require normal hosted authentication and limits for these clients. Loopback and IPv6 addresses do not match this bypass.
 
-The first hosted Minecraft request for a version queues private full-version decompilation and indexing. Public `get_source` prioritizes that class and returns preparation status instead of source; `index_status` reports full-version progress. Bulk commands, exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access remain local-only.
+The check uses the TCP peer address, including IPv4-mapped IPv6 addresses, and ignores claimed client IP headers. Requests carrying `Forwarded`, `X-Forwarded-For`, `X-Real-IP`, or ModLens gateway identity headers follow normal hosted access. If a reverse proxy reaches the server from an RFC 1918 address, configure it to send a forwarding header for **every** request or disable the bypass; otherwise its public clients may appear to be private peers. Private clients must connect directly to use this allowance.
+
+Public HTTP returns Minecraft class locations, members, references, mixin and version analysis, and source metadata, without Minecraft source text or bytecode. `source_info` reports cached line counts; `search_code` reports matching files and lines (`0` when no exact line is available). Line numbers may differ from a client's local decompilation.
+
+The first hosted Minecraft request for a version queues private full-version decompilation and indexing. Public `get_source` prioritizes that class and returns preparation status instead of source; `index_status` reports full-version progress. Bulk commands, exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access remain unavailable to public hosted clients.
 
 | Setting | Default | Scope |
 | --- | --- | --- |
+| `MODLENS_RFC1918_BYPASS` | enabled | Set to `0` to disable private-peer full access |
 | `MODLENS_HOSTED_SOURCE_LINES` | 200 | Source/bytecode lines per response, shared across search snippets |
 | `MODLENS_HOSTED_RESPONSE_BYTES` | 131072 (128 KiB) | Serialized text content per tool response |
 | `MODLENS_HOSTED_DAILY_BYTES` | 5242880 (5 MiB) | Delivered tool content per account per UTC day |
@@ -1100,6 +1105,12 @@ npx -y @creeperhost/modlens-mcp --local-mod --request-file local-request.json
 ### Bind allowances to authenticated accounts
 
 For built-in OAuth sign-in, set `MODLENS_HOSTED_AUTH=oauth` and configure `MODLENS_OAUTH_PUBLIC_URL` (the public `/mcp` URL), `MODLENS_OAUTH_ISSUER`, `MODLENS_OAUTH_CLIENT_ID`, `MODLENS_OAUTH_SCOPES`, and a stable base64-encoded 32-byte `MODLENS_OAUTH_STORAGE_KEY`. Set `MODLENS_OAUTH_PROFILE_URL` unless provider discovery supplies a userinfo endpoint. The provider must support authorization code with S256 PKCE and refresh tokens for persistent sign-in. Register `<public origin>/oauth/upstream/callback` as the provider client's redirect URI. `MODLENS_OAUTH_CLIENT_SECRET` is optional. `MODLENS_OAUTH_SUBJECT_FIELD` defaults to `sub`; optional `MODLENS_OAUTH_REQUIRED_FIELD` and `MODLENS_OAUTH_REQUIRED_VALUE` restrict access using a profile field. The OAuth routes and well-known metadata must be reachable through the public HTTPS origin. OAuth mode does not enable hosted Minecraft source.
+
+Dynamic client registration accepts the optional `client_name` metadata field. The consent page displays this self-reported name alongside the registered callback origin. Existing clients must register again to supply a name; clients without one appear as "Unnamed application".
+
+OAuth clients, short-lived authorization state, grants, and tokens are stored in the configured database. A multi-replica deployment must point every replica at the same persistent database and use the same `MODLENS_OAUTH_STORAGE_KEY`; the embedded SQLite default is suitable only for a single replica. Otherwise, a browser redirect can land on a replica that cannot see the authorization created by the previous request and fail with `invalid_grant`.
+
+The server writes structured OAuth lifecycle events to stderr with a short `flow` identifier. Failures also include an `incident` reference shown on browser-facing error pages, so one report can be matched to its server log. These events include the stage, route, status, error code, hashed client reference, and redirect origin where relevant; authorization codes, state values, PKCE material, tokens, provider profiles, and subjects are never logged.
 
 For gateway authentication (the default HTTP mode), put an authenticated HTTPS gateway in front of the server. Set `MODLENS_HOSTED_PROXY_SECRET` to a random secret of at least 32 characters. The gateway must remove caller-provided `x-modlens-*` headers and inject:
 

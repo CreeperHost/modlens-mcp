@@ -28,13 +28,15 @@ const profiles = new Map();
 let partner = true;
 let subject = 'customer:42';
 let serial = 0;
+let metadataRequests = 0;
 const provider = createServer(async (req, res) => {
     const url = new URL(req.url, issuer);
     const write = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); };
-    if (url.pathname === '/.well-known/oauth-authorization-server') return write(200, {
-        issuer, authorization_endpoint: issuer + '/authorize', token_endpoint: issuer + '/token',
-        authorization_response_iss_parameter_supported: true,
-    });
+    if (url.pathname === '/.well-known/oauth-authorization-server') {
+        if (++metadataRequests === 1) return write(503, { error: 'temporarily_unavailable', access_token: 'metadata-secret' });
+        return write(200, { issuer, authorization_endpoint: issuer + '/authorize', token_endpoint: issuer + '/token',
+            authorization_response_iss_parameter_supported: true });
+    }
     if (url.pathname === '/authorize') {
         const callback = new URL(url.searchParams.get('redirect_uri'));
         callback.searchParams.set('code', 'fake-code');
@@ -70,16 +72,17 @@ const env = { ...process.env, MCP_PORT: String(mcpPort), MCP_HOST: '127.0.0.1',
     MODLENS_OAUTH_PROFILE_URL: issuer + '/profile', MODLENS_OAUTH_REQUIRED_FIELD: 'is_partner',
     MODLENS_OAUTH_REQUIRED_VALUE: 'true', MODLENS_OAUTH_STORAGE_KEY: randomBytes(32).toString('base64') };
 let server;
+let serverOutput = '';
 async function start() {
     server = spawn(process.execPath, [entry], { cwd: root, env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
-    let output = '';
-    server.stderr.on('data', chunk => { output += chunk; });
+    serverOutput = '';
+    server.stderr.on('data', chunk => { serverOutput += chunk; });
     await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`ModLens startup timed out: ${output}`)), 20000);
-        const ready = () => { if (output.includes('listening on')) { clearTimeout(timer); server.stderr.off('data', ready); resolve(); } };
+        const timer = setTimeout(() => reject(new Error(`ModLens startup timed out: ${serverOutput}`)), 20000);
+        const ready = () => { if (serverOutput.includes('listening on')) { clearTimeout(timer); server.stderr.off('data', ready); resolve(); } };
         server.stderr.on('data', ready);
         server.once('error', reject);
-        server.once('exit', () => { clearTimeout(timer); reject(new Error(`ModLens exited: ${output}`)); });
+        server.once('exit', () => { clearTimeout(timer); reject(new Error(`ModLens exited: ${serverOutput}`)); });
         ready();
     });
 }
@@ -97,7 +100,7 @@ const initialize = (access, extra = {}) => fetchManual(resource, { method: 'POST
     protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'oauth-test', version: '1' },
 } }) });
 let clientId;
-async function login() {
+async function login(expectedName = 'ChatGPT &amp; Codex &lt;test&gt;') {
     const verifier = randomBytes(32).toString('base64url');
     const pkce = createHash('sha256').update(verifier).digest('base64url');
     const callback = 'http://127.0.0.1:54321/callback';
@@ -111,11 +114,36 @@ async function login() {
     assert.equal(back.status, 302);
     const done = await fetchManual(back.headers.get('location'));
     assert.equal(done.status, 200);
-    const approval = (await done.text()).match(/name="approval" value="([^"]+)"/)?.[1];
+    assert.match(done.headers.get('content-security-policy'), /default-src 'none'/);
+    assert.match(done.headers.get('content-security-policy'), /form-action 'self' http:\/\/127\.0\.0\.1:54321;/,
+        'consent form permits its registered OAuth callback after the approval redirect');
+    const consentPage = await done.text();
+    assert.match(consentPage, /CREEPERHOST/);
+    assert.match(consentPage, /Allow access\?/);
+    if (expectedName) {
+        assert.ok(consentPage.includes(expectedName), 'registered application names are displayed and HTML-escaped');
+        assert.match(consentPage, /Name supplied by application/);
+    } else {
+        assert.match(consentPage, /Unnamed application/);
+        assert.match(consentPage, /No application name supplied/);
+    }
+    assert.match(consentPage, /Callback: http:\/\/127\.0\.0\.1:54321/);
+    assert.match(consentPage, /Only continue if you started this request/);
+    const approval = consentPage.match(/name="approval" value="([^"]+)"/)?.[1];
     assert.ok(approval);
     const approved = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/approve`, { method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ approval, decision: 'allow' }) });
     assert.equal(approved.status, 302);
+    const duplicateApproval = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/approve`, { method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ approval, decision: 'allow' }) });
+    assert.equal(duplicateApproval.status, 302);
+    assert.equal(duplicateApproval.headers.get('location'), approved.headers.get('location'),
+        'a retried consent submission receives the original authorization redirect');
+    const changedDecision = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/approve`, { method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ approval, decision: 'deny' }) });
+    assert.equal(changedDecision.status, 400);
+    assert.match(changedDecision.headers.get('content-type'), /text\/html/);
+    assert.match(await changedDecision.text(), /Expired or reused consent request/);
     const result = new URL(approved.headers.get('location'));
     assert.equal(result.searchParams.get('state'), 'client-state');
     assert.equal(result.searchParams.get('iss'), `http://127.0.0.1:${mcpPort}`);
@@ -128,19 +156,33 @@ async function login() {
     const replay = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/token`, { method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: tokenBody });
     assert.equal(replay.status, 400, 'authorization code cannot be replayed');
+    assert.deepEqual(await replay.json(), { error: 'invalid_grant', error_description: 'Expired or reused authorization code' });
+    assert.match(serverOutput, /"event":"consent_submission_retried"/);
+    assert.match(serverOutput, /"event":"token_issued"/);
+    assert.match(serverOutput, /"event":"request_failed".*"route":"\/oauth\/token"/);
+    for (const secret of [approval, result.searchParams.get('code'), verifier, tokens.access_token, tokens.refresh_token])
+        assert.ok(!serverOutput.includes(secret), 'OAuth logs must not contain credentials or bearer material');
     return tokens;
 }
 try {
     await start();
+    assert.match(serverOutput, /"event":"provider_metadata_retry".*"status":503/,
+        'transient provider discovery failures are logged and retried');
+    assert.match(serverOutput, /"event":"provider_metadata_response".*temporarily_unavailable/,
+        'failed provider responses include a useful body excerpt');
+    assert.ok(!serverOutput.includes('metadata-secret'), 'provider response logging redacts token fields');
     const absent = await fetchManual(resource);
     assert.equal(absent.status, 401);
     assert.match(absent.headers.get('www-authenticate'), /resource_metadata=/);
     const metadata = await (await fetchManual(`http://127.0.0.1:${mcpPort}/.well-known/oauth-protected-resource/mcp`)).json();
     assert.deepEqual(metadata.authorization_servers, [`http://127.0.0.1:${mcpPort}`]);
     const registration = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/register`, { method: 'POST',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['http://127.0.0.1:54321/callback'] }) });
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            redirect_uris: ['http://127.0.0.1:54321/callback'], client_name: 'ChatGPT & Codex <test>' }) });
     assert.equal(registration.status, 201);
-    clientId = (await registration.json()).client_id;
+    const registered = await registration.json();
+    assert.equal(registered.client_name, 'ChatGPT & Codex <test>');
+    clientId = registered.client_id;
     const tokens = await login();
     assert.match(tokens.access_token, /^mla_/);
     assert.match(tokens.refresh_token, /^mlr_/);
@@ -194,6 +236,11 @@ try {
     const generalAccount = await login();
     assert.equal((await initialize(generalAccount.access_token)).status, 200,
         'self-hosted mode accepts a valid account without a claim rule');
+    const unnamedRegistration = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/register`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['http://127.0.0.1:54321/callback'] }) });
+    assert.equal(unnamedRegistration.status, 201);
+    clientId = (await unnamedRegistration.json()).client_id;
+    await login(null);
     console.log('Hosted OAuth discovery, registration, sign-in, persistence, refresh, replay, session, revocation, partner, gateway-header and self-hosted checks passed.');
 } finally {
     await stop();
