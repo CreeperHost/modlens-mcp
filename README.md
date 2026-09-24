@@ -1067,12 +1067,17 @@ node dist/cli.js check-updates 2
 
 ## Hosted access limits
 
-HTTP MCP (`MCP_PORT`) enables hosted limits by default; local stdio retains full access. Public HTTP returns Minecraft class locations, members, references, mixin and version analysis, and source metadata, without Minecraft source text or bytecode. `source_info` reports cached line counts; `search_code` reports matching files and lines (`0` when no exact line is available). Line numbers may differ from a client's local decompilation.
+HTTP MCP (`MCP_PORT`) enables hosted limits by default; local stdio retains full access. Direct HTTP connections from RFC 1918 IPv4 peers (`10/8`, `172.16/12`, `192.168/16`) also get full tool access by default, including whole-mod and whole-Minecraft decompilation, without gateway or OAuth authentication. Set `MODLENS_RFC1918_BYPASS=0` to require normal hosted authentication and limits for these clients. Loopback and IPv6 addresses do not match this bypass.
 
-The first hosted Minecraft request for a version queues private full-version decompilation and indexing. Public `get_source` prioritizes that class and returns preparation status instead of source; `index_status` reports full-version progress. Bulk commands, exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access remain local-only.
+The check uses the TCP peer address, including IPv4-mapped IPv6 addresses, and ignores claimed client IP headers. Requests carrying `Forwarded`, `X-Forwarded-For`, `X-Real-IP`, or ModLens gateway identity headers follow normal hosted access. If a reverse proxy reaches the server from an RFC 1918 address, configure it to send a forwarding header for **every** request or disable the bypass; otherwise its public clients may appear to be private peers. Private clients must connect directly to use this allowance.
+
+Public HTTP returns Minecraft class locations, members, references, mixin and version analysis, and source metadata, without Minecraft source text or bytecode. `source_info` reports cached line counts; `search_code` reports matching files and lines (`0` when no exact line is available). Line numbers may differ from a client's local decompilation.
+
+The first hosted Minecraft request for a version queues private full-version decompilation and indexing. Public `get_source` prioritizes that class and returns preparation status instead of source; `index_status` reports full-version progress. Bulk commands, exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access remain unavailable to public hosted clients.
 
 | Setting | Default | Scope |
 | --- | --- | --- |
+| `MODLENS_RFC1918_BYPASS` | enabled | Set to `0` to disable private-peer full access |
 | `MODLENS_HOSTED_SOURCE_LINES` | 200 | Source/bytecode lines per response, shared across search snippets |
 | `MODLENS_HOSTED_RESPONSE_BYTES` | 131072 (128 KiB) | Serialized text content per tool response |
 | `MODLENS_HOSTED_DAILY_BYTES` | 5242880 (5 MiB) | Delivered tool content per account per UTC day |

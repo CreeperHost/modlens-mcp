@@ -93,6 +93,7 @@ import { runtimeAction, runtimeToolSchema, runtimeHub } from "./tools/runtime.js
 import { reportIssue, reportIssueSchema } from "./tools/report-issue.js";
 import { hostedActions, hostedMinecraftSourceAccess, hostedMinecraftSourceTeams, HostedBudget, HostedPolicyError, hostedLimits, hostedPrincipal, runHostedTool } from "./hosted-policy.js";
 import { HostedOAuth, HostedOAuthError } from "./hosted-oauth.js";
+import { isRfc1918Peer } from "./private-network.js";
 import { reviewHostedMod, localModPlan } from "./hosted-mod-license.js";
 
 // Load .env — try ~/.modlens/.env first (npx/installed users), then local .env (git-clone users)
@@ -1509,13 +1510,16 @@ async function startHttpServer(port: number): Promise<void> {
         const sessionId = getHeader(req, "mcp-session-id");
 
         try {
-            const principal = oauth ? await oauth.authenticate(req)
+            const privateAccess = restricted && isRfc1918Peer(req.socket.remoteAddress, req.headers);
+            const principal = privateAccess ? undefined : oauth ? await oauth.authenticate(req)
                 : restricted ? hostedPrincipal(req.headers, proxySecret) : undefined;
-            const allowMinecraftSource = !oauth && restricted && hostedMinecraftSourceAccess(req.headers, sourceTeams);
+            const owner = privateAccess ? `rfc1918:${req.socket.remoteAddress}` : principal;
+            const allowMinecraftSource = !privateAccess && !oauth && restricted
+                && hostedMinecraftSourceAccess(req.headers, sourceTeams);
             // Existing session — route to its transport.
             if (sessionId) {
                 const transport = transports.get(sessionId);
-                if (!transport || (restricted && (sessionOwners.get(sessionId) !== principal
+                if (!transport || (restricted && (sessionOwners.get(sessionId) !== owner
                     || sessionSourceAccess.get(sessionId) !== allowMinecraftSource))) {
                     return sendJson(res, 404, {
                         jsonrpc: "2.0",
@@ -1542,8 +1546,8 @@ async function startHttpServer(port: number): Promise<void> {
                     sessionIdGenerator: () => randomUUID(),
                     onsessioninitialized: (id) => {
                         transports.set(id, transport);
-                        if (principal !== undefined) sessionOwners.set(id, principal);
-                        if (principal !== undefined) sessionSourceAccess.set(id, allowMinecraftSource);
+                        if (restricted && owner !== undefined) sessionOwners.set(id, owner);
+                        if (restricted) sessionSourceAccess.set(id, allowMinecraftSource);
                     },
                 });
                 transport.onclose = () => {
