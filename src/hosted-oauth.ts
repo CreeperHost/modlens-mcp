@@ -31,12 +31,14 @@ const redirect = (res: ServerResponse, url: URL) => {
     res.writeHead(302, { Location: url.toString(), "Cache-Control": "no-store" });
     res.end();
 };
+const htmlCsp = (formAction = "'self'") =>
+    `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`;
 const htmlHeaders = {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy": htmlCsp(),
 };
 const escapeHtml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -61,7 +63,7 @@ main{width:100%;display:flex;flex:1;flex-direction:column;align-items:center;jus
 .brand{display:flex;align-items:center;justify-content:center;margin:0 auto 22px;color:white}.brand-copy{text-align:center;line-height:1}.brand-copy strong{display:block;font-size:21px;font-weight:750;letter-spacing:.13em}.brand-copy small{display:block;margin-top:7px;color:#ffffff73;font-size:10px;font-weight:650;letter-spacing:.31em}
 .card{width:min(638px,calc(100vw - 34px));border:1px solid var(--line);outline:1px solid var(--line-dark);border-radius:10px;overflow:hidden;background:linear-gradient(180deg,var(--panel-top),var(--panel-bottom));box-shadow:0 0 25px rgba(0,0,0,.2)}
 .content{padding:32px;text-align:left}.eyebrow{display:block;margin:0 0 7px;color:${tone === "error" ? "var(--error)" : "#72d96e"};font-size:10px;font-weight:700;letter-spacing:.17em}.content h1{margin:0;color:var(--text);font-family:"Centra No 2","Segoe UI Variable","Segoe UI",sans-serif;font-size:30px;line-height:36px;letter-spacing:-.03em;font-weight:500}.lead,.content>p{margin:9px 0 0;color:#ffffffb3;font-size:14px;line-height:1.6}
-.app{display:flex;align-items:center;gap:12px;margin:20px 0;padding:12px;background:var(--panel-deep);border:1px solid var(--line);border-radius:6px}.app-icon{display:flex;align-items:center;justify-content:center;width:36px;height:36px;flex:0 0 auto;border-radius:50%;background:#06c20020;color:#8cdd88;font:600 12px/1 Consolas,monospace}.app-copy{min-width:0}.app-origin{display:block;overflow:hidden;text-overflow:ellipsis;color:#f0f0f5;font:600 13px/1.45 Consolas,monospace;white-space:nowrap}.app-label{display:block;color:var(--muted);font-size:11px}
+.app{display:flex;align-items:center;gap:12px;margin:20px 0;padding:12px;background:var(--panel-deep);border:1px solid var(--line);border-radius:6px}.app-icon{display:flex;align-items:center;justify-content:center;width:36px;height:36px;flex:0 0 auto;border-radius:50%;background:#06c20020;color:#8cdd88;font:600 12px/1 Consolas,monospace}.app-copy{min-width:0}.app-name{display:block;color:#f0f0f5;font-size:14px}.app-origin{display:block;overflow:hidden;text-overflow:ellipsis;color:#d7dbe0;font:500 12px/1.45 Consolas,monospace;white-space:nowrap}.app-label{display:block;color:var(--muted);font-size:11px}
 .permissions{margin:20px 0;padding-left:22px;color:#d7dbe0;font-size:13px;line-height:1.65}.permissions li+li{margin-top:9px}.permissions li::marker{color:#48c544}
 form{margin:0}.actions{display:grid;grid-template-columns:1fr 1.6fr;gap:12px;margin-top:24px}button{display:inline-flex;min-height:48px;align-items:center;justify-content:center;appearance:none;border:1px solid transparent;border-radius:4px;padding:10px 16px;color:white;font:500 14px/1 "Segoe UI Variable","Segoe UI",sans-serif;cursor:pointer;transition:box-shadow .18s ease,background .18s ease}button:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:3px}.primary{background:linear-gradient(to left,var(--green),var(--green-dark))}.primary:hover{box-shadow:0 0 20px #42d80854}.secondary{background:#242b33;border-color:#343b44}.secondary:hover{background:#2d353e}
 .note{margin:12px 0 0!important;color:#ffffff73!important;font-size:11px!important}.error-code{display:block;margin-top:20px;padding:12px;border:1px solid #d1005650;border-radius:4px;background:#d1005615;color:var(--error);font:12px/1.55 Consolas,monospace;overflow-wrap:anywhere}
@@ -233,6 +235,8 @@ export class HostedOAuth {
         if (!this.ready) this.ready = (async () => {
             await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hosted_oauth_clients (
                 id TEXT PRIMARY KEY, redirect_uris TEXT NOT NULL, created BIGINT NOT NULL)`);
+            await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hosted_oauth_client_metadata (
+                id TEXT PRIMARY KEY, client_name TEXT NOT NULL)`);
             await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hosted_oauth_objects (
                 id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, expires BIGINT NOT NULL)`);
             await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS hosted_oauth_grants (
@@ -300,6 +304,13 @@ export class HostedOAuth {
             `SELECT redirect_uris FROM hosted_oauth_clients WHERE id=$1`, clientId);
         if (rows.length !== 1) throw new HostedOAuthError("Unknown OAuth client", 400, "invalid_client");
         return JSON.parse(rows[0].redirect_uris);
+    }
+
+    private async clientName(clientId: string): Promise<string | undefined> {
+        const db = await this.db();
+        const rows = await db.$queryRawUnsafe<Array<{ client_name: string }>>(
+            `SELECT client_name FROM hosted_oauth_client_metadata WHERE id=$1`, clientId);
+        return rows[0]?.client_name;
     }
 
     private async upstreamToken(values: URLSearchParams): Promise<UpstreamTokens> {
@@ -462,13 +473,20 @@ export class HostedOAuth {
                 !redirects.every(value => typeof value === "string" && callbackSafe(value)) ||
                 (registration.token_endpoint_auth_method && registration.token_endpoint_auth_method !== "none"))
                 throw new HostedOAuthError("Invalid client registration");
+            const clientName = registration.client_name;
+            if (clientName !== undefined && (typeof clientName !== "string" || !clientName.trim() ||
+                clientName.length > 120 || /[\x00-\x1f\x7f]/.test(clientName)))
+                throw new HostedOAuthError("Invalid client name");
             const id = token("mlc_");
             const db = await this.db();
             await db.$executeRawUnsafe(`INSERT INTO hosted_oauth_clients (id,redirect_uris,created) VALUES ($1,$2,$3)`,
                 id, JSON.stringify(redirects), now());
+            if (clientName !== undefined) await db.$executeRawUnsafe(
+                `INSERT INTO hosted_oauth_client_metadata (id,client_name) VALUES ($1,$2)`, id, clientName);
             this.audit("client_registered", { client: this.clientRef(id), redirects: redirects.length });
             json(res, 201, { client_id: id, redirect_uris: redirects, grant_types: ["authorization_code", "refresh_token"],
-                response_types: ["code"], token_endpoint_auth_method: "none" });
+                response_types: ["code"], token_endpoint_auth_method: "none",
+                ...(clientName === undefined ? {} : { client_name: clientName }) });
             return true;
         }
         if (route === "/oauth/authorize" && req.method === "GET") {
@@ -527,13 +545,16 @@ export class HostedOAuth {
                 const approval = await this.putObject("approval", { ...state, upstream, subject: profile.subject }, 600);
                 this.audit("consent_presented", { flow: state.flowId, client: this.clientRef(state.clientId),
                     redirectOrigin: callback.origin });
+                const clientName = await this.clientName(state.clientId);
                 const destination = escapeHtml(callback.origin);
                 const content = `<h1>Allow access?</h1><p>The application below wants to connect to your hosted ModLens account.</p>`
-                    + `<div class="app"><span class="app-icon" aria-hidden="true">&gt;_</span><span class="app-copy"><strong class="app-origin">${destination}</strong><small class="app-label">Requesting application</small></span></div>`
+                    + `<div class="app"><span class="app-icon" aria-hidden="true">&gt;_</span><span class="app-copy"><strong class="app-name">${clientName ? escapeHtml(clientName) : "Unnamed application"}</strong><small class="app-label">${clientName ? "Name supplied by application" : "No application name supplied"}</small><span class="app-origin">Callback: ${destination}</span></span></div>`
                     + `<ul class="permissions"><li>Run hosted ModLens tools on your behalf</li><li>Use your hosted account allowance</li></ul>`
                     + `<form method="post" action="/oauth/approve"><input type="hidden" name="approval" value="${escapeHtml(approval)}"><div class="actions"><button class="secondary" name="decision" value="deny">Cancel</button><button class="primary" name="decision" value="allow">Allow access</button></div></form>`
                     + `<p class="note">Only continue if you started this request in the app.</p>`;
-                res.writeHead(200, htmlHeaders);
+                // Browsers may apply form-action to the redirect after approval as well as the POST.
+                res.writeHead(200, { ...htmlHeaders,
+                    "Content-Security-Policy": htmlCsp(`'self' ${callback.origin}`) });
                 res.end(page("Connect", content));
                 return true;
             }

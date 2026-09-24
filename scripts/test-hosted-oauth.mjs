@@ -98,7 +98,7 @@ const initialize = (access, extra = {}) => fetchManual(resource, { method: 'POST
     protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'oauth-test', version: '1' },
 } }) });
 let clientId;
-async function login() {
+async function login(expectedName = 'ChatGPT &amp; Codex &lt;test&gt;') {
     const verifier = randomBytes(32).toString('base64url');
     const pkce = createHash('sha256').update(verifier).digest('base64url');
     const callback = 'http://127.0.0.1:54321/callback';
@@ -113,9 +113,19 @@ async function login() {
     const done = await fetchManual(back.headers.get('location'));
     assert.equal(done.status, 200);
     assert.match(done.headers.get('content-security-policy'), /default-src 'none'/);
+    assert.match(done.headers.get('content-security-policy'), /form-action 'self' http:\/\/127\.0\.0\.1:54321;/,
+        'consent form permits its registered OAuth callback after the approval redirect');
     const consentPage = await done.text();
     assert.match(consentPage, /CREEPERHOST/);
     assert.match(consentPage, /Allow access\?/);
+    if (expectedName) {
+        assert.ok(consentPage.includes(expectedName), 'registered application names are displayed and HTML-escaped');
+        assert.match(consentPage, /Name supplied by application/);
+    } else {
+        assert.match(consentPage, /Unnamed application/);
+        assert.match(consentPage, /No application name supplied/);
+    }
+    assert.match(consentPage, /Callback: http:\/\/127\.0\.0\.1:54321/);
     assert.match(consentPage, /Only continue if you started this request/);
     const approval = consentPage.match(/name="approval" value="([^"]+)"/)?.[1];
     assert.ok(approval);
@@ -165,9 +175,12 @@ try {
     const metadata = await (await fetchManual(`http://127.0.0.1:${mcpPort}/.well-known/oauth-protected-resource/mcp`)).json();
     assert.deepEqual(metadata.authorization_servers, [`http://127.0.0.1:${mcpPort}`]);
     const registration = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/register`, { method: 'POST',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['http://127.0.0.1:54321/callback'] }) });
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            redirect_uris: ['http://127.0.0.1:54321/callback'], client_name: 'ChatGPT & Codex <test>' }) });
     assert.equal(registration.status, 201);
-    clientId = (await registration.json()).client_id;
+    const registered = await registration.json();
+    assert.equal(registered.client_name, 'ChatGPT & Codex <test>');
+    clientId = registered.client_id;
     const tokens = await login();
     assert.match(tokens.access_token, /^mla_/);
     assert.match(tokens.refresh_token, /^mlr_/);
@@ -207,6 +220,11 @@ try {
     const generalAccount = await login();
     assert.equal((await initialize(generalAccount.access_token)).status, 200,
         'self-hosted mode accepts a valid account without a claim rule');
+    const unnamedRegistration = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/register`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['http://127.0.0.1:54321/callback'] }) });
+    assert.equal(unnamedRegistration.status, 201);
+    clientId = (await unnamedRegistration.json()).client_id;
+    await login(null);
     console.log('Hosted OAuth discovery, registration, sign-in, persistence, refresh, replay, session, revocation, partner, gateway-header and self-hosted checks passed.');
 } finally {
     await stop();
