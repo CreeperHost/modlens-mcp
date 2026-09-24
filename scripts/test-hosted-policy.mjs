@@ -11,6 +11,7 @@ import { once } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import Database from "better-sqlite3";
 
 const root = await mkdtemp(join(tmpdir(), "modlens-hosted-test-"));
 const entry = fileURLToPath(new URL("../dist/server.js", import.meta.url));
@@ -72,7 +73,7 @@ try {
     const publicTools = await publicUser.client.listTools();
     const publicMc = publicTools.tools.find(t => t.name === "mc_source");
     assert.ok(publicMc.inputSchema.properties.action.enum.includes("source_info"));
-    assert.ok(!publicMc.inputSchema.properties.action.enum.includes("get_source"));
+    assert.ok(publicMc.inputSchema.properties.action.enum.includes("get_source"));
     assert.ok(!publicMc.inputSchema.properties.action.enum.includes("bytecode"));
     const info = await publicUser.client.callTool({ name: "mc_source", arguments: {
         action: "source_info", version: "1.21.1", className: "example.Fixture",
@@ -82,14 +83,33 @@ try {
         action: "source_info", version: "1.21.1", className: "example.Missing",
     } });
     assert.deepEqual(JSON.parse(missingInfo.content[0].text), { version: "1.21.1", className: "example/Missing", cached: false, totalLines: null });
+    // Seed synthetic version metadata so preparation can index the cached fixture offline.
+    const fixtureDb = new Database(join(root, "usage.db"));
+    fixtureDb.prepare("INSERT INTO mc_versions (version_id, type, release_time) VALUES (?, ?, ?)")
+        .run("1.21.1", "release", Date.now());
+    fixtureDb.close();
     const publicSearch = await publicUser.client.callTool({ name: "mc_source", arguments: {
         action: "search_code", version: "1.21.1", query: "Synthetic fixture line 319",
     } });
     assert.ok(!publicSearch.isError, JSON.stringify(publicSearch));
     assert.deepEqual(JSON.parse(publicSearch.content[0].text), [{ file: "example/Fixture.java", line: 319 }]);
     const publicSource = await read(publicUser.client);
-    assert.ok(publicSource.isError);
+    assert.ok(!publicSource.isError, JSON.stringify(publicSource));
     assert.ok(!JSON.stringify(publicSource).includes("Synthetic fixture"));
+    assert.equal(JSON.parse(publicSource.content[0].text).status, "preparing");
+    let prepared;
+    for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        prepared = JSON.parse((await read(publicUser.client)).content[0].text);
+        if (prepared.status === "ready") break;
+    }
+    assert.equal(prepared.status, "ready", JSON.stringify(prepared));
+    assert.equal(prepared.indexed, true);
+    const indexedSearch = await publicUser.client.callTool({ name: "mc_source", arguments: {
+        action: "search_indexed", version: "1.21.1", query: "fixture",
+    } });
+    assert.ok(!indexedSearch.isError, JSON.stringify(indexedSearch));
+    assert.deepEqual(JSON.parse(indexedSearch.content[0].text), [{ className: "example/Fixture" }]);
     const { client, transport } = await connect("developer-a", "partner");
     const listed = await client.listTools();
     assert.ok(listed.tools.some(t => t.name === "report_issue"), "Hosted users must discover issue reporting");

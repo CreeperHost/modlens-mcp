@@ -74,9 +74,10 @@ describe("hosted identity and arguments", () => {
         expect(hostedMinecraftSourceAccess({ "x-modlens-team-id": "partner" }, teams)).toBe(true);
         expect(hostedMinecraftSourceAccess({ "x-modlens-team-id": "other" }, teams)).toBe(false);
         expect(hostedMinecraftSourceTeams({ MODLENS_HOSTED_MC_SOURCE: "0", MODLENS_HOSTED_MC_SOURCE_TEAMS: "partner" }, "x".repeat(32)).size).toBe(0);
-        expect(hostedActions("mc_source")).not.toContain("get_source");
+        expect(hostedActions("mc_source")).toContain("get_source");
+        expect(hostedActions("mc_source")).not.toContain("bytecode");
         expect(hostedActions("mc_source", true)).toContain("get_source");
-        expect(() => prepareHostedArgs("mc_source", { action: "get_source" }, limits)).toThrow();
+        expect(prepareHostedArgs("mc_source", { action: "get_source" }, limits).action).toBe("get_source");
         expect(() => prepareHostedArgs("mc_source", { action: "bytecode" }, limits)).toThrow();
         expect(() => prepareHostedArgs("project", { action: "source", className: "net.minecraft.world.Level" }, limits)).toThrow();
         expect(prepareHostedArgs("mc_source", { action: "get_source" }, limits, true).action).toBe("get_source");
@@ -86,19 +87,20 @@ describe("hosted identity and arguments", () => {
 describe("hosted output boundary", () => {
     it("clips unpaginated source, including JSON-shaped source", () => {
         for (const source of [lines(500), JSON.stringify(Array.from({ length: 500 }, () => "code"), null, 2)]) {
-            const result = boundHostedResult("mc_source", { action: "get_source" }, text(source), limits);
+            const result = boundHostedResult("mc_source", { action: "get_source" }, text(source), limits, true);
             expect(result.content[0]).toMatchObject({ type: "text", text: source.split("\n").slice(0, 200).join("\n") });
         }
     });
     it("preserves already-paginated source and slices raw bytecode exactly once", () => {
         const args = { action: "bytecode", startLine: 201, maxLines: 200 };
         const expected = lines(600).split("\n").slice(200, 400).join("\n");
-        const result = boundHostedResult("mc_source", args, text(lines(600)), limits);
+        const result = boundHostedResult("mc_source", args, text(lines(600)), limits, true);
         expect(result.content[0]).toMatchObject({ text: expected });
         const project = boundHostedResult("project", args, json({ result: lines(600) }), limits);
         expect(JSON.parse((project.content[0] as any).text).result).toBe(expected);
         for (const tool of ["mc_source", "mod"]) {
-            expect(boundHostedResult(tool, { action: tool === "mod" ? "source" : "get_source", startLine: 201 }, text(expected), limits).content[0])
+            expect(boundHostedResult(tool, { action: tool === "mod" ? "source" : "get_source", startLine: 201 }, text(expected), limits,
+                tool === "mc_source").content[0])
                 .toMatchObject({ text: expected });
         }
     });
@@ -119,6 +121,17 @@ describe("hosted output boundary", () => {
         expect(JSON.parse((indexed.content[0] as any).text)).toEqual([{ className: "net/minecraft/Test" }]);
         expect(JSON.stringify(code) + JSON.stringify(indexed)).not.toContain("SECRET_SOURCE");
     });
+    it("projects public source preparation to an explicit metadata shape", () => {
+        const result = boundHostedResult("mc_source", { action: "get_source" }, json({
+            version: "1.21.1", className: "net/minecraft/Test", cached: true, indexed: false,
+            totalLines: 300, status: "preparing", source: "SECRET_SOURCE",
+        }), limits);
+        expect(JSON.parse((result.content[0] as any).text)).toEqual({
+            version: "1.21.1", className: "net/minecraft/Test", cached: true, indexed: false,
+            totalLines: 300, status: "preparing",
+        });
+        expect(() => boundHostedResult("mc_source", { action: "get_source" }, text("SECRET_SOURCE"), limits)).toThrow();
+    });
     it("omits Minecraft source matches from public project search", () => {
         const result = boundHostedResult("project", { action: "search" }, json({ results: [
             { className: "net/minecraft/Test", line: 1, text: "SECRET_SOURCE" },
@@ -132,7 +145,7 @@ describe("hosted output boundary", () => {
         expect(JSON.parse((result.content[0] as any).text).methods).toEqual(members);
     });
     it("handles huge single lines and UTF-8 without malformed output", () => {
-        const result = boundHostedResult("mc_source", { action: "get_source" }, text("😀".repeat(100000)), limits);
+        const result = boundHostedResult("mc_source", { action: "get_source" }, text("😀".repeat(100000)), limits, true);
         expect(Buffer.byteLength(JSON.stringify(result.content))).toBeLessThanOrEqual(limits.responseBytes);
         expect((result.content[0] as any).text).not.toContain("�");
     });

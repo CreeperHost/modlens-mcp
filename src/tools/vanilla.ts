@@ -10,13 +10,13 @@ import { getMcJarPath, mcPaths, fetchMcVersionList } from "../minecraft.js";
 import { listClasses } from "../jar.js";
 import { safeRegex } from "../security.js";
 import { validateVersion, validateClassName } from "../validate.js";
-import { isMcVersionIndexed, searchMcIndexed } from "./mc-fts.js";
+import { indexMcClass, isMcVersionIndexed, searchMcIndexed } from "./mc-fts.js";
 import { searchClasses } from "../search.js";
 import { inspectClass, getBytecode, indexJar, decompileClass, decompileJar,
          isDecompileDone, decompileSentinelDone, type JarIndex } from "../java-tools.js";
 import { exists, ensureDir } from "../cache.js";
 import { formatClassMembers } from "../access-flags.js";
-import { ensureMcVersion, updateMcVersion } from "../repositories/mcVersion.js";
+import { ensureMcVersion, isMcClassIndexed, updateMcVersion } from "../repositories/mcVersion.js";
 import { findModByModIdLike } from "../repositories/mod.js";
 import { searchSource } from "./source.js";
 import { hasSrgMappings, remapMcJar, applyMcpNamesToSource, applyMcpNamesToFile, hasRetroMcpMappings, remapMcJarTiny, remapJar, isUnobfuscated } from "../mappings.js";
@@ -165,6 +165,65 @@ export async function getMinecraftSourceInfo(version: string, className: string)
     if (!await exists(cached)) return { version, className: internal, cached: false, totalLines: null };
     const source = await readFile(cached, "utf8");
     return { version, className: internal, cached: true, totalLines: source.split("\n").length };
+}
+
+type ClassPreparation = { version: string; className: string; state: "queued" | "running" | "failed"; retryAfter?: number };
+const classPreparations = new Map<string, ClassPreparation>();
+const classPreparationQueue: ClassPreparation[] = [];
+const activeClassPreparationVersions = new Set<string>();
+let activeClassPreparations = 0;
+
+function runClassPreparations(): void {
+    while (activeClassPreparations < 2 && classPreparationQueue.length) {
+        const next = classPreparationQueue.findIndex(job => !activeClassPreparationVersions.has(job.version));
+        if (next < 0) break;
+        const [job] = classPreparationQueue.splice(next, 1);
+        job.state = "running";
+        activeClassPreparations++;
+        activeClassPreparationVersions.add(job.version);
+        void (async () => {
+            try {
+                // The returned line remains private. Decompilation caches the complete class.
+                await getMinecraftSource(job.version, job.className, 1, 1, 1);
+                await indexMcClass(job.version, job.className);
+                classPreparations.delete(`${job.version}:${job.className}`);
+            } catch (error) {
+                job.state = "failed";
+                job.retryAfter = Date.now() + 60_000;
+                console.error("[modlens] Minecraft class preparation failed", job.version, job.className, error);
+            } finally {
+                activeClassPreparations--;
+                activeClassPreparationVersions.delete(job.version);
+                runClassPreparations();
+            }
+        })();
+    }
+}
+
+/** Public source requests prepare the server cache and index, returning metadata only. */
+export async function prepareMinecraftSource(version: string, className: string) {
+    const info = await getMinecraftSourceInfo(version, className);
+    const internal = info.className;
+    if (await isMcClassIndexed(version, internal)) return { ...info, indexed: true, status: "ready" };
+    if (await isDecompileDone(mcPaths.decompiled(version)) === "running") {
+        return { ...info, indexed: false, status: "preparing" };
+    }
+    const key = `${version}:${internal}`;
+    let job = classPreparations.get(key);
+    if (job?.state === "failed" && (job.retryAfter ?? 0) <= Date.now()) {
+        classPreparations.delete(key);
+        job = undefined;
+    }
+    if (!job && classPreparationQueue.length + activeClassPreparations >= 16) {
+        return { ...info, indexed: false, status: "busy" };
+    }
+    if (!job) {
+        job = { version, className: internal, state: "queued" };
+        classPreparations.set(key, job);
+        classPreparationQueue.push(job);
+        runClassPreparations();
+    }
+    return { ...info, indexed: false, status: job.state === "failed" ? "failed" : "preparing" };
 }
 
 /** get_mc_class_bytecode */

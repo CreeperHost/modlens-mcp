@@ -35,7 +35,7 @@ import { getMixinTargets, getMixinConflicts, getAtEntries, getAwEntries, resolve
 import { syncModrinth, syncCurseforge, checkUpdates, downloadSource, batchSyncSources, searchPlatforms, batchCheckUpdates } from "./tools/platform.js";
 import { listMcVersions, listNeoForgeVersions, listFabricApiVersions, listForgeVersions, downloadNeoForge, downloadFabricApi, downloadForge } from "./platform.js";
 import {
-    searchMinecraftClass, getMinecraftSource, getMinecraftSourceInfo, getMcClassBytecode, getMcClassMembers,
+    searchMinecraftClass, getMinecraftSource, getMinecraftSourceInfo, prepareMinecraftSource, getMcClassBytecode, getMcClassMembers,
     findMcReferences, getMcInheritance, diffMcVersions,
     decompileMcVersion, decompileMcVersionStatus, searchMcCode,
     validateAccessWidener, analyzeMixin, searchEvents,
@@ -761,7 +761,9 @@ registerTool(
         switch (action) {
             case "search_class":    result = await searchMinecraftClass(v!, query ?? className); break;
             case "source_info":     result = await getMinecraftSourceInfo(v!, className!); break;
-            case "get_source":      result = await getMinecraftSource(v!, className!, startLine, endLine, maxLines); break;
+            case "get_source":      result = principal !== undefined && !allowMinecraftSource
+                ? await prepareMinecraftSource(v!, className!)
+                : await getMinecraftSource(v!, className!, startLine, endLine, maxLines); break;
             case "bytecode":        result = await getMcClassBytecode(v!, className!); break;
             case "class_members":   result = await getMcClassMembers(v!, className!); break;
             case "find_refs":       result = await findMcReferences(v!, target!); break;

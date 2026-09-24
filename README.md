@@ -704,7 +704,7 @@ All tool actions have been consolidated into **24 grouped tools** to stay within
 | action | Key params | Description |
 |--------|-----------|-------------|
 | `search_class` | version, query | Find class by name |
-| `get_source` | version, className, startLine, endLine, maxLines | Read decompiled source |
+| `get_source` | version, className, startLine, endLine, maxLines | Read decompiled source locally or for enabled teams; public HTTP prepares a private class index and returns status only |
 | `bytecode` | version, className | Raw `javap` output |
 | `class_members` | version, className | Methods/fields with mixin target strings |
 | `find_refs` | version, target | Classes referencing a target |
@@ -1066,7 +1066,7 @@ node dist/cli.js check-updates 2
 
 ## Hosted access limits
 
-HTTP MCP (`MCP_PORT`) enables hosted limits by default. Local stdio retains its existing access. Public HTTP users can search Minecraft class locations and inspect source metadata (`mc_source source_info` returns cache availability and total lines), members, references, version differences, mixins, and data. Minecraft search responses contain locations without source excerpts; `search_code` provides line numbers when available (`0` means the FTS index has no line location). Line numbers refer to the server's cached decompilation and may differ from local output. Minecraft source and bytecode are unavailable on public HTTP. Operators may decompile and index Minecraft through the local interface. Bulk decompile/index commands, source/graph/embedding exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access are local-only.
+HTTP MCP (`MCP_PORT`) enables hosted limits by default. Local stdio retains its existing access. Public HTTP users can search Minecraft class locations and inspect source metadata (`mc_source source_info` returns cache availability and total lines), members, references, version differences, mixins, and data. Public `mc_source get_source` starts private class preparation and returns `preparing`, `ready`, `busy`, or `failed` metadata; call it again to check progress. The server fetches and decompiles that class, then adds it to source search without returning its text. Minecraft search responses contain locations without source excerpts; `search_code` provides line numbers when available (`0` means the FTS index has no line location). Line numbers refer to the server's cached decompilation and may differ from local output. Minecraft bytecode is unavailable on public HTTP. Operators may also decompile and index entire versions through the local interface. Bulk decompile/index commands, source/graph/embedding exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access are local-only.
 
 | Setting | Default | Scope |
 | --- | --- | --- |

@@ -97,7 +97,7 @@ export const HOSTED_ACTIONS: Record<string, readonly string[]> = {
 export function hostedActions(tool: string, allowMinecraftSource = false): readonly string[] | undefined {
     const actions = HOSTED_ACTIONS[tool];
     if (tool !== "mc_source" || allowMinecraftSource) return actions;
-    return actions.filter(action => action !== "get_source" && action !== "bytecode");
+    return actions.filter(action => action !== "bytecode");
 }
 
 const rawSource = (tool: string, action: unknown) =>
@@ -200,6 +200,22 @@ const sourceKeys = /^(?:source|content|text|snippet|answer|bytecode|result|raw)$
 export function boundHostedResult(tool: string, args: Record<string, unknown>, result: CallToolResult, limits: HostedLimits,
     allowMinecraftSource = false): CallToolResult {
     if (result.isError) return failure("Request failed. Check the arguments or ask the operator to inspect the server log.");
+    if (tool === "mc_source" && !allowMinecraftSource && args.action === "get_source") {
+        result = { content: result.content.map(block => {
+            if (block.type !== "text") throw new HostedPolicyError("This response format is unavailable remotely.");
+            let value: unknown;
+            try { value = JSON.parse(block.text); } catch { throw new HostedPolicyError("Minecraft source preparation unavailable."); }
+            if (!value || typeof value !== "object") throw new HostedPolicyError("Minecraft source preparation unavailable.");
+            const info = value as Record<string, unknown>;
+            if (typeof info.version !== "string" || typeof info.className !== "string" || typeof info.cached !== "boolean"
+                || typeof info.indexed !== "boolean" || !(info.totalLines === null || Number.isSafeInteger(info.totalLines))
+                || !["ready", "preparing", "busy", "failed"].includes(String(info.status))) {
+                throw new HostedPolicyError("Minecraft source preparation unavailable.");
+            }
+            return { type: "text" as const, text: JSON.stringify({ version: info.version, className: info.className,
+                cached: info.cached, indexed: info.indexed, totalLines: info.totalLines, status: info.status }) };
+        }) };
+    }
     if (tool === "mc_source" && !allowMinecraftSource && ["search_code", "search_indexed"].includes(String(args.action))) {
         result = { content: result.content.map(block => {
             if (block.type !== "text") throw new HostedPolicyError("This response format is unavailable remotely.");

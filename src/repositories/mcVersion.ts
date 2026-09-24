@@ -60,6 +60,17 @@ export async function upsertMcSourceFile(
     });
 }
 
+export async function isMcClassIndexed(version: string, className: string): Promise<boolean> {
+    const db = await getDb();
+    const record = await db.mcVersion.findUnique({ where: { versionId: version }, select: { id: true } });
+    if (!record) return false;
+    const source = await db.mcSourceFile.findUnique({
+        where: { mcVersionId_className: { mcVersionId: record.id, className } },
+        select: { id: true },
+    });
+    return source !== null;
+}
+
 interface FtsRow { class_name: string; snippet: string; }
 
 export async function searchMcSourceFiles(

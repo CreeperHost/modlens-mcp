@@ -85,6 +85,13 @@ export async function indexMcVersion(version: string, force = false): Promise<{
     return { status: "done", indexed, skipped };
 }
 
+/** Add one already-decompiled class to source search without marking the whole version indexed. */
+export async function indexMcClass(version: string, className: string): Promise<void> {
+    const content = await readFile(mcPaths.classFile(version, className), "utf8");
+    const mcVersionId = await ensureMcVersionRecord(version);
+    await upsertMcSourceFile(mcVersionId, className, content);
+}
+
 interface FtsRow { class_name: string; snippet: string; }
 
 /**
