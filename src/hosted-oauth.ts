@@ -24,7 +24,7 @@ const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = (prefix: string) => prefix + randomBytes(32).toString("base64url");
 const now = () => Math.floor(Date.now() / 1000);
 const json = (res: ServerResponse, status: number, value: unknown, headers: Record<string, string> = {}) => {
-    res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
+    res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", Pragma: "no-cache", ...headers });
     res.end(JSON.stringify(value));
 };
 const redirect = (res: ServerResponse, url: URL) => {
@@ -63,7 +63,8 @@ main{width:100%;display:flex;flex:1;flex-direction:column;align-items:center;jus
 .brand{display:flex;align-items:center;justify-content:center;margin:0 auto 22px;color:white}.brand-copy{text-align:center;line-height:1}.brand-copy strong{display:block;font-size:21px;font-weight:750;letter-spacing:.13em}.brand-copy small{display:block;margin-top:7px;color:#ffffff73;font-size:10px;font-weight:650;letter-spacing:.31em}
 .card{width:min(638px,calc(100vw - 34px));border:1px solid var(--line);outline:1px solid var(--line-dark);border-radius:10px;overflow:hidden;background:linear-gradient(180deg,var(--panel-top),var(--panel-bottom));box-shadow:0 0 25px rgba(0,0,0,.2)}
 .content{padding:32px;text-align:left}.eyebrow{display:block;margin:0 0 7px;color:${tone === "error" ? "var(--error)" : "#72d96e"};font-size:10px;font-weight:700;letter-spacing:.17em}.content h1{margin:0;color:var(--text);font-family:"Centra No 2","Segoe UI Variable","Segoe UI",sans-serif;font-size:30px;line-height:36px;letter-spacing:-.03em;font-weight:500}.lead,.content>p{margin:9px 0 0;color:#ffffffb3;font-size:14px;line-height:1.6}
-.app{display:flex;align-items:center;gap:12px;margin:20px 0;padding:12px;background:var(--panel-deep);border:1px solid var(--line);border-radius:6px}.app-icon{display:flex;align-items:center;justify-content:center;width:36px;height:36px;flex:0 0 auto;border-radius:50%;background:#06c20020;color:#8cdd88;font:600 12px/1 Consolas,monospace}.app-copy{min-width:0}.app-name{display:block;color:#f0f0f5;font-size:14px}.app-origin{display:block;overflow:hidden;text-overflow:ellipsis;color:#d7dbe0;font:500 12px/1.45 Consolas,monospace;white-space:nowrap}.app-label{display:block;color:var(--muted);font-size:11px}
+.app{display:flex;align-items:center;gap:12px;margin:20px 0 12px;padding:12px;background:var(--panel-deep);border:1px solid var(--line);border-radius:6px}.app-icon{display:flex;align-items:center;justify-content:center;width:36px;height:36px;flex:0 0 auto;border-radius:50%;background:#06c20020;color:#8cdd88;font:600 12px/1 Consolas,monospace}.app-copy{min-width:0}.app-name{display:block;color:#f0f0f5;font-size:14px}.app-label{display:block;color:var(--muted);font-size:11px}
+.connection-details{color:var(--muted);font-size:12px}.connection-details summary{width:max-content;max-width:100%;cursor:pointer;color:#d7dbe0}.connection-details summary:focus-visible{outline:2px solid var(--focus);outline-offset:3px}.connection-details p{margin:10px 0 6px}.callback-url{display:block;overflow-wrap:anywhere;color:#d7dbe0;font:500 12px/1.5 Consolas,monospace}
 .permissions{margin:20px 0;padding-left:22px;color:#d7dbe0;font-size:13px;line-height:1.65}.permissions li+li{margin-top:9px}.permissions li::marker{color:#48c544}
 form{margin:0}.actions{display:grid;grid-template-columns:1fr 1.6fr;gap:12px;margin-top:24px}button{display:inline-flex;min-height:48px;align-items:center;justify-content:center;appearance:none;border:1px solid transparent;border-radius:4px;padding:10px 16px;color:white;font:500 14px/1 "Segoe UI Variable","Segoe UI",sans-serif;cursor:pointer;transition:box-shadow .18s ease,background .18s ease}button:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:3px}.primary{background:linear-gradient(to left,var(--green),var(--green-dark))}.primary:hover{box-shadow:0 0 20px #42d80854}.secondary{background:#242b33;border-color:#343b44}.secondary:hover{background:#2d353e}
 .note{margin:12px 0 0!important;color:#ffffff73!important;font-size:11px!important}.error-code{display:block;margin-top:20px;padding:12px;border:1px solid #d1005650;border-radius:4px;background:#d1005615;color:var(--error);font:12px/1.55 Consolas,monospace;overflow-wrap:anywhere}
@@ -188,6 +189,38 @@ export class HostedOAuth {
 
     private clientRef(clientId: string): string { return sha(clientId).slice(0, 12); }
     private grantRef(grantId: string): string { return sha(grantId).slice(0, 12); }
+
+    private observeTokenResponse(req: IncomingMessage, res: ServerResponse,
+        fields: Record<string, string | number | boolean | undefined>): void {
+        const startedAt = performance.now();
+        let finished = false;
+        req.once("aborted", () => this.audit("token_request_aborted", fields));
+        res.once("finish", () => {
+            finished = true;
+            this.audit("token_response_finished", { ...fields, status: res.statusCode,
+                outcome: res.statusCode >= 400 ? "error" : fields.outcome,
+                durationMs: Math.round(performance.now() - startedAt) });
+        });
+        res.once("close", () => {
+            if (!finished) this.audit("token_response_closed", { ...fields, status: res.statusCode,
+                headersSent: res.headersSent, writableEnded: res.writableEnded, writableFinished: res.writableFinished,
+                durationMs: Math.round(performance.now() - startedAt) });
+        });
+        res.once("error", error => this.audit("token_response_error", { ...fields, status: res.statusCode,
+            error: error.name, errorCode: (error as NodeJS.ErrnoException).code }));
+    }
+
+    private describeTokenResponse(response: Record<string, unknown>): Record<string, string | number | boolean> {
+        const access = typeof response.access_token === "string" ? response.access_token : undefined;
+        const refresh = typeof response.refresh_token === "string" ? response.refresh_token : undefined;
+        return {
+            outcome: "success", responseBytes: Buffer.byteLength(JSON.stringify(response)),
+            returnedRefresh: refresh !== undefined,
+            ...(access ? { accessRef: sha(access).slice(0, 12) } : {}),
+            ...(refresh ? { returnedRefreshRef: sha(refresh).slice(0, 12) } : {}),
+            ...(typeof response.expires_in === "number" ? { accessExpiresIn: response.expires_in } : {}),
+        };
+    }
 
     logError(method: string | undefined, route: string, error: HostedOAuthError): string {
         const incident = randomBytes(6).toString("hex");
@@ -439,12 +472,12 @@ export class HostedOAuth {
         return { access_token: rawAccess, token_type: "Bearer", expires_in: expires, scope: "modlens" };
     }
 
-    private async refresh(clientId: string, raw: string): Promise<Record<string, unknown>> {
+    private async refresh(clientId: string, raw: string, requestRef: string): Promise<Record<string, unknown>> {
         const db = await this.db();
         const rows = await db.$queryRawUnsafe<GrantRow[]>(`UPDATE hosted_oauth_grants SET refresh_hash=NULL
             WHERE refresh_hash=$1 AND client_id=$2 AND refresh_expires>$3 RETURNING *`, sha(raw), clientId, now());
         if (rows.length !== 1 || !rows[0].upstream_refresh) {
-            this.audit("refresh_rejected", { client: this.clientRef(clientId), refreshRef: sha(raw).slice(0, 12),
+            this.audit("refresh_rejected", { request: requestRef, client: this.clientRef(clientId), refreshRef: sha(raw).slice(0, 12),
                 reason: rows.length === 1 ? "no_upstream_refresh" : "not_current_or_missing" });
             throw new HostedOAuthError("Invalid refresh token", 400, "invalid_grant");
         }
@@ -471,13 +504,13 @@ export class HostedOAuth {
             stage = "access_issue";
             const access = await this.issue(grant);
             const response = { ...access, refresh_token: next };
-            this.audit("refresh_issued", { client: this.clientRef(clientId), grant: this.grantRef(grant.id),
+            this.audit("refresh_issued", { request: requestRef, client: this.clientRef(clientId), grant: this.grantRef(grant.id),
                 previousRefreshRef: sha(raw).slice(0, 12), refreshRef: sha(next).slice(0, 12),
                 accessExpiresIn: Number(access.expires_in) });
             return response;
         } catch (error) {
             const retryable = error instanceof HostedOAuthError && error.status === 503;
-            this.audit("refresh_failed", { client: this.clientRef(clientId), grant: this.grantRef(grant.id),
+            this.audit("refresh_failed", { request: requestRef, client: this.clientRef(clientId), grant: this.grantRef(grant.id),
                 refreshRef: sha(raw).slice(0, 12), stage, retryable,
                 status: error instanceof HostedOAuthError ? error.status : undefined,
                 code: error instanceof HostedOAuthError ? error.code : undefined });
@@ -600,9 +633,10 @@ export class HostedOAuth {
                 this.audit("consent_presented", { flow: state.flowId, client: this.clientRef(state.clientId),
                     redirectOrigin: callback.origin });
                 const clientName = await this.clientName(state.clientId);
-                const destination = escapeHtml(callback.origin);
+                const destination = escapeHtml(callback.toString());
                 const content = `<h1>Allow access?</h1><p>The application below wants to connect to your hosted ModLens account.</p>`
-                    + `<div class="app"><span class="app-icon" aria-hidden="true">&gt;_</span><span class="app-copy"><strong class="app-name">${clientName ? escapeHtml(clientName) : "Unnamed application"}</strong><small class="app-label">${clientName ? "Name supplied by application" : "No application name supplied"}</small><span class="app-origin">Callback: ${destination}</span></span></div>`
+                    + `<div class="app"><span class="app-icon" aria-hidden="true">&gt;_</span><span class="app-copy"><strong class="app-name">${clientName ? escapeHtml(clientName) : "Unnamed application"}</strong><small class="app-label">${clientName ? "Name supplied by application" : "No application name supplied"}</small></span></div>`
+                    + `<details class="connection-details"><summary>Connection details</summary><p>After approval, ModLens returns you to this registered callback:</p><code class="callback-url">${destination}</code></details>`
                     + `<ul class="permissions"><li>Run hosted ModLens tools on your behalf</li><li>Use your hosted account allowance</li></ul>`
                     + `<form method="post" action="/oauth/approve"><input type="hidden" name="approval" value="${escapeHtml(approval)}"><div class="actions"><button class="secondary" name="decision" value="deny">Cancel</button><button class="primary" name="decision" value="allow">Allow access</button></div></form>`
                     + `<p class="note">Only continue if you started this request in the app.</p>`;
@@ -649,10 +683,16 @@ export class HostedOAuth {
             return true;
         }
         if (route === "/oauth/token" && req.method === "POST") {
+            const requestRef = randomBytes(6).toString("hex");
+            const responseAudit: Record<string, string | number | boolean | undefined> = { request: requestRef };
+            this.observeTokenResponse(req, res, responseAudit);
             const params = form(await body(req));
             const clientId = required(params, "client_id");
+            responseAudit.client = this.clientRef(clientId);
             await this.client(clientId);
             const grantType = required(params, "grant_type");
+            responseAudit.grantType = grantType;
+            this.audit("token_request_received", { request: requestRef, client: responseAudit.client, grantType });
             if (grantType === "authorization_code") {
                 const code = await this.takeObject(required(params, "code"), "code") as {
                     flowId: string; clientId: string; callback: string; resource: string; challenge: string;
@@ -676,9 +716,10 @@ export class HostedOAuth {
                     grant.upstream_expires, grant.refresh_hash, grant.refresh_expires);
                 const access = await this.issue(grant);
                 const response = { ...access, ...(refresh ? { refresh_token: refresh } : {}) };
-                this.audit("token_issued", { flow: code.flowId, client: this.clientRef(clientId), refresh: !!refresh,
+                this.audit("token_issued", { request: requestRef, flow: code.flowId, client: this.clientRef(clientId), refresh: !!refresh,
                     grant: this.grantRef(grant.id), accessExpiresIn: Number(access.expires_in),
                     ...(refresh ? { refreshRef: sha(refresh).slice(0, 12) } : {}) });
+                Object.assign(responseAudit, this.describeTokenResponse(response));
                 json(res, 200, response);
                 return true;
             }
@@ -688,15 +729,20 @@ export class HostedOAuth {
                 if (params.has("scope") && params.get("scope") !== "modlens")
                     throw new HostedOAuthError("Unsupported scope", 400, "invalid_scope");
                 const raw = required(params, "refresh_token");
+                responseAudit.presentedRefreshRef = sha(raw).slice(0, 12);
                 const key = `${clientId}:${sha(raw)}`;
                 let pending = this.refreshes.get(key);
                 if (!pending) {
-                    this.audit("refresh_started", { client: this.clientRef(clientId), refreshRef: sha(raw).slice(0, 12) });
-                    pending = this.refresh(clientId, raw);
+                    this.audit("refresh_started", { request: requestRef, client: this.clientRef(clientId),
+                        refreshRef: responseAudit.presentedRefreshRef });
+                    pending = this.refresh(clientId, raw, requestRef);
                     this.refreshes.set(key, pending);
                     void pending.finally(() => this.refreshes.delete(key)).catch(() => {});
-                } else this.audit("refresh_joined", { client: this.clientRef(clientId), refreshRef: sha(raw).slice(0, 12) });
-                json(res, 200, await pending);
+                } else this.audit("refresh_joined", { request: requestRef, client: this.clientRef(clientId),
+                    refreshRef: responseAudit.presentedRefreshRef });
+                const response = await pending;
+                Object.assign(responseAudit, this.describeTokenResponse(response));
+                json(res, 200, response);
                 return true;
             }
             throw new HostedOAuthError("Unsupported grant type", 400, "unsupported_grant_type");

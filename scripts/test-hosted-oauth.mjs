@@ -129,7 +129,9 @@ async function login(expectedName = 'ChatGPT &amp; Codex &lt;test&gt;') {
         assert.match(consentPage, /Unnamed application/);
         assert.match(consentPage, /No application name supplied/);
     }
-    assert.match(consentPage, /Callback: http:\/\/127\.0\.0\.1:54321/);
+    assert.match(consentPage, /<details class="connection-details"><summary>Connection details<\/summary>/);
+    assert.match(consentPage, /<code class="callback-url">http:\/\/127\.0\.0\.1:54321\/callback<\/code><\/details>/);
+    assert.doesNotMatch(consentPage.split('<details class="connection-details">')[0], /127\.0\.0\.1:54321/);
     assert.match(consentPage, /Only continue if you started this request/);
     const approval = consentPage.match(/name="approval" value="([^"]+)"/)?.[1];
     assert.ok(approval);
@@ -220,16 +222,36 @@ try {
     const replay = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/token`, { method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ grant_type: 'refresh_token',
             client_id: clientId, refresh_token: tokens.refresh_token }) });
-    assert.equal(replay.status, 400);
+    assert.equal(replay.status, 400, 'a completed rotation invalidates the old refresh token');
     const oldRefreshRef = createHash('sha256').update(tokens.refresh_token).digest('hex').slice(0, 12);
+    const rotatedRefreshRef = createHash('sha256').update(rotated.refresh_token).digest('hex').slice(0, 12);
+    const rejectedResponseLogged = new RegExp(`"event":"token_response_finished"[^\\n]*"presentedRefreshRef":"${oldRefreshRef}"[^\\n]*"status":400`);
+    for (let attempt = 0; attempt < 50 && !rejectedResponseLogged.test(serverOutput); attempt++)
+        await new Promise(resolve => setTimeout(resolve, 20));
     const refreshEvents = serverOutput.split('\n').filter(line => line.includes('[modlens] oauth '))
         .map(line => JSON.parse(line.slice(line.indexOf('[modlens] oauth ') + '[modlens] oauth '.length)));
     const issued = refreshEvents.find(event => event.event === 'refresh_issued');
     const rejected = refreshEvents.find(event => event.event === 'refresh_rejected');
     assert.equal(issued.previousRefreshRef, oldRefreshRef);
+    assert.equal(issued.refreshRef, rotatedRefreshRef);
     assert.equal(rejected.refreshRef, oldRefreshRef);
     assert.equal(rejected.reason, 'not_current_or_missing');
     assert.equal(issued.grant.length, 12);
+    assert.equal(rejected.request.length, 12);
+    assert.equal(issued.request.length, 12);
+    const issuedResponse = refreshEvents.find(event => event.event === 'token_response_finished'
+        && event.request === issued.request);
+    const rejectedResponse = refreshEvents.find(event => event.event === 'token_response_finished'
+        && event.request === rejected.request);
+    assert.equal(issuedResponse.status, 200);
+    assert.equal(issuedResponse.presentedRefreshRef, oldRefreshRef);
+    assert.equal(issuedResponse.returnedRefreshRef, rotatedRefreshRef);
+    assert.equal(issuedResponse.outcome, 'success');
+    assert.ok(issuedResponse.responseBytes > 0);
+    assert.equal(rejectedResponse.status, 400);
+    assert.equal(rejectedResponse.presentedRefreshRef, oldRefreshRef);
+    assert.equal(rejectedResponse.returnedRefreshRef, undefined);
+    assert.equal(replay.headers.get('pragma'), 'no-cache');
     assert.ok(refreshEvents.filter(event => event.event.startsWith('refresh_'))
         .every(event => /^[a-f0-9]{12}$/.test(event.instance)));
     const firstSession = await initialize(rotated.access_token);

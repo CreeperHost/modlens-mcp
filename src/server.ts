@@ -1512,9 +1512,13 @@ async function startHttpServer(port: number): Promise<void> {
                         oauth.browserError(res, err, incident);
                         return;
                     }
+                    res.setHeader("Cache-Control", "no-store");
+                    res.setHeader("Pragma", "no-cache");
                     return sendJson(res, err.status, { error: err.code, error_description: err.message });
                 }
                 logServerError(`oauth ${req.method} ${url.pathname}`, err);
+                res.setHeader("Cache-Control", "no-store");
+                res.setHeader("Pragma", "no-cache");
                 return sendJson(res, 503, { error: "temporarily_unavailable" });
             }
         }
