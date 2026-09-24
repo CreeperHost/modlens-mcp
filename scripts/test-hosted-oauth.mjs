@@ -26,13 +26,15 @@ const profiles = new Map();
 let partner = true;
 let subject = 'customer:42';
 let serial = 0;
+let metadataRequests = 0;
 const provider = createServer(async (req, res) => {
     const url = new URL(req.url, issuer);
     const write = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); };
-    if (url.pathname === '/.well-known/oauth-authorization-server') return write(200, {
-        issuer, authorization_endpoint: issuer + '/authorize', token_endpoint: issuer + '/token',
-        authorization_response_iss_parameter_supported: true,
-    });
+    if (url.pathname === '/.well-known/oauth-authorization-server') {
+        if (++metadataRequests === 1) return write(503, { error: 'temporarily_unavailable', access_token: 'metadata-secret' });
+        return write(200, { issuer, authorization_endpoint: issuer + '/authorize', token_endpoint: issuer + '/token',
+            authorization_response_iss_parameter_supported: true });
+    }
     if (url.pathname === '/authorize') {
         const callback = new URL(url.searchParams.get('redirect_uri'));
         callback.searchParams.set('code', 'fake-code');
@@ -152,6 +154,11 @@ async function login() {
 }
 try {
     await start();
+    assert.match(serverOutput, /"event":"provider_metadata_retry".*"status":503/,
+        'transient provider discovery failures are logged and retried');
+    assert.match(serverOutput, /"event":"provider_metadata_response".*temporarily_unavailable/,
+        'failed provider responses include a useful body excerpt');
+    assert.ok(!serverOutput.includes('metadata-secret'), 'provider response logging redacts token fields');
     const absent = await fetchManual(resource);
     assert.equal(absent.status, 401);
     assert.match(absent.headers.get('www-authenticate'), /resource_metadata=/);

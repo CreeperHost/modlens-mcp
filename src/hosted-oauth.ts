@@ -137,6 +137,42 @@ function challenge(verifier: string): string {
     return createHash("sha256").update(verifier).digest("base64url");
 }
 
+async function safeResponseExcerpt(response: Response): Promise<string> {
+    let value: string;
+    try { value = await response.clone().text(); }
+    catch { return "[unreadable response body]"; }
+    return value.slice(0, 2048)
+        .replace(/Bearer\s+[^\s"'<]+/gi, "Bearer [redacted]")
+        .replace(/(access_token|refresh_token|id_token|client_secret|authorization|assertion|password|code|state)(["']?\s*[:=]\s*["']?)[^"',\s<}&]+/gi,
+            "$1$2[redacted]");
+}
+
+async function providerMetadata(url: URL): Promise<Response> {
+    const attempts = 4;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        let response: Response;
+        try {
+            response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(10000) });
+        } catch (error) {
+            if (attempt === attempts) throw new Error(`OAuth provider metadata request failed for ${url}`, { cause: error });
+            console.error(`[modlens] oauth ${JSON.stringify({ event: "provider_metadata_retry", endpoint: url.toString(),
+                attempt, reason: error instanceof Error ? error.name : "request_error" })}`);
+            await new Promise(resolve => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+            continue;
+        }
+        console.error(`[modlens] oauth ${JSON.stringify({ event: "provider_metadata_response", endpoint: url.toString(),
+            attempt, status: response.status, contentType: response.headers.get("content-type") ?? "",
+            ...(response.ok ? {} : { response: await safeResponseExcerpt(response) }) })}`);
+        if (response.ok || response.status === 404 || (response.status !== 429 && response.status < 500)) return response;
+        if (attempt === attempts) return response;
+        console.error(`[modlens] oauth ${JSON.stringify({ event: "provider_metadata_retry", endpoint: url.toString(),
+            attempt, status: response.status })}`);
+        await response.body?.cancel();
+        await new Promise(resolve => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+    }
+    throw new Error("OAuth provider metadata retry loop ended unexpectedly");
+}
+
 export class HostedOAuth {
     private ready?: Promise<void>;
     private requestCounts = new Map<string, { minute: number; count: number }>();
@@ -172,11 +208,13 @@ export class HostedOAuth {
         if (!!requiredField !== (env.MODLENS_OAUTH_REQUIRED_VALUE !== undefined))
             throw new Error("MODLENS_OAUTH_REQUIRED_FIELD and MODLENS_OAUTH_REQUIRED_VALUE must be configured together");
         const path = new URL(issuer).pathname.replace(/\/$/, "");
-        const metadataUrl = new URL(`/.well-known/oauth-authorization-server${path === "/" ? "" : path}`, issuer);
-        let response = await fetch(metadataUrl, { redirect: "error", signal: AbortSignal.timeout(10000) });
-        if (response.status === 404) response = await fetch(new URL(".well-known/openid-configuration", issuer + "/"),
-            { redirect: "error", signal: AbortSignal.timeout(10000) });
-        if (!response.ok) throw new Error("OAuth provider metadata unavailable");
+        let metadataUrl = new URL(`/.well-known/oauth-authorization-server${path === "/" ? "" : path}`, issuer);
+        let response = await providerMetadata(metadataUrl);
+        if (response.status === 404) {
+            metadataUrl = new URL(".well-known/openid-configuration", issuer + "/");
+            response = await providerMetadata(metadataUrl);
+        }
+        if (!response.ok) throw new Error(`OAuth provider metadata unavailable: HTTP ${response.status} from ${metadataUrl}`);
         const metadata = await response.json() as Record<string, unknown>;
         if (metadata.issuer !== issuer) throw new Error("OAuth provider issuer mismatch");
         const authorizeUrl = secureUrl(String(metadata.authorization_endpoint ?? ""), "authorization endpoint", true).toString();
@@ -272,7 +310,12 @@ export class HostedOAuth {
         try { response = await fetch(this.config.tokenUrl, { method: "POST", headers, body: values,
             redirect: "error", signal: AbortSignal.timeout(10000) }); }
         catch { throw new HostedOAuthError("Provider token endpoint unavailable", 503, "temporarily_unavailable"); }
-        if (!response.ok) throw new HostedOAuthError("Provider token exchange failed", response.status >= 500 ? 503 : 401, "invalid_grant");
+        if (!response.ok) {
+            this.audit("provider_token_response", { endpoint: this.config.tokenUrl, grantType: values.get("grant_type") ?? "unknown",
+                status: response.status, contentType: response.headers.get("content-type") ?? "",
+                response: await safeResponseExcerpt(response) });
+            throw new HostedOAuthError("Provider token exchange failed", response.status >= 500 ? 503 : 401, "invalid_grant");
+        }
         let data: UpstreamTokens;
         try { data = await response.json() as UpstreamTokens; }
         catch { throw new HostedOAuthError("Invalid provider token response", 503, "temporarily_unavailable"); }
@@ -286,8 +329,12 @@ export class HostedOAuth {
         try { response = await fetch(this.config.profileUrl, { headers: { Authorization: `Bearer ${access}` },
             redirect: "error", signal: AbortSignal.timeout(10000) }); }
         catch { throw new HostedOAuthError("Provider profile unavailable", 503, "temporarily_unavailable"); }
-        if (!response.ok) throw new HostedOAuthError("Provider profile unavailable", response.status === 401 || response.status === 403 ? 401 : 503,
-            response.status === 401 || response.status === 403 ? "invalid_token" : "temporarily_unavailable");
+        if (!response.ok) {
+            this.audit("provider_profile_response", { endpoint: this.config.profileUrl, status: response.status,
+                contentType: response.headers.get("content-type") ?? "", bodyLogged: false });
+            throw new HostedOAuthError("Provider profile unavailable", response.status === 401 || response.status === 403 ? 401 : 503,
+                response.status === 401 || response.status === 403 ? "invalid_token" : "temporarily_unavailable");
+        }
         let data: unknown;
         try { data = await response.json() as unknown; }
         catch { throw new HostedOAuthError("Invalid provider profile", 503, "temporarily_unavailable"); }
