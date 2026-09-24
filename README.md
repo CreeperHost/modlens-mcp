@@ -714,6 +714,7 @@ All tool actions have been consolidated into **24 grouped tools** to stay within
 | `decompile_status` | version | Poll bulk decompile job |
 | `search_code` | version, query, searchType, isRegex, limit | Regex/text search across MC source; public HTTP returns file and line only |
 | `source_info` | version, className | Cached class availability and total line count, without source text |
+| `index_status` | version | Full-version source index status, without source text |
 | `index` | version, force | Index decompiled MC into PostgreSQL FTS |
 | `search_indexed` | version, query, limit | Fast FTS search |
 | `search_events` | version, query?, modloader? | Find Event subclasses in decompiled source |
@@ -1066,7 +1067,9 @@ node dist/cli.js check-updates 2
 
 ## Hosted access limits
 
-HTTP MCP (`MCP_PORT`) enables hosted limits by default. Local stdio retains its existing access. Public HTTP users can search Minecraft class locations and inspect source metadata (`mc_source source_info` returns cache availability and total lines), members, references, version differences, mixins, and data. Public `mc_source get_source` starts private class preparation and returns `preparing`, `ready`, `busy`, or `failed` metadata; call it again to check progress. The server fetches and decompiles that class, then adds it to source search without returning its text. Minecraft search responses contain locations without source excerpts; `search_code` provides line numbers when available (`0` means the FTS index has no line location). Line numbers refer to the server's cached decompilation and may differ from local output. Minecraft bytecode is unavailable on public HTTP. Operators may also decompile and index entire versions through the local interface. Bulk decompile/index commands, source/graph/embedding exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access are local-only.
+HTTP MCP (`MCP_PORT`) enables hosted limits by default; local stdio retains full access. Public HTTP returns Minecraft class locations, members, references, mixin and version analysis, and source metadata, without Minecraft source text or bytecode. `source_info` reports cached line counts; `search_code` reports matching files and lines (`0` when no exact line is available). Line numbers may differ from a client's local decompilation.
+
+The first hosted Minecraft request for a version queues private full-version decompilation and indexing. Public `get_source` prioritizes that class and returns preparation status instead of source; `index_status` reports full-version progress. Bulk commands, exports, raw JAR reads, host paths, filesystem administration, and KubeJS directory access remain local-only.
 
 | Setting | Default | Scope |
 | --- | --- | --- |
@@ -1079,7 +1082,7 @@ HTTP MCP (`MCP_PORT`) enables hosted limits by default. Local stdio retains its 
 
 The byte allowance includes all successful tool content, including metadata, search snippets and bytecode. It measures UTF-8 JSON content before transport compression. Cached files and inbound upload bytes are excluded. Each source text field has a 32 KiB cap. Searches with `limit`/`top` are capped at 50 results; responses exceeding the byte limit require a narrower query.
 
-Use `startLine` (1-based) and `maxLines` for `mc_source get_source/bytecode`, `mod source/decompile_class`, `mod_bytecode bytecode`, and `project source/bytecode`. A range may start anywhere; the hosted cap bounds its length. Prepare shared indexes and ingest mods through the operator's local interface; hosted clients can upload their own Gradle environment through `project`.
+Use `startLine` (1-based) and `maxLines` for team `mc_source get_source/bytecode`, `mod source/decompile_class`, `mod_bytecode bytecode`, and `project source/bytecode`. A range may start anywhere; the hosted cap bounds its length. Minecraft source indexes populate automatically after the first hosted request for a version. Ingest mods through the operator's local interface; hosted clients can upload their own Gradle environment through `project`.
 
 To allow Minecraft source for specific teams, set `MODLENS_HOSTED_MC_SOURCE=1` and `MODLENS_HOSTED_MC_SOURCE_TEAMS` to comma-separated team IDs. This requires `MODLENS_HOSTED_PROXY_SECRET`; the authenticated gateway must inject `x-modlens-team-id` for verified members and remove caller-provided `x-modlens-*` headers. Other users retain metadata-only Minecraft access. Team access uses the same source and usage limits above. Local stdio is unaffected.
 

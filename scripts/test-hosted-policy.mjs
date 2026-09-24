@@ -73,26 +73,14 @@ try {
     const publicTools = await publicUser.client.listTools();
     const publicMc = publicTools.tools.find(t => t.name === "mc_source");
     assert.ok(publicMc.inputSchema.properties.action.enum.includes("source_info"));
+    assert.ok(publicMc.inputSchema.properties.action.enum.includes("index_status"));
     assert.ok(publicMc.inputSchema.properties.action.enum.includes("get_source"));
     assert.ok(!publicMc.inputSchema.properties.action.enum.includes("bytecode"));
-    const info = await publicUser.client.callTool({ name: "mc_source", arguments: {
-        action: "source_info", version: "1.21.1", className: "example.Fixture",
-    } });
-    assert.deepEqual(JSON.parse(info.content[0].text), { version: "1.21.1", className: "example/Fixture", cached: true, totalLines: 600 });
-    const missingInfo = await publicUser.client.callTool({ name: "mc_source", arguments: {
-        action: "source_info", version: "1.21.1", className: "example.Missing",
-    } });
-    assert.deepEqual(JSON.parse(missingInfo.content[0].text), { version: "1.21.1", className: "example/Missing", cached: false, totalLines: null });
+    await publicUser.client.callTool({ name: "report_issue", arguments: { action: "help" } });
     // Seed synthetic version metadata so preparation can index the cached fixture offline.
     const fixtureDb = new Database(join(root, "usage.db"));
     fixtureDb.prepare("INSERT INTO mc_versions (version_id, type, release_time) VALUES (?, ?, ?)")
         .run("1.21.1", "release", Date.now());
-    fixtureDb.close();
-    const publicSearch = await publicUser.client.callTool({ name: "mc_source", arguments: {
-        action: "search_code", version: "1.21.1", query: "Synthetic fixture line 319",
-    } });
-    assert.ok(!publicSearch.isError, JSON.stringify(publicSearch));
-    assert.deepEqual(JSON.parse(publicSearch.content[0].text), [{ file: "example/Fixture.java", line: 319 }]);
     const publicSource = await read(publicUser.client);
     assert.ok(!publicSource.isError, JSON.stringify(publicSource));
     assert.ok(!JSON.stringify(publicSource).includes("Synthetic fixture"));
@@ -105,6 +93,30 @@ try {
     }
     assert.equal(prepared.status, "ready", JSON.stringify(prepared));
     assert.equal(prepared.indexed, true);
+    for (let attempt = 0; attempt < 30; attempt++) {
+        if (fixtureDb.prepare("SELECT indexed FROM mc_versions WHERE version_id = ?").get("1.21.1")?.indexed) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(fixtureDb.prepare("SELECT indexed FROM mc_versions WHERE version_id = ?").get("1.21.1")?.indexed, 1,
+        "first hosted Minecraft request must index the complete cached version");
+    fixtureDb.close();
+    const fullStatus = await publicUser.client.callTool({ name: "mc_source", arguments: {
+        action: "index_status", version: "1.21.1",
+    } });
+    assert.deepEqual(JSON.parse(fullStatus.content[0].text), { version: "1.21.1", complete: true, status: "ready" });
+    const info = await publicUser.client.callTool({ name: "mc_source", arguments: {
+        action: "source_info", version: "1.21.1", className: "example.Fixture",
+    } });
+    assert.deepEqual(JSON.parse(info.content[0].text), { version: "1.21.1", className: "example/Fixture", cached: true, totalLines: 600 });
+    const missingInfo = await publicUser.client.callTool({ name: "mc_source", arguments: {
+        action: "source_info", version: "1.21.1", className: "example.Missing",
+    } });
+    assert.deepEqual(JSON.parse(missingInfo.content[0].text), { version: "1.21.1", className: "example/Missing", cached: false, totalLines: null });
+    const publicSearch = await publicUser.client.callTool({ name: "mc_source", arguments: {
+        action: "search_code", version: "1.21.1", query: "Synthetic fixture line 319",
+    } });
+    assert.ok(!publicSearch.isError, JSON.stringify(publicSearch));
+    assert.deepEqual(JSON.parse(publicSearch.content[0].text), [{ file: "example/Fixture.java", line: 319 }]);
     const indexedSearch = await publicUser.client.callTool({ name: "mc_source", arguments: {
         action: "search_indexed", version: "1.21.1", query: "fixture",
     } });

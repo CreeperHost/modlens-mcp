@@ -41,10 +41,24 @@ export const mcPaths = {
     decompiled:   (version: string) => join(CACHE_ROOT, "mc-decompiled-named", version),
     classFile:    (version: string, className: string) =>
         join(CACHE_ROOT, "mc-decompiled-named", version, `${className}.java`),
+    priorityDecompiled: (version: string) => join(CACHE_ROOT, "mc-priority-named", version),
+    priorityClassFile: (version: string, className: string) =>
+        join(CACHE_ROOT, "mc-priority-named", version, `${className}.java`),
 };
+
+const jarDownloads = new Map<string, Promise<string>>();
 
 /** Download the MC client JAR for a version if not cached, return local path. */
 export async function getMcJarPath(version: string): Promise<string> {
+    const existing = jarDownloads.get(version);
+    if (existing) return existing;
+    const download = downloadMcJar(version);
+    jarDownloads.set(version, download);
+    try { return await download; }
+    finally { jarDownloads.delete(version); }
+}
+
+async function downloadMcJar(version: string): Promise<string> {
     const jarPath = mcPaths.jar(version);
     if (await exists(jarPath)) return jarPath;
 

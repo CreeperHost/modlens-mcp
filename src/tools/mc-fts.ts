@@ -80,14 +80,15 @@ export async function indexMcVersion(version: string, force = false): Promise<{
         }
     }
 
+    if (skipped || !javaFiles.length) return { status: "partial", indexed, skipped };
     await updateMcVersion(mcVersionId, { indexed: true });
 
     return { status: "done", indexed, skipped };
 }
 
 /** Add one already-decompiled class to source search without marking the whole version indexed. */
-export async function indexMcClass(version: string, className: string): Promise<void> {
-    const content = await readFile(mcPaths.classFile(version, className), "utf8");
+export async function indexMcClass(version: string, className: string, sourcePath = mcPaths.classFile(version, className)): Promise<void> {
+    const content = await readFile(sourcePath, "utf8");
     const mcVersionId = await ensureMcVersionRecord(version);
     await upsertMcSourceFile(mcVersionId, className, content);
 }

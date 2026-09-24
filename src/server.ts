@@ -88,6 +88,7 @@ import { mcPaths } from "./minecraft.js";
 import { findModById, resolveModRefSlim } from "./repositories/mod.js";
 import { CACHE_ROOT } from "./cache.js";
 import { projectAction, projectToolSchema } from "./tools/project.js";
+import { hostedMinecraftVersionIndexStatus, scheduleHostedMinecraftVersionIndex } from "./tools/hosted-mc-index.js";
 import { runtimeAction, runtimeToolSchema, runtimeHub } from "./tools/runtime.js";
 import { reportIssue, reportIssueSchema } from "./tools/report-issue.js";
 import { hostedActions, hostedMinecraftSourceAccess, hostedMinecraftSourceTeams, HostedBudget, HostedPolicyError, hostedLimits, hostedPrincipal, runHostedTool } from "./hosted-policy.js";
@@ -238,7 +239,15 @@ function createMcpServer(principal?: string, allowMinecraftSource = false): McpS
         const publicDescription = `${description.split(". ")[0]}. Hosted access: ${actions.filter(Boolean).join(", ") || "analysis"}. Responses and cumulative usage are bounded; use focused queries and source ranges.`;
         server.tool(name, publicDescription, publicSchema, (async (args: Record<string, unknown>, extra: unknown) =>
             runHostedTool(name, args, principal, limits, hostedBudget,
-                async bounded => (handler as (args: Record<string, unknown>, extra: unknown) => any)(bounded, extra),
+                async bounded => {
+                    const result = await (handler as (args: Record<string, unknown>, extra: unknown) => any)(bounded, extra);
+                    if (name === "mc_source" && (!result.isError || ["search_indexed", "search_code"].includes(String(bounded.action)))) {
+                        for (const version of [bounded.version, bounded.mcVersion, bounded.versionA, bounded.versionB]) {
+                            scheduleHostedMinecraftVersionIndex(version);
+                        }
+                    }
+                    return result;
+                },
                 allowMinecraftSource)) as ToolCallback<S>);
     }
 
@@ -730,9 +739,9 @@ registerTool(
 
 registerTool(
     "mc_source",
-    "Vanilla Minecraft source code, decompilation, and validation — use this for vanilla MC classes (net/minecraft/...), NOT mod_bytecode. Requires version param. action=search_class|source_info|get_source|bytecode|class_members|find_refs|inheritance|diff|diff_detailed|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin|index_semantic|search_semantic|get_paths. source_info returns cached line count without source text or decompilation. get_paths returns the on-disk jar, decompiled source directory, and index paths so the agent can grep/search files natively. diff_detailed gives AST-level method/field changes with breaking-change flags per class; add semantic=true for cosine similarity scoring (requires Ollama + index_semantic run first). index_semantic/search_semantic require Ollama running.",
+    "Vanilla Minecraft source code, decompilation, and validation — use this for vanilla MC classes (net/minecraft/...), NOT mod_bytecode. Requires version param. action=search_class|source_info|index_status|get_source|bytecode|class_members|find_refs|inheritance|diff|diff_detailed|decompile|decompile_status|search_code|index|search_indexed|search_events|validate_aw|analyze_mixin|index_semantic|search_semantic|get_paths. source_info returns cached line count without source text or decompilation. index_status reports full-version index readiness. get_paths returns the on-disk jar, decompiled source directory, and index paths so the agent can grep/search files natively. diff_detailed gives AST-level method/field changes with breaking-change flags per class; add semantic=true for cosine similarity scoring (requires Ollama + index_semantic run first). index_semantic/search_semantic require Ollama running.",
     {
-        action:     z.enum(["search_class","source_info","get_source","bytecode","class_members","find_refs","inheritance","diff","diff_detailed","decompile","decompile_status","search_code","index","search_indexed","search_events","validate_aw","analyze_mixin","index_semantic","search_semantic","get_paths"]),
+        action:     z.enum(["search_class","source_info","index_status","get_source","bytecode","class_members","find_refs","inheritance","diff","diff_detailed","decompile","decompile_status","search_code","index","search_indexed","search_events","validate_aw","analyze_mixin","index_semantic","search_semantic","get_paths"]),
         version:    z.string().optional(),
         versionA:   z.string().optional(),
         versionB:   z.string().optional(),
@@ -761,6 +770,7 @@ registerTool(
         switch (action) {
             case "search_class":    result = await searchMinecraftClass(v!, query ?? className); break;
             case "source_info":     result = await getMinecraftSourceInfo(v!, className!); break;
+            case "index_status":    result = await hostedMinecraftVersionIndexStatus(v!); break;
             case "get_source":      result = principal !== undefined && !allowMinecraftSource
                 ? await prepareMinecraftSource(v!, className!)
                 : await getMinecraftSource(v!, className!, startLine, endLine, maxLines); break;

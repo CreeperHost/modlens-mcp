@@ -75,7 +75,7 @@ export const HOSTED_ACTIONS: Record<string, readonly string[]> = {
     platform: ["search", "check_updates", "batch_check_updates"],
     modpacks_ch: ["search", "featured", "info", "manifest", "resolve_pack", "list_versions", "search_mods", "mod_info", "search_ftb_mods", "ftb_mod_info", "list_pack_versions", "list_pack_files", "find_mod_in_packs"],
     mc_versions: ["list_mc", "list_neoforge", "list_forge", "list_fabric"],
-    mc_source: ["search_class", "source_info", "get_source", "bytecode", "class_members", "find_refs", "inheritance", "diff", "diff_detailed", "search_code", "search_indexed", "search_events", "validate_aw", "analyze_mixin", "search_semantic"],
+    mc_source: ["search_class", "source_info", "index_status", "get_source", "bytecode", "class_members", "find_refs", "inheritance", "diff", "diff_detailed", "search_code", "search_indexed", "search_events", "validate_aw", "analyze_mixin", "search_semantic"],
     mappings: ["find", "parchment", "list_parchment", "parchment_summary"],
     docs: ["get", "search", "list", "semantic_search"],
     primers: ["get", "by_version", "search", "list", "semantic_search"],

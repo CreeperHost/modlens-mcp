@@ -27,7 +27,21 @@ import { hasSrgMappings, remapMcJar, applyMcpNamesToSource, applyMcpNamesToFile,
  * helpers); modern obfuscated versions use Mojang mappings. Shared by the bulk and
  * single-class decompile paths so both produce the same class names.
  */
+const resolvedMcJars = new Map<string, Promise<{ jarPath: string; remapType: "srg" | "retromcp" | "mojmap" | "none" }>>();
+
 async function resolveMcDecompileJar(
+    version: string,
+    rawJarPath: string,
+): Promise<{ jarPath: string; remapType: "srg" | "retromcp" | "mojmap" | "none" }> {
+    const existing = resolvedMcJars.get(version);
+    if (existing) return existing;
+    const resolved = resolveMcDecompileJarUncached(version, rawJarPath);
+    resolvedMcJars.set(version, resolved);
+    try { return await resolved; }
+    finally { resolvedMcJars.delete(version); }
+}
+
+async function resolveMcDecompileJarUncached(
     version: string,
     rawJarPath: string,
 ): Promise<{ jarPath: string; remapType: "srg" | "retromcp" | "mojmap" | "none" }> {
@@ -113,6 +127,30 @@ export async function searchMinecraftClass(version: string, query?: string | nul
     return searchClasses(classes, query);
 }
 
+const priorityClassJobs = new Map<string, Promise<string>>();
+
+async function getPriorityMinecraftSource(version: string, internal: string): Promise<string> {
+    const file = mcPaths.priorityClassFile(version, internal);
+    const marker = `${file}.ready`;
+    if (await exists(marker) && await exists(file)) return readFile(file, "utf8");
+    const key = `${version}:${internal}`;
+    const existing = priorityClassJobs.get(key);
+    if (existing) return existing;
+    const job = (async () => {
+        const { jarPath, remapType } = await resolveMcDecompileJar(version, await getMcJarPath(version));
+        let source = await decompileClass(jarPath, internal, mcPaths.priorityDecompiled(version));
+        if (remapType === "srg") {
+            await applyMcpNamesToFile(file, version);
+            source = await readFile(file, "utf8");
+        }
+        await writeFile(marker, "ready");
+        return source;
+    })();
+    priorityClassJobs.set(key, job);
+    try { return await job; }
+    finally { priorityClassJobs.delete(key); }
+}
+
 /** get_minecraft_source — decompile a single class with optional line-range slicing. */
 export async function getMinecraftSource(
     version: string,
@@ -126,9 +164,14 @@ export async function getMinecraftSource(
     const internal = className.replace(/\./g, "/");
     const outDir = mcPaths.decompiled(version);
     const cached = mcPaths.classFile(version, internal);
+    const priority = mcPaths.priorityClassFile(version, internal);
 
     let source: string;
-    if (await exists(cached)) {
+    if (await exists(`${priority}.ready`) && await exists(priority) && await isDecompileDone(outDir) !== "done") {
+        source = await readFile(priority, "utf8");
+    } else if (await isDecompileDone(outDir) === "running") {
+        source = await getPriorityMinecraftSource(version, internal);
+    } else if (await exists(cached)) {
         source = await readFile(cached, "utf8");
     } else {
         const rawJarPath = await getMcJarPath(version);
@@ -161,8 +204,13 @@ export async function getMinecraftSourceInfo(version: string, className: string)
     validateVersion(version);
     validateClassName(className);
     const internal = className.replace(/\./g, "/");
-    const cached = mcPaths.classFile(version, internal);
-    if (!await exists(cached)) return { version, className: internal, cached: false, totalLines: null };
+    const priority = mcPaths.priorityClassFile(version, internal);
+    const standard = mcPaths.classFile(version, internal);
+    const status = await isDecompileDone(mcPaths.decompiled(version));
+    const cached = status === "done" && await exists(standard) ? standard
+        : await exists(`${priority}.ready`) && await exists(priority) ? priority
+        : status !== "running" && await exists(standard) ? standard : undefined;
+    if (!cached) return { version, className: internal, cached: false, totalLines: null };
     const source = await readFile(cached, "utf8");
     return { version, className: internal, cached: true, totalLines: source.split("\n").length };
 }
@@ -172,6 +220,10 @@ const classPreparations = new Map<string, ClassPreparation>();
 const classPreparationQueue: ClassPreparation[] = [];
 const activeClassPreparationVersions = new Set<string>();
 let activeClassPreparations = 0;
+
+export function hasPendingMinecraftClassPreparation(version: string): boolean {
+    return [...classPreparations.values()].some(job => job.version === version && job.state !== "failed");
+}
 
 function runClassPreparations(): void {
     while (activeClassPreparations < 2 && classPreparationQueue.length) {
@@ -183,9 +235,18 @@ function runClassPreparations(): void {
         activeClassPreparationVersions.add(job.version);
         void (async () => {
             try {
-                // The returned line remains private. Decompilation caches the complete class.
-                await getMinecraftSource(job.version, job.className, 1, 1, 1);
-                await indexMcClass(job.version, job.className);
+                const priority = mcPaths.priorityClassFile(job.version, job.className);
+                const standard = mcPaths.classFile(job.version, job.className);
+                let sourcePath = priority;
+                if ((!await exists(`${priority}.ready`) || !await exists(priority))
+                    && await isDecompileDone(mcPaths.decompiled(job.version)) !== "running" && await exists(standard)) {
+                    sourcePath = standard;
+                } else {
+                    await getPriorityMinecraftSource(job.version, job.className);
+                }
+                if (!await isMcVersionIndexed(job.version) || !await exists(standard)) {
+                    await indexMcClass(job.version, job.className, sourcePath);
+                }
                 classPreparations.delete(`${job.version}:${job.className}`);
             } catch (error) {
                 job.state = "failed";
@@ -205,9 +266,6 @@ export async function prepareMinecraftSource(version: string, className: string)
     const info = await getMinecraftSourceInfo(version, className);
     const internal = info.className;
     if (await isMcClassIndexed(version, internal)) return { ...info, indexed: true, status: "ready" };
-    if (await isDecompileDone(mcPaths.decompiled(version)) === "running") {
-        return { ...info, indexed: false, status: "preparing" };
-    }
     const key = `${version}:${internal}`;
     let job = classPreparations.get(key);
     if (job?.state === "failed" && (job.retryAfter ?? 0) <= Date.now()) {
@@ -300,6 +358,34 @@ export async function diffMcVersions(versionA: string, versionB: string) {
 }
 
 /** decompile_minecraft_version — background Vineflower decompile of the entire JAR. */
+const mcpNamingJobs = new Map<string, Promise<void>>();
+
+export async function ensureMcSourceNames(version: string): Promise<void> {
+    if (!hasSrgMappings(version)) return;
+    const outDir = mcPaths.decompiled(version);
+    const marker = join(outDir, ".mcp-names.done");
+    if (await exists(marker)) return;
+    const existing = mcpNamingJobs.get(version);
+    if (existing) return existing;
+    const job = (async () => {
+        for (let i = 0; i < 360; i++) {
+            const status = await isDecompileDone(outDir);
+            if (status === "done") {
+                const result = await applyMcpNamesToSource(outDir, version);
+                await writeFile(marker, "done");
+                console.error(`[modlens] Applied MCP names to ${version}: ${result.replaced} replacements in ${result.files} files`);
+                return;
+            }
+            if (status === "error") throw new Error(`Minecraft ${version} decompilation failed`);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+        throw new Error(`Minecraft ${version} decompilation timed out`);
+    })();
+    mcpNamingJobs.set(version, job);
+    try { await job; }
+    finally { mcpNamingJobs.delete(version); }
+}
+
 export async function decompileMcVersion(version: string, force = false) {
     const outDir = mcPaths.decompiled(version);
     const jarPath = await getMcJarPath(version);
@@ -309,6 +395,8 @@ export async function decompileMcVersion(version: string, force = false) {
         const status = await isDecompileDone(outDir);
         if (status === "done") {
             await updateMcVersion(dbId, { decompiled: true, decompPath: outDir });
+            if (hasSrgMappings(version)) void ensureMcSourceNames(version).catch(error =>
+                console.error("[modlens] Minecraft source naming failed", version, error));
             return { status: "already_done", outDir };
         }
         if (status === "running") return { status: "running", outDir };
@@ -318,28 +406,14 @@ export async function decompileMcVersion(version: string, force = false) {
     const { jarPath: decompileJarPath, remapType } = await resolveMcDecompileJar(version, jarPath);
     const remapped = remapType !== "none";
 
+    if (remapType === "srg") await unlink(join(outDir, ".mcp-names.done")).catch(() => {});
     await decompileJar(decompileJarPath, outDir);
     await updateMcVersion(dbId, { decompPath: outDir, jarPath });
 
     // For SRG versions, apply MCP human-readable names post-decompile
     // (RetroMCP versions already have final names baked in via Tiny v2)
-    if (remapped && remapType === "srg") {
-        // Wait for decompile to finish before applying MCP names
-        // We schedule a background watcher that applies names when decompile completes
-        (async () => {
-            // Poll until done (max 30 min)
-            for (let i = 0; i < 360; i++) {
-                await new Promise(r => setTimeout(r, 5000));
-                const s = await isDecompileDone(outDir);
-                if (s === "done") {
-                    const result = await applyMcpNamesToSource(outDir, version);
-                    console.error(`[modlens] Applied MCP names to ${version}: ${result.replaced} replacements in ${result.files} files`);
-                    return;
-                }
-                if (s === "error") return;
-            }
-        })();
-    }
+    if (remapped && remapType === "srg") void ensureMcSourceNames(version).catch(error =>
+        console.error("[modlens] Minecraft source naming failed", version, error));
 
     return { status: "started", outDir, remapped };
 }
@@ -352,6 +426,8 @@ export async function decompileMcVersionStatus(version: string) {
     if (status === "done") {
         const dbId = await ensureMcVersionRecord(version);
         await updateMcVersion(dbId, { decompiled: true, decompPath: outDir });
+        if (hasSrgMappings(version)) void ensureMcSourceNames(version).catch(error =>
+            console.error("[modlens] Minecraft source naming failed", version, error));
     }
 
     return { version, status, outDir };
@@ -382,10 +458,11 @@ export async function searchMcCode(
         const indexed = await isMcVersionIndexed(version);
         if (indexed) {
             const ftsResults = await searchMcIndexed(query, version, limit);
-            return ftsResults.map((r) => ({
-                file: r.className + ".java",
-                line: 0, // FTS returns snippets, not line numbers
-                text: r.snippet,
+            return Promise.all(ftsResults.map(async r => {
+                const path = mcPaths.classFile(version, r.className);
+                const content = await readFile(path, "utf8").catch(() => "");
+                const line = content.split("\n").findIndex(value => value.toLowerCase().includes(query.toLowerCase())) + 1;
+                return { file: r.className + ".java", line, text: r.snippet };
             }));
         }
     }
