@@ -1098,7 +1098,9 @@ npx -y @creeperhost/modlens-mcp --local-mod --request-file local-request.json
 
 ### Bind allowances to authenticated accounts
 
-For public HTTP access, put an authenticated HTTPS gateway in front of the server. Set `MODLENS_HOSTED_PROXY_SECRET` to a random secret of at least 32 characters. The gateway must remove caller-provided `x-modlens-*` headers and inject:
+For built-in OAuth sign-in, set `MODLENS_HOSTED_AUTH=oauth` and configure `MODLENS_OAUTH_PUBLIC_URL` (the public `/mcp` URL), `MODLENS_OAUTH_ISSUER`, `MODLENS_OAUTH_CLIENT_ID`, `MODLENS_OAUTH_SCOPES`, and a stable base64-encoded 32-byte `MODLENS_OAUTH_STORAGE_KEY`. Set `MODLENS_OAUTH_PROFILE_URL` unless provider discovery supplies a userinfo endpoint. The provider must support authorization code with S256 PKCE and refresh tokens for persistent sign-in. Register `<public origin>/oauth/upstream/callback` as the provider client's redirect URI. `MODLENS_OAUTH_CLIENT_SECRET` is optional. `MODLENS_OAUTH_SUBJECT_FIELD` defaults to `sub`; optional `MODLENS_OAUTH_REQUIRED_FIELD` and `MODLENS_OAUTH_REQUIRED_VALUE` restrict access using a profile field. The OAuth routes and well-known metadata must be reachable through the public HTTPS origin. OAuth mode does not enable hosted Minecraft source.
+
+For gateway authentication (the default HTTP mode), put an authenticated HTTPS gateway in front of the server. Set `MODLENS_HOSTED_PROXY_SECRET` to a random secret of at least 32 characters. The gateway must remove caller-provided `x-modlens-*` headers and inject:
 
 - `x-modlens-proxy-secret`: the server's secret, never sent to clients.
 - `x-modlens-user-id`: a stable, verified account identifier selected by the gateway. Reconnecting, rotating tokens, or using another client must retain this identifier.

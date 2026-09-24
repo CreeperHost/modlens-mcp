@@ -92,6 +92,7 @@ import { hostedMinecraftVersionIndexStatus, scheduleHostedMinecraftVersionIndex 
 import { runtimeAction, runtimeToolSchema, runtimeHub } from "./tools/runtime.js";
 import { reportIssue, reportIssueSchema } from "./tools/report-issue.js";
 import { hostedActions, hostedMinecraftSourceAccess, hostedMinecraftSourceTeams, HostedBudget, HostedPolicyError, hostedLimits, hostedPrincipal, runHostedTool } from "./hosted-policy.js";
+import { HostedOAuth, HostedOAuthError } from "./hosted-oauth.js";
 import { reviewHostedMod, localModPlan } from "./hosted-mod-license.js";
 
 // Load .env — try ~/.modlens/.env first (npx/installed users), then local .env (git-clone users)
@@ -1419,10 +1420,19 @@ async function startHttpServer(port: number): Promise<void> {
     const mcpPath = process.env.MCP_PATH ?? "/mcp";
     const host = process.env.MCP_HOST ?? "0.0.0.0";
     const restricted = process.env.MODLENS_HOSTED_LIMITS !== "0";
+    const authMode = process.env.MODLENS_HOSTED_AUTH ?? "gateway";
+    if (authMode !== "gateway" && authMode !== "oauth") throw new Error("MODLENS_HOSTED_AUTH must be gateway or oauth");
+    if (authMode === "oauth" && !restricted) throw new Error("OAuth requires hosted limits");
     if (restricted) hostedLimits(); // Reject invalid operator configuration at startup.
     const proxySecret = process.env.MODLENS_HOSTED_PROXY_SECRET;
     if (proxySecret && proxySecret.length < 32) throw new Error("MODLENS_HOSTED_PROXY_SECRET must have at least 32 characters");
-    const sourceTeams = restricted ? hostedMinecraftSourceTeams(process.env, proxySecret) : new Set<string>();
+    if (authMode === "oauth" && proxySecret) throw new Error("OAuth and gateway credentials cannot be combined");
+    if (authMode === "oauth" && process.env.MODLENS_HOSTED_MC_SOURCE === "1")
+        throw new Error("OAuth mode cannot enable hosted Minecraft source");
+    const oauth = authMode === "oauth" ? await HostedOAuth.create() : undefined;
+    if (oauth && new URL(process.env.MODLENS_OAUTH_PUBLIC_URL!).pathname !== mcpPath)
+        throw new Error("MODLENS_OAUTH_PUBLIC_URL path must match MCP_PATH");
+    const sourceTeams = restricted && !oauth ? hostedMinecraftSourceTeams(process.env, proxySecret) : new Set<string>();
 
     // Active sessions keyed by Mcp-Session-Id header.
     const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -1476,6 +1486,17 @@ async function startHttpServer(port: number): Promise<void> {
             return sendJson(res, 200, { status: "ok" });
         }
 
+        if (oauth) {
+            try { if (await oauth.handle(req, res, url)) return; }
+            catch (err) {
+                if (err instanceof HostedOAuthError) {
+                    return sendJson(res, err.status, { error: err.code, error_description: err.message });
+                }
+                logServerError(`oauth ${req.method} ${url.pathname}`, err);
+                return sendJson(res, 503, { error: "temporarily_unavailable" });
+            }
+        }
+
         if (url.pathname !== mcpPath) {
             return sendJson(res, 404, { error: "not found" });
         }
@@ -1483,8 +1504,9 @@ async function startHttpServer(port: number): Promise<void> {
         const sessionId = getHeader(req, "mcp-session-id");
 
         try {
-            const principal = restricted ? hostedPrincipal(req.headers, proxySecret) : undefined;
-            const allowMinecraftSource = restricted && hostedMinecraftSourceAccess(req.headers, sourceTeams);
+            const principal = oauth ? await oauth.authenticate(req)
+                : restricted ? hostedPrincipal(req.headers, proxySecret) : undefined;
+            const allowMinecraftSource = !oauth && restricted && hostedMinecraftSourceAccess(req.headers, sourceTeams);
             // Existing session — route to its transport.
             if (sessionId) {
                 const transport = transports.get(sessionId);
@@ -1539,6 +1561,10 @@ async function startHttpServer(port: number): Promise<void> {
             });
         } catch (err) {
             if (!res.headersSent) {
+                if (err instanceof HostedOAuthError && oauth) {
+                    if (err.status === 401) { oauth.challenge(res); return; }
+                    return sendJson(res, err.status, { error: err.code });
+                }
                 if (err instanceof HostedPolicyError) return sendJson(res, 401, { error: err.message });
                 if (err instanceof HttpBodyTooLargeError) return sendJson(res, 413, { error: err.message });
                 if (err instanceof JsonBodyParseError) {

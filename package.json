@@ -41,6 +41,7 @@
     "test:primers:live": "node scripts/test-primers-live.mjs",
     "test:project:gradle": "node scripts/test-project-gradle.mjs",
     "test:project:http": "node scripts/test-project-http.mjs",
+    "test:hosted:oauth": "node scripts/test-hosted-oauth.mjs",
     "test:watch": "vitest",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
