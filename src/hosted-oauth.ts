@@ -17,7 +17,7 @@ type AuthConfig = {
 };
 
 export class HostedOAuthError extends Error {
-    constructor(message: string, public status = 400, public code = "invalid_request") { super(message); }
+    constructor(message: string, public status = 400, public code = "invalid_request", public flowId?: string) { super(message); }
 }
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -31,6 +31,51 @@ const redirect = (res: ServerResponse, url: URL) => {
     res.writeHead(302, { Location: url.toString(), "Cache-Control": "no-store" });
     res.end();
 };
+const htmlHeaders = {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+};
+const escapeHtml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+
+function page(title: string, content: string, tone: "consent" | "error" = "consent"): string {
+    const status = tone === "error" ? "CONNECTION INTERRUPTED" : "APP CONNECTION";
+    const year = new Date().getUTCFullYear();
+    return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>${escapeHtml(title)} · ModLens</title>
+<style>
+:root{--page:#171c21;--panel-top:#1e2328;--panel-bottom:#171c21;--panel-deep:#13181d;--line:#2b3138;--line-dark:#13171c;--text:#f0f0f5;--muted:#8b97a5;--green:#06c200;--green-dark:#035c00;--focus:#65dcd5;--error:#ffa7cc}
+*{box-sizing:border-box}
+html,body{margin:0;min-width:320px;min-height:100%;background:var(--page);color:var(--text);font-family:Inter,"Segoe UI Variable","Segoe UI",sans-serif;font-size:16px;line-height:1.5}
+body{min-height:100vh;background:linear-gradient(-45deg,transparent,#ffffff03,#ffffff0d,#ffffff1a);display:flex;flex-direction:column}
+.page{width:100%;min-height:100vh;display:flex;flex-direction:column;justify-content:space-between}
+main{width:100%;display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;padding:38px 17px 24px}
+.brand{display:flex;align-items:center;justify-content:center;margin:0 auto 22px;color:white}.brand-copy{text-align:center;line-height:1}.brand-copy strong{display:block;font-size:21px;font-weight:750;letter-spacing:.13em}.brand-copy small{display:block;margin-top:7px;color:#ffffff73;font-size:10px;font-weight:650;letter-spacing:.31em}
+.card{width:min(638px,calc(100vw - 34px));border:1px solid var(--line);outline:1px solid var(--line-dark);border-radius:10px;overflow:hidden;background:linear-gradient(180deg,var(--panel-top),var(--panel-bottom));box-shadow:0 0 25px rgba(0,0,0,.2)}
+.content{padding:32px;text-align:left}.eyebrow{display:block;margin:0 0 7px;color:${tone === "error" ? "var(--error)" : "#72d96e"};font-size:10px;font-weight:700;letter-spacing:.17em}.content h1{margin:0;color:var(--text);font-family:"Centra No 2","Segoe UI Variable","Segoe UI",sans-serif;font-size:30px;line-height:36px;letter-spacing:-.03em;font-weight:500}.lead,.content>p{margin:9px 0 0;color:#ffffffb3;font-size:14px;line-height:1.6}
+.app{display:flex;align-items:center;gap:12px;margin:20px 0;padding:12px;background:var(--panel-deep);border:1px solid var(--line);border-radius:6px}.app-icon{display:flex;align-items:center;justify-content:center;width:36px;height:36px;flex:0 0 auto;border-radius:50%;background:#06c20020;color:#8cdd88;font:600 12px/1 Consolas,monospace}.app-copy{min-width:0}.app-origin{display:block;overflow:hidden;text-overflow:ellipsis;color:#f0f0f5;font:600 13px/1.45 Consolas,monospace;white-space:nowrap}.app-label{display:block;color:var(--muted);font-size:11px}
+.permissions{margin:20px 0;padding-left:22px;color:#d7dbe0;font-size:13px;line-height:1.65}.permissions li+li{margin-top:9px}.permissions li::marker{color:#48c544}
+form{margin:0}.actions{display:grid;grid-template-columns:1fr 1.6fr;gap:12px;margin-top:24px}button{display:inline-flex;min-height:48px;align-items:center;justify-content:center;appearance:none;border:1px solid transparent;border-radius:4px;padding:10px 16px;color:white;font:500 14px/1 "Segoe UI Variable","Segoe UI",sans-serif;cursor:pointer;transition:box-shadow .18s ease,background .18s ease}button:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:3px}.primary{background:linear-gradient(to left,var(--green),var(--green-dark))}.primary:hover{box-shadow:0 0 20px #42d80854}.secondary{background:#242b33;border-color:#343b44}.secondary:hover{background:#2d353e}
+.note{margin:12px 0 0!important;color:#ffffff73!important;font-size:11px!important}.error-code{display:block;margin-top:20px;padding:12px;border:1px solid #d1005650;border-radius:4px;background:#d1005615;color:var(--error);font:12px/1.55 Consolas,monospace;overflow-wrap:anywhere}
+footer{width:100%;margin-top:32px;padding:20px 40px;border-top:1px solid #262626;background:#0000000f;color:#ffffff73;font-size:10px}.footer-row{display:flex;align-items:center;gap:24px;max-width:1180px;margin:auto}.footer-brand{color:#fff;font-weight:750;letter-spacing:.14em}.copyright{max-width:630px;text-transform:uppercase}.footer-spacer{flex:1}.footer-links{display:flex;gap:14px}.footer-links a{color:var(--green);text-decoration:none;text-transform:uppercase}.footer-links a:hover{text-decoration:underline}
+@media(max-width:620px){main{padding-top:28px}.content{padding:24px}.actions{grid-template-columns:1fr}.primary{grid-row:1}.secondary{grid-row:2}.app{align-items:flex-start}.footer-row{flex-direction:column;text-align:center;gap:10px}footer{padding:20px}.copyright{max-width:100%}.footer-links{flex-wrap:wrap;justify-content:center}}
+@media(prefers-reduced-motion:reduce){button{transition:none}}
+</style>
+</head>
+<body>
+<div class="page"><main><div class="brand"><span class="brand-copy"><strong>CREEPERHOST</strong><small>MODLENS</small></span></div><section class="card"><div class="content"><span class="eyebrow">${status}</span>${content}</div></section></main>
+<footer><div class="footer-row"><span class="footer-brand">CREEPERHOST</span><span class="copyright">© 2011 - ${year} CreeperHost® LTD. All rights reserved. Registered in England and Wales · Company #08401051 · VAT #GB 160 6059 26</span><span class="footer-spacer"></span><nav class="footer-links" aria-label="Legal"><a href="https://www.creeperhost.net/tos" target="_blank" rel="noopener">Terms</a><a href="https://www.creeperhost.net/privacy" target="_blank" rel="noopener">Privacy</a><a href="https://www.creeperhost.net/policies" target="_blank" rel="noopener">Policies</a></nav></div></footer></div>
+</body>
+</html>`;
+}
 const field = (value: unknown, path: string): unknown => path.split(".").reduce<unknown>((current, part) =>
     current && typeof current === "object" && !Array.isArray(current) ? (current as Record<string, unknown>)[part] : undefined, value);
 
@@ -96,6 +141,19 @@ export class HostedOAuth {
     private ready?: Promise<void>;
     private requestCounts = new Map<string, { minute: number; count: number }>();
     private constructor(private config: AuthConfig, private database: () => Promise<Database>) {}
+
+    private audit(event: string, fields: Record<string, string | number | boolean | undefined> = {}): void {
+        console.error(`[modlens] oauth ${JSON.stringify({ event, ...fields })}`);
+    }
+
+    private clientRef(clientId: string): string { return sha(clientId).slice(0, 12); }
+
+    logError(method: string | undefined, route: string, error: HostedOAuthError): string {
+        const incident = randomBytes(6).toString("hex");
+        this.audit("request_failed", { incident, flow: error.flowId, method: method ?? "UNKNOWN", route,
+            status: error.status, code: error.code, description: error.message });
+        return incident;
+    }
 
     static async create(env: NodeJS.ProcessEnv = process.env, database: () => Promise<Database> = getDb): Promise<HostedOAuth> {
         const resource = secureUrl(env.MODLENS_OAUTH_PUBLIC_URL ?? "", "MODLENS_OAUTH_PUBLIC_URL", true);
@@ -173,11 +231,28 @@ export class HostedOAuth {
         return id;
     }
 
+    private async putObjectAt(id: string, kind: string, payload: unknown, ttl: number): Promise<void> {
+        const db = await this.db();
+        await db.$executeRawUnsafe(`INSERT INTO hosted_oauth_objects (id,kind,payload,expires) VALUES ($1,$2,$3,$4)
+            ON CONFLICT (id) DO UPDATE SET kind=$2,payload=$3,expires=$4`,
+        sha(id), kind, this.seal(JSON.stringify(payload)), now() + ttl);
+    }
+
+    private async getObject(id: string, kind: string): Promise<unknown | undefined> {
+        const db = await this.db();
+        const rows = await db.$queryRawUnsafe<RecordRow[]>(`SELECT id,kind,payload,expires FROM hosted_oauth_objects
+            WHERE id=$1 AND kind=$2 AND expires>$3`, sha(id), kind, now());
+        return rows.length === 1 ? JSON.parse(this.open(rows[0].payload)) : undefined;
+    }
+
     private async takeObject(id: string, kind: string): Promise<unknown> {
         const db = await this.db();
         const rows = await db.$queryRawUnsafe<RecordRow[]>(`DELETE FROM hosted_oauth_objects
             WHERE id=$1 AND kind=$2 AND expires>$3 RETURNING id,kind,payload,expires`, sha(id), kind, now());
-        if (rows.length !== 1) throw new HostedOAuthError("Expired or reused authorization", 400, "invalid_grant");
+        if (rows.length !== 1) {
+            const label = kind === "state" ? "provider callback" : kind === "approval" ? "consent request" : "authorization code";
+            throw new HostedOAuthError(`Expired or reused ${label}`, 400, "invalid_grant");
+        }
         return JSON.parse(this.open(rows[0].payload));
     }
 
@@ -243,6 +318,19 @@ export class HostedOAuth {
 
     challenge(res: ServerResponse): void {
         json(res, 401, { error: "unauthorized" }, { "WWW-Authenticate": `Bearer resource_metadata="${this.metadataUrl()}", scope="modlens"` });
+    }
+
+    browserError(res: ServerResponse, error: HostedOAuthError, incident?: string): void {
+        const expired = error.code === "invalid_grant" && error.message.startsWith("Expired or reused");
+        const title = expired ? "This connection request has expired" : "ModLens could not finish connecting";
+        const detail = expired
+            ? "Return to Codex and start the connection again. Authorization requests are short-lived and can only be used once."
+            : "Return to Codex and try connecting again. If the problem continues, check the ModLens server logs for the matching OAuth request.";
+        const reference = incident ? ` · ref ${incident}` : "";
+        const content = `<h1>${escapeHtml(title)}</h1><p class="lead">${escapeHtml(detail)}</p>`
+            + `<span class="error-code">${escapeHtml(error.code)} · ${escapeHtml(error.message + reference)}</span>`;
+        res.writeHead(error.status, htmlHeaders);
+        res.end(page(title, content, "error"));
     }
 
     async authenticate(req: IncomingMessage): Promise<string> {
@@ -331,6 +419,7 @@ export class HostedOAuth {
             const db = await this.db();
             await db.$executeRawUnsafe(`INSERT INTO hosted_oauth_clients (id,redirect_uris,created) VALUES ($1,$2,$3)`,
                 id, JSON.stringify(redirects), now());
+            this.audit("client_registered", { client: this.clientRef(id), redirects: redirects.length });
             json(res, 201, { client_id: id, redirect_uris: redirects, grant_types: ["authorization_code", "refresh_token"],
                 response_types: ["code"], token_endpoint_auth_method: "none" });
             return true;
@@ -351,8 +440,11 @@ export class HostedOAuth {
             const scope = params.get("scope") ?? "modlens";
             if (scope !== "modlens") throw new HostedOAuthError("Unsupported scope", 400, "invalid_scope");
             const verifier = randomBytes(32).toString("base64url");
-            const state = await this.putObject("state", { clientId, callback, resource,
+            const flowId = randomBytes(6).toString("hex");
+            const state = await this.putObject("state", { flowId, clientId, callback, resource,
                 challenge: params.get("code_challenge"), clientState: params.get("state") ?? "", verifier }, 600);
+            this.audit("authorization_started", { flow: flowId, client: this.clientRef(clientId),
+                redirectOrigin: new URL(callback).origin });
             const upstream = new URL(this.config.authorizeUrl);
             upstream.searchParams.set("response_type", "code");
             upstream.searchParams.set("client_id", this.config.clientId);
@@ -367,8 +459,11 @@ export class HostedOAuth {
         if (route === "/oauth/upstream/callback" && req.method === "GET") {
             uniqueQuery(url.searchParams);
             const state = await this.takeObject(required(url.searchParams, "state"), "state") as {
-                clientId: string; callback: string; resource: string; challenge: string; clientState: string; verifier: string;
+                flowId: string; clientId: string; callback: string; resource: string; challenge: string;
+                clientState: string; verifier: string;
             };
+            this.audit("upstream_callback_received", { flow: state.flowId, client: this.clientRef(state.clientId),
+                providerError: url.searchParams.has("error") });
             const callback = new URL(state.callback);
             if (url.searchParams.has("error")) {
                 callback.searchParams.set("error", url.searchParams.get("error") ?? "access_denied");
@@ -376,17 +471,23 @@ export class HostedOAuth {
                 const reportedIssuer = url.searchParams.get("iss");
                 if ((this.config.requiresIss && !reportedIssuer) ||
                     (reportedIssuer && reportedIssuer !== this.config.issuer))
-                    throw new HostedOAuthError("Provider issuer mismatch", 400, "invalid_grant");
+                    throw new HostedOAuthError("Provider issuer mismatch", 400, "invalid_grant", state.flowId);
                 const values = new URLSearchParams({ grant_type: "authorization_code", code: required(url.searchParams, "code"),
                     redirect_uri: this.callbackUrl(), code_verifier: state.verifier });
                 const upstream = await this.upstreamToken(values);
                 const profile = await this.profile(upstream.access_token);
                 if (!profile.allowed) throw new HostedOAuthError("Account access denied", 403, "access_denied");
                 const approval = await this.putObject("approval", { ...state, upstream, subject: profile.subject }, 600);
-                const destination = callback.origin.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
-                res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
-                    "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" });
-                res.end(`<!doctype html><html><meta charset="utf-8"><title>Connect to ModLens</title><body><h1>Connect to ModLens</h1><p>Allow the application at <strong>${destination}</strong> to use your hosted ModLens access?</p><form method="post" action="/oauth/approve"><input type="hidden" name="approval" value="${approval}"><button name="decision" value="allow">Allow</button><button name="decision" value="deny">Deny</button></form></body></html>`);
+                this.audit("consent_presented", { flow: state.flowId, client: this.clientRef(state.clientId),
+                    redirectOrigin: callback.origin });
+                const destination = escapeHtml(callback.origin);
+                const content = `<h1>Allow access?</h1><p>The application below wants to connect to your hosted ModLens account.</p>`
+                    + `<div class="app"><span class="app-icon" aria-hidden="true">&gt;_</span><span class="app-copy"><strong class="app-origin">${destination}</strong><small class="app-label">Requesting application</small></span></div>`
+                    + `<ul class="permissions"><li>Run hosted ModLens tools on your behalf</li><li>Use your hosted account allowance</li></ul>`
+                    + `<form method="post" action="/oauth/approve"><input type="hidden" name="approval" value="${escapeHtml(approval)}"><div class="actions"><button class="secondary" name="decision" value="deny">Cancel</button><button class="primary" name="decision" value="allow">Allow access</button></div></form>`
+                    + `<p class="note">Only continue if you started this request in the app.</p>`;
+                res.writeHead(200, htmlHeaders);
+                res.end(page("Connect", content));
                 return true;
             }
             if (state.clientState) callback.searchParams.set("state", state.clientState);
@@ -396,17 +497,32 @@ export class HostedOAuth {
         }
         if (route === "/oauth/approve" && req.method === "POST") {
             const params = form(await body(req));
-            const approval = await this.takeObject(required(params, "approval"), "approval") as {
-                clientId: string; callback: string; resource: string; challenge: string; clientState: string;
+            const approvalId = required(params, "approval");
+            const decision = params.get("decision") === "allow" ? "allow" : "deny";
+            let approval: {
+                flowId: string; clientId: string; callback: string; resource: string; challenge: string; clientState: string;
                 upstream: UpstreamTokens; subject: string;
             };
+            try {
+                approval = await this.takeObject(approvalId, "approval") as typeof approval;
+            } catch (error) {
+                const previous = await this.getObject(approvalId, "approval_result") as
+                    { flowId: string; decision: string; callback: string } | undefined;
+                if (!(error instanceof HostedOAuthError) || !previous || previous.decision !== decision) throw error;
+                this.audit("consent_submission_retried", { flow: previous.flowId, decision });
+                redirect(res, new URL(previous.callback));
+                return true;
+            }
             const callback = new URL(approval.callback);
-            if (params.get("decision") === "allow") {
+            if (decision === "allow") {
                 const code = await this.putObject("code", approval, 60);
                 callback.searchParams.set("code", code);
             } else callback.searchParams.set("error", "access_denied");
             if (approval.clientState) callback.searchParams.set("state", approval.clientState);
             callback.searchParams.set("iss", this.issuerUrl());
+            await this.putObjectAt(approvalId, "approval_result", { flowId: approval.flowId, decision,
+                callback: callback.toString() }, 30);
+            this.audit("consent_decided", { flow: approval.flowId, client: this.clientRef(approval.clientId), decision });
             redirect(res, callback);
             return true;
         }
@@ -417,12 +533,13 @@ export class HostedOAuth {
             const grantType = required(params, "grant_type");
             if (grantType === "authorization_code") {
                 const code = await this.takeObject(required(params, "code"), "code") as {
-                    clientId: string; callback: string; resource: string; challenge: string; upstream: UpstreamTokens; subject: string;
+                    flowId: string; clientId: string; callback: string; resource: string; challenge: string;
+                    upstream: UpstreamTokens; subject: string;
                 };
                 if (code.clientId !== clientId || code.callback !== required(params, "redirect_uri") ||
                     challenge(required(params, "code_verifier")) !== code.challenge ||
                     (params.has("resource") && params.get("resource") !== code.resource))
-                    throw new HostedOAuthError("Authorization code binding failed", 400, "invalid_grant");
+                    throw new HostedOAuthError("Authorization code binding failed", 400, "invalid_grant", code.flowId);
                 const grantId = token("mlg_");
                 const refresh = code.upstream.refresh_token ? token("mlr_") : undefined;
                 const grant: GrantRow = { id: grantId, client_id: clientId, subject: code.subject, resource: code.resource,
@@ -435,7 +552,9 @@ export class HostedOAuth {
                     upstream_expires,refresh_hash,refresh_expires) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
                     grant.id, grant.client_id, grant.subject, grant.resource, grant.upstream_access, grant.upstream_refresh,
                     grant.upstream_expires, grant.refresh_hash, grant.refresh_expires);
-                json(res, 200, { ...await this.issue(grant), ...(refresh ? { refresh_token: refresh } : {}) });
+                const response = { ...await this.issue(grant), ...(refresh ? { refresh_token: refresh } : {}) };
+                this.audit("token_issued", { flow: code.flowId, client: this.clientRef(clientId), refresh: !!refresh });
+                json(res, 200, response);
                 return true;
             }
             if (grantType === "refresh_token") {

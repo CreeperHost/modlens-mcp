@@ -68,16 +68,17 @@ const env = { ...process.env, MCP_PORT: String(mcpPort), MCP_HOST: '127.0.0.1',
     MODLENS_OAUTH_PROFILE_URL: issuer + '/profile', MODLENS_OAUTH_REQUIRED_FIELD: 'is_partner',
     MODLENS_OAUTH_REQUIRED_VALUE: 'true', MODLENS_OAUTH_STORAGE_KEY: randomBytes(32).toString('base64') };
 let server;
+let serverOutput = '';
 async function start() {
     server = spawn(process.execPath, [entry], { cwd: root, env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
-    let output = '';
-    server.stderr.on('data', chunk => { output += chunk; });
+    serverOutput = '';
+    server.stderr.on('data', chunk => { serverOutput += chunk; });
     await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`ModLens startup timed out: ${output}`)), 20000);
-        const ready = () => { if (output.includes('listening on')) { clearTimeout(timer); server.stderr.off('data', ready); resolve(); } };
+        const timer = setTimeout(() => reject(new Error(`ModLens startup timed out: ${serverOutput}`)), 20000);
+        const ready = () => { if (serverOutput.includes('listening on')) { clearTimeout(timer); server.stderr.off('data', ready); resolve(); } };
         server.stderr.on('data', ready);
         server.once('error', reject);
-        server.once('exit', () => { clearTimeout(timer); reject(new Error(`ModLens exited: ${output}`)); });
+        server.once('exit', () => { clearTimeout(timer); reject(new Error(`ModLens exited: ${serverOutput}`)); });
         ready();
     });
 }
@@ -109,11 +110,26 @@ async function login() {
     assert.equal(back.status, 302);
     const done = await fetchManual(back.headers.get('location'));
     assert.equal(done.status, 200);
-    const approval = (await done.text()).match(/name="approval" value="([^"]+)"/)?.[1];
+    assert.match(done.headers.get('content-security-policy'), /default-src 'none'/);
+    const consentPage = await done.text();
+    assert.match(consentPage, /CREEPERHOST/);
+    assert.match(consentPage, /Allow access\?/);
+    assert.match(consentPage, /Only continue if you started this request/);
+    const approval = consentPage.match(/name="approval" value="([^"]+)"/)?.[1];
     assert.ok(approval);
     const approved = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/approve`, { method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ approval, decision: 'allow' }) });
     assert.equal(approved.status, 302);
+    const duplicateApproval = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/approve`, { method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ approval, decision: 'allow' }) });
+    assert.equal(duplicateApproval.status, 302);
+    assert.equal(duplicateApproval.headers.get('location'), approved.headers.get('location'),
+        'a retried consent submission receives the original authorization redirect');
+    const changedDecision = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/approve`, { method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ approval, decision: 'deny' }) });
+    assert.equal(changedDecision.status, 400);
+    assert.match(changedDecision.headers.get('content-type'), /text\/html/);
+    assert.match(await changedDecision.text(), /Expired or reused consent request/);
     const result = new URL(approved.headers.get('location'));
     assert.equal(result.searchParams.get('state'), 'client-state');
     assert.equal(result.searchParams.get('iss'), `http://127.0.0.1:${mcpPort}`);
@@ -126,6 +142,12 @@ async function login() {
     const replay = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/token`, { method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: tokenBody });
     assert.equal(replay.status, 400, 'authorization code cannot be replayed');
+    assert.deepEqual(await replay.json(), { error: 'invalid_grant', error_description: 'Expired or reused authorization code' });
+    assert.match(serverOutput, /"event":"consent_submission_retried"/);
+    assert.match(serverOutput, /"event":"token_issued"/);
+    assert.match(serverOutput, /"event":"request_failed".*"route":"\/oauth\/token"/);
+    for (const secret of [approval, result.searchParams.get('code'), verifier, tokens.access_token, tokens.refresh_token])
+        assert.ok(!serverOutput.includes(secret), 'OAuth logs must not contain credentials or bearer material');
     return tokens;
 }
 try {

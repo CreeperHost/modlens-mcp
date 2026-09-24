@@ -1490,6 +1490,11 @@ async function startHttpServer(port: number): Promise<void> {
             try { if (await oauth.handle(req, res, url)) return; }
             catch (err) {
                 if (err instanceof HostedOAuthError) {
+                    const incident = oauth.logError(req.method, url.pathname, err);
+                    if (["/oauth/authorize", "/oauth/upstream/callback", "/oauth/approve"].includes(url.pathname)) {
+                        oauth.browserError(res, err, incident);
+                        return;
+                    }
                     return sendJson(res, err.status, { error: err.code, error_description: err.message });
                 }
                 logServerError(`oauth ${req.method} ${url.pathname}`, err);
