@@ -177,14 +177,17 @@ async function providerMetadata(url: URL): Promise<Response> {
 
 export class HostedOAuth {
     private ready?: Promise<void>;
+    private readonly instance = randomBytes(6).toString("hex");
     private requestCounts = new Map<string, { minute: number; count: number }>();
+    private refreshes = new Map<string, Promise<Record<string, unknown>>>();
     private constructor(private config: AuthConfig, private database: () => Promise<Database>) {}
 
     private audit(event: string, fields: Record<string, string | number | boolean | undefined> = {}): void {
-        console.error(`[modlens] oauth ${JSON.stringify({ event, ...fields })}`);
+        console.error(`[modlens] oauth ${JSON.stringify({ event, instance: this.instance, ...fields })}`);
     }
 
     private clientRef(clientId: string): string { return sha(clientId).slice(0, 12); }
+    private grantRef(grantId: string): string { return sha(grantId).slice(0, 12); }
 
     logError(method: string | undefined, route: string, error: HostedOAuthError): string {
         const incident = randomBytes(6).toString("hex");
@@ -409,20 +412,22 @@ export class HostedOAuth {
         try {
             const profile = await this.profile(this.open(grant.upstream_access));
             if (!profile.allowed || profile.subject !== grant.subject) {
-                await this.revoke(grant.id);
+                await this.revoke(grant.id, "profile_access_denied");
                 throw new HostedOAuthError("Account access denied", 403, "access_denied");
             }
         } catch (error) {
-            if (error instanceof HostedOAuthError && error.status === 401) await this.revoke(grant.id);
+            if (error instanceof HostedOAuthError && error.status === 401)
+                await this.revoke(grant.id, "profile_unauthorized");
             throw error;
         }
         return sha(this.config.issuer + "\0" + grant.subject);
     }
 
-    private async revoke(id: string): Promise<void> {
+    private async revoke(id: string, reason: string): Promise<void> {
         const db = await this.db();
         await db.$executeRawUnsafe(`DELETE FROM hosted_oauth_access WHERE grant_id=$1`, id);
         await db.$executeRawUnsafe(`DELETE FROM hosted_oauth_grants WHERE id=$1`, id);
+        this.audit("grant_revoked", { grant: this.grantRef(id), reason });
     }
 
     private async issue(grant: GrantRow): Promise<Record<string, unknown>> {
@@ -432,6 +437,55 @@ export class HostedOAuth {
         await db.$executeRawUnsafe(`INSERT INTO hosted_oauth_access (token_hash,grant_id,expires) VALUES ($1,$2,$3)`,
             sha(rawAccess), grant.id, now() + expires);
         return { access_token: rawAccess, token_type: "Bearer", expires_in: expires, scope: "modlens" };
+    }
+
+    private async refresh(clientId: string, raw: string): Promise<Record<string, unknown>> {
+        const db = await this.db();
+        const rows = await db.$queryRawUnsafe<GrantRow[]>(`UPDATE hosted_oauth_grants SET refresh_hash=NULL
+            WHERE refresh_hash=$1 AND client_id=$2 AND refresh_expires>$3 RETURNING *`, sha(raw), clientId, now());
+        if (rows.length !== 1 || !rows[0].upstream_refresh) {
+            this.audit("refresh_rejected", { client: this.clientRef(clientId), refreshRef: sha(raw).slice(0, 12),
+                reason: rows.length === 1 ? "no_upstream_refresh" : "not_current_or_missing" });
+            throw new HostedOAuthError("Invalid refresh token", 400, "invalid_grant");
+        }
+        const grant = rows[0];
+        let stage = "provider_token";
+        try {
+            const oldUpstreamRefresh = grant.upstream_refresh!;
+            const upstream = await this.upstreamToken(new URLSearchParams({ grant_type: "refresh_token",
+                refresh_token: this.open(oldUpstreamRefresh) }));
+            grant.upstream_access = this.seal(upstream.access_token);
+            grant.upstream_refresh = this.seal(upstream.refresh_token ?? this.open(oldUpstreamRefresh));
+            grant.upstream_expires = now() + Math.max(1, Math.min(86400, Number(upstream.expires_in) || 300));
+            stage = "grant_update";
+            await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET upstream_access=$2,upstream_refresh=$3,
+                upstream_expires=$4 WHERE id=$1`, grant.id, grant.upstream_access,
+                grant.upstream_refresh, grant.upstream_expires);
+            stage = "profile";
+            const profile = await this.profile(upstream.access_token);
+            if (profile.subject !== grant.subject || !profile.allowed) throw new HostedOAuthError("Account access denied", 403, "access_denied");
+            const next = token("mlr_");
+            grant.refresh_hash = sha(next);
+            stage = "rotation";
+            await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET refresh_hash=$2 WHERE id=$1`, grant.id, grant.refresh_hash);
+            stage = "access_issue";
+            const access = await this.issue(grant);
+            const response = { ...access, refresh_token: next };
+            this.audit("refresh_issued", { client: this.clientRef(clientId), grant: this.grantRef(grant.id),
+                previousRefreshRef: sha(raw).slice(0, 12), refreshRef: sha(next).slice(0, 12),
+                accessExpiresIn: Number(access.expires_in) });
+            return response;
+        } catch (error) {
+            const retryable = error instanceof HostedOAuthError && error.status === 503;
+            this.audit("refresh_failed", { client: this.clientRef(clientId), grant: this.grantRef(grant.id),
+                refreshRef: sha(raw).slice(0, 12), stage, retryable,
+                status: error instanceof HostedOAuthError ? error.status : undefined,
+                code: error instanceof HostedOAuthError ? error.code : undefined });
+            if (retryable) {
+                await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET refresh_hash=$2 WHERE id=$1 AND refresh_hash IS NULL`, grant.id, sha(raw));
+            } else await this.revoke(grant.id, "refresh_failed");
+            throw error;
+        }
     }
 
     private limit(req: IncomingMessage, route: string, maximum: number): void {
@@ -620,8 +674,11 @@ export class HostedOAuth {
                     upstream_expires,refresh_hash,refresh_expires) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
                     grant.id, grant.client_id, grant.subject, grant.resource, grant.upstream_access, grant.upstream_refresh,
                     grant.upstream_expires, grant.refresh_hash, grant.refresh_expires);
-                const response = { ...await this.issue(grant), ...(refresh ? { refresh_token: refresh } : {}) };
-                this.audit("token_issued", { flow: code.flowId, client: this.clientRef(clientId), refresh: !!refresh });
+                const access = await this.issue(grant);
+                const response = { ...access, ...(refresh ? { refresh_token: refresh } : {}) };
+                this.audit("token_issued", { flow: code.flowId, client: this.clientRef(clientId), refresh: !!refresh,
+                    grant: this.grantRef(grant.id), accessExpiresIn: Number(access.expires_in),
+                    ...(refresh ? { refreshRef: sha(refresh).slice(0, 12) } : {}) });
                 json(res, 200, response);
                 return true;
             }
@@ -631,33 +688,15 @@ export class HostedOAuth {
                 if (params.has("scope") && params.get("scope") !== "modlens")
                     throw new HostedOAuthError("Unsupported scope", 400, "invalid_scope");
                 const raw = required(params, "refresh_token");
-                const db = await this.db();
-                const rows = await db.$queryRawUnsafe<GrantRow[]>(`UPDATE hosted_oauth_grants SET refresh_hash=NULL
-                    WHERE refresh_hash=$1 AND client_id=$2 AND refresh_expires>$3 RETURNING *`, sha(raw), clientId, now());
-                if (rows.length !== 1 || !rows[0].upstream_refresh) throw new HostedOAuthError("Invalid refresh token", 400, "invalid_grant");
-                const grant = rows[0];
-                try {
-                    const oldUpstreamRefresh = grant.upstream_refresh!;
-                    const upstream = await this.upstreamToken(new URLSearchParams({ grant_type: "refresh_token",
-                        refresh_token: this.open(oldUpstreamRefresh) }));
-                    grant.upstream_access = this.seal(upstream.access_token);
-                    grant.upstream_refresh = this.seal(upstream.refresh_token ?? this.open(oldUpstreamRefresh));
-                    grant.upstream_expires = now() + Math.max(1, Math.min(86400, Number(upstream.expires_in) || 300));
-                    await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET upstream_access=$2,upstream_refresh=$3,
-                        upstream_expires=$4 WHERE id=$1`, grant.id, grant.upstream_access,
-                        grant.upstream_refresh, grant.upstream_expires);
-                    const profile = await this.profile(upstream.access_token);
-                    if (profile.subject !== grant.subject || !profile.allowed) throw new HostedOAuthError("Account access denied", 403, "access_denied");
-                    const next = token("mlr_");
-                    grant.refresh_hash = sha(next);
-                    await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET refresh_hash=$2 WHERE id=$1`, grant.id, grant.refresh_hash);
-                    json(res, 200, { ...await this.issue(grant), refresh_token: next });
-                } catch (error) {
-                    if (error instanceof HostedOAuthError && error.status === 503) {
-                        await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET refresh_hash=$2 WHERE id=$1 AND refresh_hash IS NULL`, grant.id, sha(raw));
-                    } else await this.revoke(grant.id);
-                    throw error;
-                }
+                const key = `${clientId}:${sha(raw)}`;
+                let pending = this.refreshes.get(key);
+                if (!pending) {
+                    this.audit("refresh_started", { client: this.clientRef(clientId), refreshRef: sha(raw).slice(0, 12) });
+                    pending = this.refresh(clientId, raw);
+                    this.refreshes.set(key, pending);
+                    void pending.finally(() => this.refreshes.delete(key)).catch(() => {});
+                } else this.audit("refresh_joined", { client: this.clientRef(clientId), refreshRef: sha(raw).slice(0, 12) });
+                json(res, 200, await pending);
                 return true;
             }
             throw new HostedOAuthError("Unsupported grant type", 400, "unsupported_grant_type");
@@ -670,12 +709,12 @@ export class HostedOAuth {
             const db = await this.db();
             const rows = await db.$queryRawUnsafe<Array<{ id: string }>>(
                 `SELECT id FROM hosted_oauth_grants WHERE client_id=$1 AND refresh_hash=$2`, clientId, sha(raw));
-            if (rows.length) await this.revoke(rows[0].id);
+            if (rows.length) await this.revoke(rows[0].id, "client_request");
             else {
                 const access = await db.$queryRawUnsafe<Array<{ id: string }>>(
                     `SELECT g.id FROM hosted_oauth_access a JOIN hosted_oauth_grants g ON g.id=a.grant_id
                      WHERE g.client_id=$1 AND a.token_hash=$2`, clientId, sha(raw));
-                if (access.length) await this.revoke(access[0].id);
+                if (access.length) await this.revoke(access[0].id, "client_request");
             }
             json(res, 200, {});
             return true;

@@ -50,6 +50,8 @@ const provider = createServer(async (req, res) => {
         const data = new URLSearchParams(raw);
         if (data.get('grant_type') === 'refresh_token' && !data.get('refresh_token')?.startsWith('upstream-refresh-'))
             return write(400, { error: 'invalid_grant' });
+        if (data.get('grant_type') === 'refresh_token')
+            await new Promise(resolve => setTimeout(resolve, 100));
         if (data.get('grant_type') === 'authorization_code' && data.get('code') !== 'fake-code')
             return write(400, { error: 'invalid_grant' });
         const access = `upstream-${++serial}`;
@@ -205,15 +207,31 @@ try {
     await stop();
     await start();
     assert.equal((await initialize(tokens.access_token)).status, 200, 'grant survives restart');
-    const refresh = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/token`, { method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ grant_type: 'refresh_token',
-            client_id: clientId, refresh_token: tokens.refresh_token, resource }) });
-    assert.equal(refresh.status, 200);
-    const rotated = await refresh.json();
+    const refreshes = await Promise.all(Array.from({ length: 4 }, () =>
+        fetchManual(`http://127.0.0.1:${mcpPort}/oauth/token`, { method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ grant_type: 'refresh_token',
+                client_id: clientId, refresh_token: tokens.refresh_token, resource }) })));
+    for (const refresh of refreshes) assert.equal(refresh.status, 200, 'overlapping refresh requests share one rotation');
+    const rotations = await Promise.all(refreshes.map(response => response.json()));
+    assert.equal(new Set(rotations.map(response => response.refresh_token)).size, 1);
+    assert.equal((serverOutput.match(/"event":"refresh_issued"/g) ?? []).length, 1);
+    assert.equal((serverOutput.match(/"event":"refresh_joined"/g) ?? []).length, 3);
+    const rotated = rotations[0];
     const replay = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/token`, { method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ grant_type: 'refresh_token',
             client_id: clientId, refresh_token: tokens.refresh_token }) });
     assert.equal(replay.status, 400);
+    const oldRefreshRef = createHash('sha256').update(tokens.refresh_token).digest('hex').slice(0, 12);
+    const refreshEvents = serverOutput.split('\n').filter(line => line.includes('[modlens] oauth '))
+        .map(line => JSON.parse(line.slice(line.indexOf('[modlens] oauth ') + '[modlens] oauth '.length)));
+    const issued = refreshEvents.find(event => event.event === 'refresh_issued');
+    const rejected = refreshEvents.find(event => event.event === 'refresh_rejected');
+    assert.equal(issued.previousRefreshRef, oldRefreshRef);
+    assert.equal(rejected.refreshRef, oldRefreshRef);
+    assert.equal(rejected.reason, 'not_current_or_missing');
+    assert.equal(issued.grant.length, 12);
+    assert.ok(refreshEvents.filter(event => event.event.startsWith('refresh_'))
+        .every(event => /^[a-f0-9]{12}$/.test(event.instance)));
     const firstSession = await initialize(rotated.access_token);
     assert.equal(firstSession.status, 200);
     const sessionId = firstSession.headers.get('mcp-session-id');
@@ -227,6 +245,10 @@ try {
     partner = false;
     assert.equal((await initialize(rotated.access_token)).status, 403);
     assert.equal((await initialize(rotated.access_token)).status, 401);
+    assert.match(serverOutput, /"event":"grant_revoked".*"reason":"profile_unauthorized"/);
+    assert.match(serverOutput, /"event":"grant_revoked".*"reason":"profile_access_denied"/);
+    for (const secret of [tokens.refresh_token, rotated.refresh_token, rotated.access_token])
+        assert.ok(!serverOutput.includes(secret), 'refresh diagnostics must not log bearer material');
     const denied = await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/authorize?client_id=bad`);
     assert.equal(denied.status, 400);
     await stop();
