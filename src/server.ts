@@ -92,6 +92,7 @@ import { hostedMinecraftVersionIndexStatus, scheduleHostedMinecraftVersionIndex 
 import { runtimeAction, runtimeToolSchema, runtimeHub } from "./tools/runtime.js";
 import { reportIssue, reportIssueSchema } from "./tools/report-issue.js";
 import { hostedActions, hostedMinecraftSourceAccess, hostedMinecraftSourceTeams, HostedBudget, HostedPolicyError, hostedLimits, hostedPrincipal, runHostedTool } from "./hosted-policy.js";
+import { hostedToolMetadata } from "./hosted-tool-catalog.js";
 import { HostedOAuth, HostedOAuthError } from "./hosted-oauth.js";
 import { isRfc1918Peer } from "./private-network.js";
 import { reviewHostedMod, localModPlan } from "./hosted-mod-license.js";
@@ -233,13 +234,19 @@ function createMcpServer(principal?: string, allowMinecraftSource = false): McpS
         let publicSchema = actionSchema instanceof z.ZodEnum
             ? { ...schema, action: z.enum(actions.filter(a => actionSchema.options.includes(a)) as [string, ...string[]]) } as S
             : schema;
+        const metadata = hostedToolMetadata(name);
+        if (metadata.omitFields?.length) {
+            publicSchema = Object.fromEntries(Object.entries(publicSchema)
+                .filter(([field]) => !metadata.omitFields!.includes(field))) as S;
+        }
         if (name === "mod_bytecode") publicSchema = { ...publicSchema,
             startLine: z.number().int().positive().optional().describe("First bytecode line, 1-based"),
             maxLines: z.number().int().positive().optional().describe("Bytecode lines to return (hosted cap applies)"),
         };
         // Do not advertise host paths, cache jobs, registry exports or unavailable operations.
-        const publicDescription = `${description.split(". ")[0]}. Hosted access: ${actions.filter(Boolean).join(", ") || "analysis"}. Responses and cumulative usage are bounded; use focused queries and source ranges.`;
-        server.tool(name, publicDescription, publicSchema, (async (args: Record<string, unknown>, extra: unknown) =>
+        const publicDescription = `${metadata.description} Hosted actions: ${actions.filter(Boolean).join(", ") || "analysis"}. Responses and cumulative usage are bounded; use focused queries and source ranges.`;
+        server.registerTool(name, { title: metadata.title, description: publicDescription,
+            inputSchema: publicSchema, annotations: metadata.annotations }, (async (args: Record<string, unknown>, extra: unknown) =>
             runHostedTool(name, args, principal, limits, hostedBudget,
                 async bounded => {
                     const result = await (handler as (args: Record<string, unknown>, extra: unknown) => any)(bounded, extra);
@@ -1420,6 +1427,9 @@ if (process.env.MODLENS_AUTO_EMBED !== "0") {
 async function startHttpServer(port: number): Promise<void> {
     const mcpPath = process.env.MCP_PATH ?? "/mcp";
     const host = process.env.MCP_HOST ?? "0.0.0.0";
+    const openaiDomainChallenge = process.env.MODLENS_OPENAI_DOMAIN_CHALLENGE;
+    if (openaiDomainChallenge && (openaiDomainChallenge.length > 1024 || /[\r\n\x00-\x1f\x7f]/.test(openaiDomainChallenge)))
+        throw new Error("MODLENS_OPENAI_DOMAIN_CHALLENGE must be a single token without control characters");
     const restricted = process.env.MODLENS_HOSTED_LIMITS !== "0";
     const authMode = process.env.MODLENS_HOSTED_AUTH ?? "gateway";
     if (authMode !== "gateway" && authMode !== "oauth") throw new Error("MODLENS_HOSTED_AUTH must be gateway or oauth");
@@ -1485,6 +1495,12 @@ async function startHttpServer(port: number): Promise<void> {
 
         if (url.pathname === "/healthz") {
             return sendJson(res, 200, { status: "ok" });
+        }
+
+        if (url.pathname === "/.well-known/openai-apps-challenge" && req.method === "GET" && openaiDomainChallenge) {
+            res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+            res.end(openaiDomainChallenge);
+            return;
         }
 
         if (oauth) {

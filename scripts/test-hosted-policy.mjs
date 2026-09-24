@@ -29,6 +29,7 @@ const env = { ...process.env, MCP_PORT: String(port), MCP_HOST: "127.0.0.1", MOD
     MODLENS_HOSTED_DAILY_BYTES: "15000", MODLENS_HOSTED_PERIOD_BYTES: "100000",
     MODLENS_HOSTED_DAILY_REQUESTS: "1000", MODLENS_HOSTED_MINUTE_REQUESTS: "120",
     MODLENS_HOSTED_RESPONSE_BYTES: "131072", MODLENS_AUTO_EMBED: "0", MODLENS_AUTO_GRAPH: "0" };
+env.MODLENS_OPENAI_DOMAIN_CHALLENGE = "test-openai-domain-token";
 const source = Array.from({ length: 600 }, (_, i) => `// Synthetic fixture line ${i + 1}`).join("\n");
 const fixtureDir = join(env.MODLENS_CACHE_ROOT, "mc-decompiled-named", "1.21.1", "example");
 await mkdir(fixtureDir, { recursive: true });
@@ -67,10 +68,35 @@ const read = (client, startLine = 1) => client.callTool({ name: "mc_source", arg
 let passed = false;
 try {
     await start();
+    const domainChallenge = await fetch(new URL("/.well-known/openai-apps-challenge", endpoint));
+    assert.equal(domainChallenge.status, 200);
+    assert.equal(domainChallenge.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(await domainChallenge.text(), env.MODLENS_OPENAI_DOMAIN_CHALLENGE);
     const unauthorized = await fetch(endpoint, { method: "POST", headers: { "x-modlens-user-id": "spoof" }, body: "{}" });
     assert.equal(unauthorized.status, 401);
     const publicUser = await connect("public-developer");
     const publicTools = await publicUser.client.listTools();
+    const expectedTools = ["report_issue", "runtime", "mod_license", "mod", "mod_bytecode", "mod_mixins",
+        "platform", "modpacks_ch", "mc_versions", "mc_source", "mappings", "docs", "primers",
+        "mc_registry", "mc_data", "mc_files", "mod_jar", "mod_data", "mod_tags", "mixin_scan",
+        "gradle", "project", "reports", "pack_tools", "analyze_crash_log", "find_missing_deps"];
+    assert.deepEqual(publicTools.tools.map(t => t.name).sort(), expectedTools.sort());
+    for (const tool of publicTools.tools) {
+        assert.ok(tool.title, `${tool.name} has no title`);
+        assert.ok(tool.description, `${tool.name} has no description`);
+        for (const hint of ["readOnlyHint", "openWorldHint", "destructiveHint"])
+            assert.equal(typeof tool.annotations?.[hint], "boolean", `${tool.name} has no ${hint}`);
+    }
+    const tool = name => publicTools.tools.find(t => t.name === name);
+    for (const [name, fields] of Object.entries({
+        mod: ["jarPath", "directory", "outputDir", "bundlePath"],
+        mappings: ["inputJar", "outputJar"], project: ["bundlePath"],
+        reports: ["savePath"], pack_tools: ["scriptsDir", "configDir"],
+    })) for (const field of fields)
+        assert.ok(!(field in tool(name).inputSchema.properties), `${name} advertises host-only ${field}`);
+    assert.equal(tool("project").annotations.destructiveHint, true);
+    assert.equal(tool("mc_source").annotations.readOnlyHint, false);
+    assert.equal(tool("report_issue").annotations.readOnlyHint, true);
     const publicMc = publicTools.tools.find(t => t.name === "mc_source");
     assert.ok(publicMc.inputSchema.properties.action.enum.includes("source_info"));
     assert.ok(publicMc.inputSchema.properties.action.enum.includes("index_status"));
