@@ -4,7 +4,7 @@ import java.lang.instrument.Instrumentation;
 import java.nio.file.*;
 import java.util.jar.*;
 
-public final class Agent {
+public final class Agent25 {
 
     public static void premain(String config, Instrumentation instrumentation) {
         try {
@@ -17,7 +17,7 @@ public final class Agent {
                 for (String name : new String[] { "Hooks", "Hooks$Handler" }) {
                     String entry = "io/modlens/runtime/bridge/" + name + ".class";
                     out.putNextEntry(new JarEntry(entry));
-                    try (var in = Agent.class.getResourceAsStream("/" + entry)) {
+                    try (var in = Agent25.class.getResourceAsStream("/" + entry)) {
                         in.transferTo(out);
                     }
                     out.closeEntry();

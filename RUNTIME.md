@@ -1,9 +1,11 @@
 # Optional live Minecraft development runtime
 
-ModLens can launch or detect a **Minecraft Java 26.3 / Java 25** development client,
-observe JVM health and failures, and send inputs directly through LWJGL's SDL3
-bindings. Desktop automation and an IntelliJ plugin are not required. This is an
-initial 26.3 adapter, not a claim of compatibility with older versions or every modpack.
+ModLens can launch or detect a Minecraft development client and observe JVM
+health and failures. One Java agent JAR supports Minecraft 1.7.10 and newer.
+It hooks SDL on 26.3, GLFW on 1.13–1.21, and LWJGL2 on 1.7.10–1.12.2 for
+input and screenshots. JFR diagnostics are available when the game runs on
+Java 11 or newer.
+Desktop automation and an IntelliJ plugin are not required.
 
 ## Let the AI set it up
 
@@ -16,6 +18,12 @@ The always-discoverable `runtime` MCP tool describes this workflow. The AI calls
 
 ```json
 {"action":"setup","projectDir":"F:/Git/my-mod","mcVersion":"26.3","mode":"observe","gradleTask":"runClient"}
+```
+
+For an older client, specify its version. For example:
+
+```json
+{"action":"setup","projectDir":"F:/Git/my-old-mod","mcVersion":"1.7.10","mode":"observe","gradleTask":"runClient"}
 ```
 
 With local stdio, that tool call executes directly. With remote MCP, it returns
@@ -38,8 +46,8 @@ node /path/to/modlens-mcp/dist/launcher.js --runtime --request-file runtime-requ
 
 The helper automatically starts an authenticated loopback companion. It stays
 running between commands, detects configured IntelliJ launches, and collects
-events while Codex is doing other work. It requires Node.js and the same Minecraft
-JDK as the direct MCP workflow; it does not bootstrap a source database or modify
+events while Codex is doing other work. It requires Node.js and a JDK supported by
+the Minecraft client (Java 8 or newer); it does not bootstrap a source database or modify
 MCP configuration. There is no second local MCP connection, Cloudflare dependency,
 public runtime endpoint, or automatic upload of diagnostics to remote ModLens.
 Codex must have local terminal/file access on the Minecraft PC; a cloud-only shell
@@ -75,9 +83,9 @@ For multi-project builds, select the actual client task, e.g. `:fabric:runClient
 The task must extend Gradle `JavaExec`. A generated init script adds the agent to
 that task only. Custom launch plugins which don't expose a JavaExec task get an
 actionable error. Setup also returns `vmOptions` for the actual game JVM in an
-existing Application run configuration. Add every entry, including
-`-XX:StackShadowPages=32`: the 26.3 client needs this setting independently of the
-agent. The generated Gradle/IntelliJ launch supplies it automatically, only to the
+existing Application run configuration. For 26.3, add every entry, including
+`-XX:StackShadowPages=32`: that client needs this setting independently of the
+agent. Older versions receive only the agent VM option. The generated Gradle/IntelliJ launch supplies the required options, only to the
 selected client task. **Do not put these options on IntelliJ itself or the Gradle
 daemon.** Quote each whole VM option if it contains spaces. The singular `vmOption`
 field remains available for callers that only need the agent argument.
@@ -94,7 +102,7 @@ include the compiled agent; end users do not need to compile it.
 | --- | --- | --- |
 | `interactive` | Visible game window | Human controls; MCP input rejected |
 | `observe` | Visible game window | MCP controls; physical game input filtered |
-| `hidden` | Hidden game window | MCP controls; physical game input filtered |
+| `hidden` | Hidden game window (SDL/GLFW) | MCP controls; physical game input filtered |
 
 Switch a connected client with:
 
@@ -105,7 +113,8 @@ Switch a connected client with:
 Observe mode uses the actual game window as a watch-only display. OS window
 management, including closing it, remains available. Hidden mode still uses a
 graphics device and desktop/display environment; it is not a GPU-free server.
-Input interception covers the normal SDL paths. Mods using another native input
+LWJGL2 clients support `interactive` and `observe`; their Java display API does
+not support hidden mode. Input interception covers the normal LWJGL paths. Mods using another native input
 path need a separate adapter. This is a development convenience, not an OS security
 boundary. Switching to interactive returns control; click the game to resume mouse
 capture normally.
@@ -130,7 +139,7 @@ capture normally.
 ```
 
 Key names include A–Z, 0–9, SPACE, ENTER, ESCAPE, TAB, arrows, modifiers and F1–F12.
-Numeric strings outside single digits represent SDL scancodes. Mouse buttons are
+Numeric strings outside single digits represent backend-specific key codes. Mouse buttons are
 1=left, 2=middle, 3=right. Coordinates are **window pixels**, not scaled GUI units;
 relative movements are deltas. Text sends text-input events independently of keys.
 `scroll` accepts `x` and `y`. Inputs are delivered to the event loop; they do not
@@ -142,8 +151,8 @@ been unreachable for five seconds (as soon as the game event loop runs). Use
 automatically after uncertain delivery. A timeout means execution is unknown;
 inspect state before retrying an action.
 
-Screenshots use 26.3's own renderer-independent screenshot API, after
-`state.observation.gameLoaded` becomes true. PNGs are returned as MCP image content
+On 26.3, screenshots use Minecraft's screenshot API after
+`state.observation.gameLoaded` becomes true. GLFW and LWJGL2 clients capture the OpenGL framebuffer. PNGs are returned as MCP image content
 by `artifact` over local stdio MCP. The CLI returns the local PNG path for Codex's
 image viewer instead of base64 in terminal text. `threads` writes a thread dump including detected deadlock IDs;
 `recording` writes the recent JFR recording. Files live under
@@ -152,8 +161,8 @@ contain application data; delete old session directories when finished.
 
 ## Monitoring and failure semantics
 
-The agent samples heap/non-heap usage, thread counts and GC counters every second,
-keeps a bounded two-minute/16 MiB JFR recording, captures uncaught exceptions while
+The agent samples heap/non-heap usage, thread counts and GC counters every second.
+On Java 11+, it keeps a bounded two-minute/16 MiB JFR recording. It captures uncaught exceptions while
 chaining the previous handler, and hooks the game's fatal crash reporting path.
 It does not intercept every logged/caught exception or exceptions consumed by a
 custom per-thread handler. The optional Minecraft crash hook covers the normal
@@ -203,15 +212,11 @@ not guarantee an idle Codex task wakes up; host scheduling is separate from MCP.
   runtime actions on the Minecraft PC using the same request schema and dispatcher
   as local stdio MCP. HTTP handlers never execute user-supplied local paths.
 - The agent connects only to authenticated loopback HTTP; no browser control routes.
-- SDL events, keyboard state and mouse state are kept consistent. Input/window code
-  lives in `SdlAdapter`; optional game APIs live in `Minecraft263`.
-- Exact transformation descriptors live in `Transformer`. It uses Java 25's
-  standard Class-File API and an isolated bootstrap bridge, with no ASM/Gson or
-  native agent dependencies to collide with mod loaders.
-- Setup accepts `minecraftHooks:false` to isolate compatibility problems. SDL
-  controls and JVM diagnostics remain available; screenshots and structured game
-  state require the Minecraft adapter. A GLFW backend belongs to a future backport:
-  vanilla 26.3 uses SDL3.
+- SDL events, keyboard state and mouse state are kept consistent by `SdlAdapter`;
+  optional 26.3 game APIs live in `Minecraft263`. GLFW and LWJGL2 input use
+  `LegacyInput` and a relocated ASM transformer.
+- Setup accepts `minecraftHooks:false` for the optional 26.3 game hooks. SDL
+  control and JVM diagnostics remain available.
 - Capability presence and validation are distinct. Tests cover selected environments;
   Fabric/NeoForge launchers and rendering replacements still require their own runs.
 

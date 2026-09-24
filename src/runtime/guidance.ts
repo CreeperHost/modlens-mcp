@@ -29,7 +29,7 @@ export function localExecutionPlan(request: RuntimeRequest) {
             ],
         },
         sourceCheckout: {
-            note: "For an unpublished build, use a local checkout of this version after npm run build and npm run build:agent (JDK 25). Release packages include the agent.",
+            note: "For an unpublished build, use a local checkout of this version after npm run build and npm run build:agent (JDK 25, with JDK 17 for the Java 8 entry point). Release packages include the agent.",
             executable: "node",
             arguments: [
                 "<local-modlens-checkout>/dist/launcher.js",

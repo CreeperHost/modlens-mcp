@@ -221,7 +221,7 @@ const hostedBudget = new HostedBudget();
 
 function createMcpServer(principal?: string, allowMinecraftSource = false): McpServer {
     const server = new McpServer({ name: "modlens", version: pkg.version }, {
-        instructions: "ModLens supports optional Minecraft 26.3 runtime control. Call runtime help/setup. On remote MCP, runtime returns executed:false and a local execution plan: use your local terminal/file tools to run the --runtime helper on the Minecraft PC. No second MCP connection or tunnel is needed. Local stdio executes directly. Inspect sessions/capabilities after launch; use events/command/artifact for input, screenshots, crashes and allocation reports. Never describe a returned plan as an executed action. Idle AI wake-up is not provided. To report a ModLens bug, use report_issue help/prepare for a GitHub draft and submission instructions; the caller files it using existing GitHub access when requested by the user.",
+        instructions: "ModLens supports optional Minecraft runtime control. Call runtime help/setup. On remote MCP, runtime returns executed:false and a local execution plan: use your local terminal/file tools to run the --runtime helper on the Minecraft PC. No second MCP connection or tunnel is needed. Local stdio executes directly. Inspect sessions/capabilities after launch; use only the capabilities reported by the connected agent. Never describe a returned plan as an executed action. Idle AI wake-up is not provided. To report a ModLens bug, use report_issue help/prepare for a GitHub draft and submission instructions; the caller files it using existing GitHub access when requested by the user.",
     });
     const limits = principal === undefined ? undefined : hostedLimits();
     function registerTool<S extends z.ZodRawShape>(name: string, description: string, schema: S, handler: ToolCallback<S>): void {
@@ -287,7 +287,7 @@ registerTool("mod_license",
     }));
 
 registerTool("runtime",
-    "Optional Minecraft 26.3 live dev runtime: help/setup/status/sessions/launch/events/command/artifact. " +
+    "Optional Minecraft live dev runtime: help/setup/status/sessions/launch/events/command/artifact. Uses SDL on 26.3, GLFW on 1.13–1.21, and LWJGL2 on 1.7.10–1.12.2. " +
     "The AI can set up the Java agent and IntelliJ Gradle launch itself with setup(projectDir), then launch or detect a user launch. Remote MCP returns a local execution plan for the --runtime CLI helper; execute it using local terminal/file tools. " +
     "Monitor JVM metrics/crashes and allocation hotspots filtered by mod package, control keyboard/mouse internally, capture screenshots, and switch visible watch-only/hidden/human modes. " +
     "No desktop control or extra local MCP connection required. Plans have executed:false; verify local results. Call help for setup. Poll events with a cursor to actively monitor.",

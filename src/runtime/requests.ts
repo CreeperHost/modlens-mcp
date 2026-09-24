@@ -10,7 +10,8 @@ export const runtimeToolSchema = {
         .describe("Absolute local mod project directory for setup; requires an existing Gradle dev run."),
     projectId: z.string().uuid().optional(),
     sessionId: z.string().uuid().optional(),
-    mcVersion: z.literal("26.3").optional(),
+    mcVersion: z.string().min(1).max(40).regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/).optional()
+        .describe("Minecraft version for setup; defaults to 26.3. Specify older versions such as 1.7.10."),
     mode: runtimeMode
         .optional()
         .describe("interactive=human input, observe=visible/MCP input only, hidden=invisible/MCP input only"),
@@ -22,9 +23,9 @@ export const runtimeToolSchema = {
         .boolean()
         .optional()
         .describe(
-            "Enable optional 26.3 screenshot/state/crash hooks (default true). SDL input and JVM monitoring are independent.",
+            "Enable optional 26.3 Minecraft-specific hooks (default true). LWJGL input and JVM monitoring are independent.",
         ),
-    javaHome: z.string().optional().describe("JDK home for the Gradle launch; use JDK 25 for 26.3"),
+    javaHome: z.string().optional().describe("JDK home for the Gradle launch; use the JDK required by the Minecraft version"),
     afterCursor: z.number().int().min(0).optional(),
     waitMs: z.number().int().min(0).max(30_000).optional(),
     command: runtimeCommand.optional(),
@@ -41,7 +42,7 @@ export async function executeRuntime(hub: RuntimeHub, raw: unknown) {
     if (a.action === "help") return RUNTIME_HELP;
     switch (a.action) {
         case "setup":
-            return hub.setup(need(a.projectDir, "projectDir"), a.mode, a.gradleTask, a.minecraftHooks);
+            return hub.setup(need(a.projectDir, "projectDir"), a.mode, a.gradleTask, a.minecraftHooks, a.mcVersion);
         case "status":
             return hub.status(a.sessionId);
         case "sessions":

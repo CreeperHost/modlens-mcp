@@ -137,6 +137,10 @@ try {
         const configuredRuntime = runtime("--request-file",runtimeRequest);
         assert.equal(configuredRuntime.state,"configured");
         assert.deepEqual(configuredRuntime.vmOptions,[configuredRuntime.vmOption,"-XX:StackShadowPages=32"]);
+        writeFileSync(runtimeRequest,JSON.stringify({action:"setup",projectDir:runtimeProject,mcVersion:"1.7.10",mode:"interactive"}));
+        const legacyRuntime = runtime("--request-file",runtimeRequest);
+        assert.deepEqual(legacyRuntime.vmOptions,[legacyRuntime.vmOption]);
+        assert.equal(legacyRuntime.mcVersion,"1.7.10");
         assert.equal(runtime("status").projects.length,1);
         assert.deepEqual(runtime("sessions"),[]);
         assert.ok(!existsSync(join(runtimeHome,"data")),"Runtime helper must not create a source database");

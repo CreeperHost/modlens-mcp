@@ -12,6 +12,6 @@ gradle.projectsEvaluated {
     }
     target.jvmArgs("-javaagent:${config.getProperty('agent')}=${config.getProperty('connection')}")
     // Minecraft 26.3 client startup needs this even without the agent.
-    target.jvmArgs('-XX:StackShadowPages=32')
+    if (config.getProperty('mcVersion', '26.3') == '26.3') target.jvmArgs('-XX:StackShadowPages=32')
     target.jvmArgs("-XX:ErrorFile=${new File(configFile.parentFile, 'hs_err_pid%p.log').absolutePath}")
 }

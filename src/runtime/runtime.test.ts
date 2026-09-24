@@ -80,6 +80,19 @@ describe("optional runtime", () => {
         expect(await readFile(b.runConfiguration, "utf8")).toContain(":client:runClient");
         expect(JSON.stringify(await hub.status())).not.toContain('"token"');
     });
+    it("configures the same agent for an older client without 26.3 VM options", async () => {
+        const { hub, project } = await fixture();
+        const setup = await hub.setup(project, "interactive", "runClient", true, "1.7.10");
+        expect(setup.mcVersion).toBe("1.7.10");
+        expect(setup.vmOptions).toEqual([setup.vmOption]);
+        const connection = decodeProperties(await readFile(join(project, ".modlens/runtime/connection.properties"), "utf8"));
+        expect(connection.mcVersion).toBe("1.7.10");
+        const launch = decodeProperties(await readFile(join(project, ".modlens/runtime/launch.properties"), "utf8"));
+        expect(launch.mcVersion).toBe("1.7.10");
+        expect((await hub.setup(project, "observe", "runClient", true, "1.7.10")).mode).toBe("observe");
+        await expect(hub.setup(project, "hidden", "runClient", true, "1.7.10")).rejects.toThrow("LWJGL2");
+        await expect(hub.setup(project, "interactive", "runClient", true, "1.7.9")).rejects.toThrow("1.7.10 and newer");
+    });
     it("rejects browser requests, wrong tokens, and malformed packets", async () => {
         const { hub, project } = await fixture();
         const { send } = await connect(hub, project);

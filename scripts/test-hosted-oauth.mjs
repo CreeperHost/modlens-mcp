@@ -7,6 +7,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 const root = await mkdtemp(join(tmpdir(), 'modlens-oauth-test-'));
 const entry = fileURLToPath(new URL('../dist/server.js', import.meta.url));
@@ -143,6 +145,20 @@ try {
     assert.match(tokens.access_token, /^mla_/);
     assert.match(tokens.refresh_token, /^mlr_/);
     assert.equal((await initialize(tokens.access_token)).status, 200);
+    const runtimeClient = new Client({ name: 'hosted-runtime-test', version: '1' });
+    await runtimeClient.connect(new StreamableHTTPClientTransport(new URL(resource), {
+        requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } },
+    }));
+    try {
+        const runtime = await runtimeClient.callTool({ name: 'runtime', arguments: {
+            action: 'setup', projectDir: '/local/mod-project', mcVersion: '1.7.10', mode: 'interactive',
+        } });
+        assert.equal(runtime.isError, undefined);
+        const plan = JSON.parse(runtime.content[0].text);
+        assert.equal(plan.executed, false);
+        assert.equal(plan.request.mcVersion, '1.7.10');
+        assert.ok(plan.invocation.arguments.includes('--runtime'));
+    } finally { await runtimeClient.close(); }
     assert.equal((await initialize(tokens.access_token, { 'x-modlens-user-id': 'forged' })).status, 401);
     await stop();
     await start();

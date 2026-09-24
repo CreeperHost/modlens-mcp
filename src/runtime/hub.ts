@@ -21,6 +21,7 @@ type Project = {
     mode: RuntimeMode;
     task: string;
     hooks: boolean;
+    mcVersion: string;
 };
 type Event = { cursor: number; sessionId: string; time: number; type: string; data: Record<string, unknown> };
 type Command = {
@@ -42,7 +43,7 @@ type Session = {
     commands: Map<string, Command>;
 };
 export const RUNTIME_HELP = {
-    target: "Minecraft Java 26.3 / Java 25",
+    target: "Minecraft Java 26.3 with SDL control; older versions with LWJGL input",
     clientJvmOptions:
         "26.3 client launches require -XX:StackShadowPages=32 independently of this agent. Setup includes it in the selected Gradle client task and returns all required vmOptions for manual launches.",
     optional: true,
@@ -50,17 +51,17 @@ export const RUNTIME_HELP = {
         "setup(projectDir) prepares an opt-in IntelliJ Gradle run config and agent; no existing build file changes",
         "launch(projectId) or select ModLens Client in IntelliJ",
         "sessions, then status(sessionId) to inspect actual capabilities",
-        "command(mode=observe|hidden) gives the MCP exclusive game input; interactive returns input to the human",
-        "command inputs, screenshot, threads, recording, allocations; events(afterCursor,waitMs) for incidents",
+        "command(mode=observe) gives the MCP exclusive game input; hidden also hides SDL/GLFW windows; interactive returns input to the human",
+        "Use the connected agent's capabilities for commands; events(afterCursor,waitMs) reports incidents",
     ],
-    input: "SDL scancode names (W, SPACE, ESCAPE, LSHIFT, etc.) or numeric scancodes; mouse buttons: 1 left, 2 middle, 3 right. Held inputs expire. Screen coordinates are window pixels; relative movement uses deltas.",
+    input: "Input uses SDL on 26.3, GLFW on 1.13–1.21, and LWJGL2 on earlier versions. Use key names such as W, SPACE and ESCAPE; mouse buttons are 1 left, 2 middle, 3 right. Inspect connected capabilities.",
     monitoring:
         "Events are collected without an AI turn. While actively monitoring, use bounded events waits. MCP notifications do not by themselves guarantee an idle AI task wakes up.",
     heapAnalysis:
-        "Use command allocations with your mod's packagePrefix, then artifact to read the JSON hotspot report. Weighted JFR stack samples identify likely allocation-heavy callers. Combine with GC/heap metrics; this is not a retained-heap analysis or proof of a leak.",
+        "On Java 11+, use command allocations with your mod's packagePrefix, then artifact to read the JSON hotspot report. Weighted JFR stack samples identify likely allocation-heavy callers. Combine with GC/heap metrics; this is not a retained-heap analysis or proof of a leak.",
     execution:
         "Local stdio MCP executes directly. Remote MCP returns a local execution plan: Codex runs modlens-mcp --runtime --request-file <file> on the Minecraft PC. No second MCP connection or tunnel is required.",
-    limits: "Requires local execution access, an existing working 26.3 dev run task and a graphical environment even when hidden. Setup is not proof of game compatibility; inspect connected capabilities. No historical version claim.",
+    limits: "Requires local execution access and an existing working dev run task. LWJGL2 cannot hide its window through the Java display API. Java 8 lacks JFR. Inspect connected capabilities.",
 };
 
 /** Local-only, opt-in bridge. Remote MCP clients never gain host process/filesystem control. */
@@ -111,7 +112,7 @@ export class RuntimeHub {
         );
         for (const p of JSON.parse(saved) as Project[]) {
             if (UUID.test(p.id) && /^[a-f0-9]{64}$/.test(p.token) && isAbsolute(p.directory))
-                this.projects.set(p.id, p);
+                this.projects.set(p.id, { ...p, mcVersion: p.mcVersion ?? "26.3" });
         }
         const history = await readFile(join(this.root, "events.json"), "utf8").catch(
             (e: NodeJS.ErrnoException) => {
@@ -265,13 +266,20 @@ export class RuntimeHub {
             projectId: p.id,
             mode: p.mode,
             minecraftHooks: p.hooks,
-            mcVersion: "26.3",
+            mcVersion: p.mcVersion,
             artifacts: join(dir, "sessions"),
         });
         await this.managedWrite(join(dir, "connection.properties"), data);
     }
-    async setup(directory: string, mode: RuntimeMode = "interactive", task = "runClient", hooks = true) {
+    async setup(directory: string, mode: RuntimeMode = "interactive", task = "runClient", hooks = true, mcVersion = "26.3") {
         await this.initialize();
+        if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,39}$/.test(mcVersion)) throw new Error("Invalid mcVersion");
+        const release = /^1\.(\d+)(?:\.(\d+))?$/.exec(mcVersion);
+        if (release && (Number(release[1]) < 7 || (Number(release[1]) === 7 && Number(release[2] ?? 0) < 10)))
+            throw new Error("Runtime monitoring supports Minecraft 1.7.10 and newer");
+        const modern = mcVersion === "26.3";
+        if (!modern && mode === "hidden" && release && Number(release[1]) < 13)
+            throw new Error("LWJGL2 clients do not support hidden mode; use interactive or observe");
         if (!isAbsolute(directory)) throw new Error("projectDir must be an absolute path on this machine");
         directory = await realpath(directory);
         if (!(await stat(directory)).isDirectory()) throw new Error("projectDir is not a directory");
@@ -296,6 +304,7 @@ export class RuntimeHub {
             mode,
             task,
             hooks,
+            mcVersion,
         };
         const dir = await this.safeDirectory(directory, ".modlens/runtime");
         const runDir = await this.safeDirectory(directory, ".run");
@@ -319,6 +328,7 @@ export class RuntimeHub {
                 task,
                 agent: join(dir, "agent.jar"),
                 connection: join(dir, "connection.properties"),
+                mcVersion,
             }),
         );
         const xml = (s: string) =>
@@ -343,13 +353,13 @@ export class RuntimeHub {
         return {
             state: "configured",
             projectId: p.id,
-            mcVersion: "26.3",
+            mcVersion,
             mode,
             runConfiguration: runFile,
             vmOption,
-            vmOptions: [vmOption, "-XX:StackShadowPages=32"],
+            vmOptions: modern ? [vmOption, "-XX:StackShadowPages=32"] : [vmOption],
             manualLaunch:
-                "Add every vmOptions entry to the actual Minecraft client JVM. StackShadowPages=32 is required for 26.3 client startup independently of the agent. The generated Gradle/IntelliJ launch includes it automatically.",
+                modern ? "Add every vmOptions entry to the actual Minecraft client JVM. StackShadowPages=32 is required for 26.3 client startup independently of the agent. The generated Gradle/IntelliJ launch includes it automatically." : "Add the vmOption to the actual Minecraft client JVM. Inspect the connected agent's input and screenshot capabilities after launch.",
             next: "Select ModLens Client in IntelliJ and Run, or call runtime.launch(projectId). Use runtime.sessions to confirm connection and capabilities.",
             files: [
                 runFile,

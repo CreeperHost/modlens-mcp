@@ -6,10 +6,11 @@ Store mod metadata, class indexes, mixin targets, AT/AW entries, and decompiled 
 
 ## Optional live development client
 
-The `runtime` MCP tool can prepare and launch a **Minecraft 26.3 / Java 25** dev
-client, detect IntelliJ launches, monitor JVM failures and memory pressure, and
-control input without desktop automation. It supports normal, visible watch-only,
-and hidden windows. Ask the AI to call `runtime` with `action:"help"` or set it up
+The `runtime` MCP tool can prepare and launch a Minecraft development client,
+detect IntelliJ launches, monitor JVM failures and memory pressure, capture
+screenshots, and control game input. It uses SDL on Minecraft 26.3, GLFW on
+1.13–1.21, and LWJGL2 on 1.7.10–1.12.2. Ask the AI
+to call `runtime` with `action:"help"` or set it up
 for your mod project. With remote MCP, Codex runs the local `--runtime` helper;
 with local stdio MCP, the tools execute directly. No second MCP connection is needed.
 See [runtime setup, examples, and compatibility limits](RUNTIME.md).
