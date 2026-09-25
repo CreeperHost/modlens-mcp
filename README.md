@@ -726,11 +726,13 @@ All tool actions have been consolidated into **24 grouped tools** to stay within
 
 | action | Key params | Description |
 |--------|-----------|-------------|
-| `find` | symbol, version, sourceNs, targetNs | Translate between official/intermediary/yarn/mojmap |
+| `find` | symbol, version, sourceNs, targetNs | Translate between namespaces, including version-specific Forge SRG members to Mojmap |
 | `remap` | inputJar, outputJar, version, toMapping | Remap mod JAR using TinyRemapper |
 | `parchment` | className, mcVersion | Community parameter names/javadocs for a class |
 | `list_parchment` | mcVersion | Available Parchment builds |
 | `parchment_summary` | mcVersion | Parchment coverage summary |
+
+For Forge 1.16–1.20.4 crash names, use `sourceNs=srg`, `targetNs=mojmap`, and the exact Minecraft version. Symbols such as `Mob.m_20183_()`, `f_77313_`, and `net.minecraft.world.level.pathfinder.FlyNodeEvaluator.m_8086_` return a human-readable member name only when MCPConfig and Mojang mappings agree. Results include the JVM descriptor, owner information, version, and mapping sources. Ambiguous or unavailable entries return `found=false` with a note.
 
 ### 8. `docs` — Documentation Database
 
@@ -911,6 +913,8 @@ All reports accept an optional `savePath` to write the `.md` file to disk.
 ### 20. `analyze_crash_log` — Crash Log Triage
 
 Paste a NeoForge/Forge/Fabric crash log. Cross-references stack frames against the `ModClass` index and returns suspects ranked by frame count, plus coverage warning if the class index is sparse.
+
+For versioned Forge SRG names, `crashFacts.mappedMembers` records verified method and field translations with owner and descriptor context. `crashFacts.mappedException` and `frames[].mappedMethod` show readable names when resolved. Member names explain the symbols in a report; they do not establish what caused the crash.
 
 | param | Description |
 |-------|-------------|

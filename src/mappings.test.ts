@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { parseTinyV2, lookupInIndex, hasSrgMappings, hasRetroMcpMappings, proguardToTiny } from "./mappings.js";
+import { parseTinyV2, lookupInIndex, hasSrgMappings, hasRetroMcpMappings, proguardToTiny, composeModernSrgMappings, lookupModernSrgMapping, translateSymbol } from "./mappings.js";
 
 const FIXTURE_TINY = [
     "tiny\t2\t0\tofficial\tintermediary",
@@ -209,5 +209,53 @@ describe("Mojang ProGuard to Tiny conversion", () => {
         const result = proguardToTiny(`Example -> a:\n    1:2:void run():4:5 -> b\n    3:4:void run():6:7 -> b\n    5:6:void Other.inline():1:2 -> b\n`);
         expect(result.match(/\tm\t/g)).toHaveLength(1);
         expect(result).toContain("\tm\t()V\tb\trun");
+    });
+});
+
+describe("modern Forge SRG to Mojmap members", () => {
+    const tsrg = `tsrg2 obf srg id\na net/minecraft/src/C_507_ 507\n\ta ()Ld; m_20183_ 20183\nb net/minecraft/src/C_2752_ 2752\n\tc f_77313_ 77313\nd net/minecraft/src/C_4675_ 4675\ne net/minecraft/src/C_526_ 526\nf net/minecraft/src/C_2756_ 2756\n\tg (I)Z m_8086_ 8086\n`;
+    const proguard = `net.minecraft.world.entity.Entity -> a:\n    net.minecraft.core.BlockPos blockPosition() -> a\nnet.minecraft.world.level.pathfinder.NodeEvaluator -> b:\n    net.minecraft.world.entity.Mob mob -> c\nnet.minecraft.core.BlockPos -> d:\nnet.minecraft.world.entity.Mob -> e:\nnet.minecraft.world.level.pathfinder.FlyNodeEvaluator -> f:\n    boolean getBlockPathType(int) -> g\n`;
+    const mappings = composeModernSrgMappings("1.20.1", tsrg, { server: proguard });
+
+    it("resolves a method through an inherited receiver with declaring owner and descriptor", () => {
+        expect(lookupModernSrgMapping(mappings, "Mob.m_20183_()")).toMatchObject({
+            found: true, target: "blockPosition", type: "method", verified: true,
+            containingClass: "net/minecraft/world/entity/Entity", requestedOwner: "Mob", descriptor: "()Lnet/minecraft/core/BlockPos;", mcVersion: "1.20.1",
+            mappingSources: ["MCPConfig joined.tsrg", "Mojang server_mappings"],
+        });
+    });
+
+    it("resolves a field and a qualified stack-frame method", () => {
+        expect(lookupModernSrgMapping(mappings, "f_77313_")).toMatchObject({
+            found: true, target: "mob", type: "field", containingClass: "net/minecraft/world/level/pathfinder/NodeEvaluator", descriptor: "Lnet/minecraft/world/entity/Mob;",
+        });
+        expect(lookupModernSrgMapping(mappings, "net.minecraft.world.level.pathfinder.FlyNodeEvaluator.m_8086_")).toMatchObject({
+            found: true, target: "getBlockPathType", type: "method", containingClass: "net/minecraft/world/level/pathfinder/FlyNodeEvaluator", descriptor: "(I)Z",
+        });
+    });
+
+    it("does not guess when a member has multiple owners or signatures", () => {
+        const ambiguous = composeModernSrgMappings("1.20.1", `tsrg2 obf srg id\na net/minecraft/src/C_1_ 1\n\tx (I)V m_123_ 123\nb net/minecraft/src/C_2_ 2\n\ty ()V m_123_ 123\n`, {
+            server: `net.minecraft.A -> a:\n    void first(int) -> x\nnet.minecraft.B -> b:\n    void second() -> y\n`,
+        });
+        expect(lookupModernSrgMapping(ambiguous, "m_123_")).toMatchObject({ found: false, note: expect.stringContaining("Ambiguous") });
+        expect(lookupModernSrgMapping(ambiguous, "B.m_123_()")).toMatchObject({ found: true, target: "second" });
+        expect(lookupModernSrgMapping(ambiguous, "A.m_123_()")).toMatchObject({ found: false });
+        expect(lookupModernSrgMapping(ambiguous, "f_999_")).toMatchObject({ found: false });
+    });
+
+    it("keeps multiple possible declaring owners while returning a common verified name", () => {
+        const duplicated = composeModernSrgMappings("1.20.1", `tsrg2 obf srg id\na net/minecraft/src/C_1_ 1\n\tx ()V m_123_ 123\nb net/minecraft/src/C_2_ 2\n\ty ()V m_123_ 123\n`, {
+            server: `net.minecraft.A -> a:\n    void common() -> x\nnet.minecraft.B -> b:\n    void common() -> y\n`,
+        });
+        expect(lookupModernSrgMapping(duplicated, "Mob.m_123_()")).toMatchObject({
+            found: true, target: "common", candidateOwners: ["net/minecraft/A", "net/minecraft/B"], requestedOwner: "Mob", descriptor: "()V",
+        });
+    });
+
+    it("reports unsupported versions without fetching unrelated mappings", async () => {
+        expect(await translateSymbol("Mob.m_20183_()", "srg", "mojmap", "1.15.2")).toMatchObject({
+            found: false, note: expect.stringContaining("unsupported"),
+        });
     });
 });

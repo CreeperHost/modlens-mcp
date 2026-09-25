@@ -252,7 +252,7 @@ VANILLA MC SOURCE
   mc-source get-paths <ver>          On-disk jar/decomp/index paths
 
 MAPPINGS
-  mappings find <sym> <ver> <src> <tgt>  Translate symbol between namespaces (official|intermediary|yarn|mojmap)
+  mappings find <sym> <ver> <src> <tgt>  Translate symbol (including SRG m_/f_ members to Mojmap)
   mappings remap <in.jar> <out.jar> <ver> <mapping>  Remap a JAR between namespaces
   mappings parchment <class> <mcVersion>  Parchment parameter/javadoc for a class
   mappings list-parchment <mcVersion>     Available Parchment versions

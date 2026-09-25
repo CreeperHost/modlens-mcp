@@ -849,10 +849,10 @@ registerTool(
 
 registerTool(
     "mappings",
-    "Minecraft name mappings and Parchment parameter docs. action=find translates one symbol between namespaces; action=remap rewrites a mod JAR and requires inputJar/outputJar/toMapping; action=parchment|list_parchment|parchment_summary reads Parchment docs.",
+    "Minecraft name mappings and Parchment parameter docs. action=find translates one symbol between namespaces, including exact-version Forge SRG members (for example Mob.m_20183_() or f_77313_) to Mojmap; ambiguous names return found=false. action=remap rewrites a mod JAR and requires inputJar/outputJar/toMapping; action=parchment|list_parchment|parchment_summary reads Parchment docs.",
     {
         action:    z.enum(["find","remap","parchment","list_parchment","parchment_summary"]),
-        symbol:    z.string().optional().describe("Symbol to translate; use with action=find, not action=remap"),
+        symbol:    z.string().optional().describe("Symbol to translate; use with action=find, not action=remap. SRG members accept Owner.m_123_(), Owner.f_123_, or bare m_123_ / f_123_. Supply owner and descriptor when available."),
         version:   z.string().optional(),
         sourceNs:  z.enum(["official","intermediary","yarn","mojmap","srg","mcp"]).optional().describe("Source namespace for action=find. Allowed: official, intermediary, yarn, mojmap, srg, mcp"),
         targetNs:  z.enum(["official","intermediary","yarn","mojmap","srg","mcp"]).optional().describe("Target namespace for action=find. Allowed: official, intermediary, yarn, mojmap, srg, mcp"),
@@ -1379,7 +1379,7 @@ registerTool(
 
 registerTool(
     "analyze_crash_log",
-    "Parse a NeoForge/Forge/Fabric crash log and return suspect mods ranked by stack-frame hits against the indexed class DB.",
+    "Parse a NeoForge/Forge/Fabric crash log and return suspect mods ranked by stack-frame hits against the indexed class DB. Verified Forge SRG member translations appear in crashFacts.mappedMembers and mapped frame names; these names do not establish cause.",
     {
         logText: z.string().describe("full crash log text"),
     },

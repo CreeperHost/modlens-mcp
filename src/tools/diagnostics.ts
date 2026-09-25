@@ -11,7 +11,7 @@ import { findModClassesByClassNames, listAllMods } from "../repositories/mod.js"
 import { searchMods, getModsBatch, type ModMetadata, type ModVersion } from "../modpacks-ch.js";
 import { downloadModAction } from "./modpacks-ch.js";
 import { reindexClasses } from "./ingest.js";
-import { translateSymbol, type MappingNs } from "../mappings.js";
+import { translateSymbol, type MappingNs, type TranslateResult } from "../mappings.js";
 
 // Loader-level pseudo-deps that are never in the mod DB
 const SKIP_DEP_IDS = new Set([
@@ -43,6 +43,7 @@ type ParsedFrame = {
     mappedNamespace?: MappingNs;
     mappedOwner?: "minecraft";
     mappingNote?: string;
+    methodMapping?: TranslateResult;
 };
 
 type Candidate = {
@@ -68,6 +69,8 @@ type CrashFacts = {
     mappedExceptionClasses?: Array<{ raw: string; mappedClass: string; namespace: MappingNs }>;
     minecraftVersion?: string;
     loader?: string;
+    mappedMembers?: Array<TranslateResult & { receiver?: string; contextClass?: string }>;
+    unmappedMembers?: Array<{ source: string; note?: string }>;
 };
 
 type PopulateAttempt = {
@@ -84,6 +87,8 @@ export async function analyzeCrashLog(logText: string): Promise<object> {
     const facts = parseCrashFacts(logText);
     await enrichMappedCrashFacts(facts);
     await enrichMappedFrames(frames, facts);
+    await enrichSrgFrames(frames, facts);
+    await enrichSrgCrashFacts(facts, frames);
     const rawFrames = frames.map((f) => f.className);
     const uniqueClasses = [...new Set(rawFrames)];
     const modsInLogSection = parseModsInLogSection(logText);
@@ -124,6 +129,9 @@ export async function analyzeCrashLog(logText: string): Promise<object> {
         suspects,
         fallbackSuspects: suspects.filter((s) => s.dbId === null),
         crashFacts: facts,
+        memberMappingNote: facts.mappedMembers?.length || frames.some((frame) => frame.methodMapping?.verified)
+            ? "Verified names identify Minecraft members; they do not establish the cause of the crash."
+            : undefined,
         frames: frames.slice(0, 50),
         mappedFrames: frames.filter((f) => f.mappedOwner).slice(0, 50),
         modsInLogSection,
@@ -133,6 +141,69 @@ export async function analyzeCrashLog(logText: string): Promise<object> {
         population,
         ...(coverageWarning ? { coverageWarning } : {}),
     };
+}
+
+async function enrichSrgFrames(frames: ParsedFrame[], facts: CrashFacts): Promise<void> {
+    if (!facts.minecraftVersion) return;
+    const cache = new Map<string, TranslateResult>();
+    for (const frame of frames) {
+        if (!frame.className.startsWith("net/minecraft/") || !/^m_\d+_$/.test(frame.method)) continue;
+        const symbol = `${frame.className}.${frame.method}`;
+        let mapped = cache.get(symbol);
+        if (!mapped) {
+            mapped = await translateSymbol(symbol, "srg", "mojmap", facts.minecraftVersion);
+            cache.set(symbol, mapped);
+        }
+        if (!mapped.found || !mapped.target) continue;
+        frame.mappedClass = frame.className;
+        frame.mappedMethod = mapped.target;
+        frame.methodMapping = mapped;
+        frame.mappedNamespace = "mojmap";
+        frame.mappedOwner = "minecraft";
+        frame.mappingNote = `${mapped.containingClass}.${mapped.target}${mapped.descriptor ?? ""} (verified for ${facts.minecraftVersion})`;
+    }
+}
+
+async function enrichSrgCrashFacts(facts: CrashFacts, frames: ParsedFrame[]): Promise<void> {
+    if (!facts.minecraftVersion) return;
+    const contextClass = frames.find((frame) => frame.className.startsWith("net/minecraft/"))?.className;
+    const mappedMembers: NonNullable<CrashFacts["mappedMembers"]> = [];
+    const unmappedMembers: NonNullable<CrashFacts["unmappedMembers"]> = [];
+    const cache = new Map<string, TranslateResult>();
+    const mapText = async (text: string): Promise<string> => {
+        const references = [...text.matchAll(/(?:(?<receiver>(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\.)?(?<member>m_\d+_\([^)]*\)|f_\d+_)/g)];
+        let output = text;
+        for (const match of references) {
+            const receiver = match.groups?.receiver;
+            const member = match.groups?.member;
+            if (!member) continue;
+            const symbol = receiver && receiver !== "this" ? `${receiver}.${member}` : member;
+            let result = cache.get(symbol);
+            if (!result) {
+                result = await translateSymbol(symbol, "srg", "mojmap", facts.minecraftVersion!);
+                cache.set(symbol, result);
+            }
+            if (!result.found || !result.target) {
+                if (!unmappedMembers.some((item) => item.source === match[0])) unmappedMembers.push({ source: match[0], note: result.note });
+                continue;
+            }
+            if (!mappedMembers.some((item) => item.source === match[0])) {
+                mappedMembers.push({ ...result, source: match[0], receiver, ...(receiver === "this" && contextClass ? { contextClass } : {}) });
+            }
+            output = output.replace(match[0], `${receiver ? receiver + "." : ""}${result.target}${member.endsWith(")") ? member.slice(member.indexOf("(")) : ""}`);
+        }
+        return output;
+    };
+    if (facts.exception) {
+        const text = await mapText(facts.mappedException ?? facts.exception);
+        if (text !== facts.exception || facts.mappedException) facts.mappedException = text;
+    }
+    if (facts.causedBy.length) {
+        const mapped = await Promise.all((facts.mappedCausedBy ?? facts.causedBy).map(mapText));
+        if (facts.mappedCausedBy || mapped.some((text, index) => text !== facts.causedBy[index])) facts.mappedCausedBy = mapped;
+    }
+    if (mappedMembers.length) facts.mappedMembers = mappedMembers;
+    if (unmappedMembers.length) facts.unmappedMembers = unmappedMembers;
 }
 
 async function lookupModClasses(classNames: string[]): Promise<{ rows: Awaited<ReturnType<typeof findModClassesByClassNames>>; available: boolean }> {

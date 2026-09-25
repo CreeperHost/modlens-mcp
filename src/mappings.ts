@@ -46,6 +46,12 @@ export interface TranslateResult {
     type: "class" | "method" | "field" | "unknown";
     containingClass?: string;
     note?: string;
+    descriptor?: string;
+    mcVersion?: string;
+    mappingSources?: string[];
+    verified?: boolean;
+    requestedOwner?: string;
+    candidateOwners?: string[];
 }
 
 // ── Parchment types ───────────────────────────────────────────────────────────
@@ -66,6 +72,8 @@ export interface ParchmentParam  { index: number; name: string; javadoc?: string
 const tinyIndexCache = new Map<string, TinyV2Index | null>();
 const mojmapCache    = new Map<string, Map<string, string> | null>(); // version → (official→named)
 const parchmentCache = new Map<string, ParchmentData | null>();
+const modernSrgCache = new Map<string, Promise<ModernSrgMappings | null>>();
+const modernSrgFailedAt = new Map<string, number>();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function downloadToFile(url: string, dest: string): Promise<void> {
@@ -414,23 +422,168 @@ function parseTsrg(content: string): SrgIndex {
     const fields = new Map<string, string>();
     let curObf = "";
     let curSrg = "";
+    const tsrg2 = content.startsWith("tsrg2 ");
     for (const line of content.split("\n")) {
-        if (!line || line.startsWith("#")) continue;
+        if (!line || line.startsWith("#") || line.startsWith("tsrg2 ") || line.startsWith("\t\t")) continue;
         if (!line.startsWith("\t")) {
             const [obf, srg] = line.trim().split(/\s+/);
             if (obf && srg) { curObf = obf; curSrg = srg; classes.set(obf, srg); }
         } else {
             const parts = line.trim().split(/\s+/);
-            if (parts.length === 3) {
+            if (parts.length === (tsrg2 ? 4 : 3)) {
                 // method: obfName obfDesc srgName
                 methods.set(curObf + "/" + parts[0] + " " + parts[1], curSrg + "/" + parts[2]);
-            } else if (parts.length === 2) {
+            } else if (parts.length === (tsrg2 ? 3 : 2)) {
                 // field: obfName srgName
                 fields.set(curObf + "/" + parts[0], curSrg + "/" + parts[1]);
             }
         }
     }
     return { classes, methods, fields };
+}
+
+type ModernSrgMember = {
+    srgName: string;
+    name: string;
+    type: "method" | "field";
+    owner: string;
+    descriptor: string;
+    side: "client" | "server";
+};
+
+export interface ModernSrgMappings {
+    version: string;
+    members: ModernSrgMember[];
+}
+
+function nameDescriptor(descriptor: string, classes: Map<string, string>): string {
+    return descriptor.replace(/L([^;]+);/g, (_, name: string) => `L${classes.get(name) ?? name};`);
+}
+
+/** Join exact-version MCPConfig names to Mojang names through their obfuscated owner and member. */
+export function composeModernSrgMappings(version: string, tsrg: string, proguard: Partial<Record<"client" | "server", string>>): ModernSrgMappings {
+    const srg = parseTsrg(tsrg);
+    const members: ModernSrgMember[] = [];
+    for (const side of ["server", "client"] as const) {
+        const content = proguard[side];
+        if (!content) continue;
+        const named = parseTinyV2(proguardToTiny(content));
+        for (const [key, srgPath] of srg.methods) {
+            const match = key.match(/^(.+)\/([^/ ]+) (\(.*\).+)$/);
+            if (!match) continue;
+            const name = named.methods.get(match[1])?.get(match[2] + match[3]);
+            const owner = named.classes.get(match[1]);
+            if (!name || !owner) continue;
+            members.push({ srgName: srgPath.slice(srgPath.lastIndexOf("/") + 1), name, type: "method",
+                owner, descriptor: nameDescriptor(match[3], named.classes), side });
+        }
+        for (const [key, srgPath] of srg.fields) {
+            const slash = key.lastIndexOf("/");
+            if (slash < 0) continue;
+            const fields = named.fields.get(key.slice(0, slash));
+            const owner = named.classes.get(key.slice(0, slash));
+            if (!fields || !owner) continue;
+            for (const [fieldKey, name] of fields) {
+                if (!fieldKey.startsWith(key.slice(slash + 1) + ":")) continue;
+                members.push({ srgName: srgPath.slice(srgPath.lastIndexOf("/") + 1), name, type: "field",
+                    owner, descriptor: nameDescriptor(fieldKey.slice(fieldKey.indexOf(":") + 1), named.classes), side });
+            }
+        }
+    }
+    return { version, members };
+}
+
+/** Resolve only when owner, signature, and both mapping artifacts yield one answer. */
+export function lookupModernSrgMapping(mappings: ModernSrgMappings, symbol: string): TranslateResult {
+    const input = symbol.trim().replace(/#/g, ".");
+    const match = input.match(/^(?:(.+)[./])?((?:m|f)_\d+_)(?:(\([^)]*\))(.*)|:(.+))?$/);
+    const notFound: TranslateResult = { found: false, source: symbol, type: "unknown", mcVersion: mappings.version };
+    if (!match) return { ...notFound, note: "Expected an SRG member such as Owner.m_123_(), Owner.f_123_, or m_123_" };
+    const [, ownerInput, srgName, args, returnType, fieldDescriptor] = match;
+    const type = srgName.startsWith("m_") ? "method" : "field";
+    if ((type === "method") !== (args !== undefined)) {
+        if (type === "method" && args === undefined) {
+            // A stack frame supplies a method name but no descriptor.
+        } else return { ...notFound, note: "Field symbols cannot have method parentheses" };
+    }
+    const owner = ownerInput?.replace(/\./g, "/");
+    let candidates = mappings.members.filter((m) => m.srgName === srgName && m.type === type);
+    const ownerCandidates = owner ? candidates.filter((m) => m.owner === owner || m.owner.endsWith("/" + owner)) : candidates;
+    // Only search globally when this SRG ID has no entry for the receiver owner.
+    const ownerFallback = !!owner && ownerCandidates.length === 0;
+    candidates = ownerFallback ? candidates : ownerCandidates;
+    if (args !== undefined) candidates = candidates.filter((m) => m.descriptor.startsWith(args) && (!returnType || m.descriptor === args + returnType));
+    if (fieldDescriptor) candidates = candidates.filter((m) => m.descriptor === fieldDescriptor);
+    // A helpful NPE may name the receiver's subclass (Mob) while the member is
+    // declared in Entity. Fall back only if the SRG ID and signature are unique.
+    if (candidates.length === 0) return { ...notFound, note: "No verified member mapping for this version and context" };
+    const distinct = new Map<string, ModernSrgMember>();
+    for (const candidate of candidates) distinct.set(`${candidate.descriptor}|${candidate.name}`, candidate);
+    if (distinct.size !== 1) return { ...notFound, note: "Ambiguous member mapping; provide a fully qualified owner and method descriptor" };
+    const member = [...distinct.values()][0];
+    const owners = [...new Set(candidates.map((candidate) => candidate.owner))];
+    const sources = [...new Set(candidates.map((m) => m.side))];
+    return { found: true, source: symbol, target: member.name, type: member.type,
+        ...(owners.length === 1 ? { containingClass: owners[0] } : { candidateOwners: owners }),
+        descriptor: member.descriptor, mcVersion: mappings.version, verified: true,
+        ...(ownerFallback ? { requestedOwner: owner, note: "Resolved by SRG member ID and signature; supplied receiver owner has no direct mapping entry" } : {}),
+        mappingSources: ["MCPConfig joined.tsrg", ...sources.map((side) => `Mojang ${side}_mappings`)] };
+}
+
+function supportsModernSrg(version: string): boolean {
+    const match = version.match(/^1\.(\d+)(?:\.(\d+))?$/);
+    return !!match && +match[1] >= 16 && (+match[1] < 20 || (+match[1] === 20 && +(match[2] ?? 0) <= 4));
+}
+
+async function getModernSrgMappings(version: string): Promise<ModernSrgMappings | null> {
+    const failedAt = modernSrgFailedAt.get(version);
+    if (failedAt && Date.now() - failedAt > 60_000) {
+        modernSrgCache.delete(version);
+        modernSrgFailedAt.delete(version);
+    }
+    if (!modernSrgCache.has(version)) modernSrgCache.set(version, loadModernSrgMappings(version));
+    const result = await modernSrgCache.get(version)!;
+    if (!result && !modernSrgFailedAt.has(version)) modernSrgFailedAt.set(version, Date.now());
+    return result;
+}
+
+async function loadModernSrgMappings(version: string): Promise<ModernSrgMappings | null> {
+    const tsrgPath = join(MAPPINGS_DIR, `modern-srg-${version}.tsrg`);
+    if (!(await exists(tsrgPath))) {
+        const zipPath = join(MAPPINGS_DIR, `mcp_config-${version}.zip`);
+        try {
+            if (!(await exists(zipPath))) await downloadToFile(`https://maven.creeperhost.net/de/oceanlabs/mcp/mcp_config/${version}/mcp_config-${version}.zip`, zipPath);
+            const entry = new AdmZip(zipPath).getEntry("config/joined.tsrg");
+            if (!entry) return null;
+            await ensureDir(tsrgPath);
+            await writeFile(tsrgPath, entry.getData());
+        } catch { return null; }
+    }
+    const paths = { client: join(MAPPINGS_DIR, `proguard-${version}.txt`), server: join(MAPPINGS_DIR, `proguard-server-${version}.txt`) };
+    if (!(await exists(paths.client)) || !(await exists(paths.server))) {
+        try {
+            const manifestResponse = await fetch("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json");
+            if (!manifestResponse.ok) return null;
+            const manifest = await manifestResponse.json() as { versions: Array<{ id: string; url: string }> };
+            const entry = manifest.versions.find((item) => item.id === version);
+            if (!entry) return null;
+            const metaResponse = await fetch(entry.url);
+            if (!metaResponse.ok) return null;
+            const meta = await metaResponse.json() as { downloads?: Partial<Record<"client_mappings" | "server_mappings", { url: string }>> };
+            for (const side of ["server", "client"] as const) {
+                if (await exists(paths[side])) continue;
+                const url = meta.downloads?.[`${side}_mappings`]?.url;
+                if (url) await downloadToFile(url, paths[side]);
+            }
+        } catch { /* Use whichever exact-version files were already cached. */ }
+    }
+    const proguard: Partial<Record<"client" | "server", string>> = {};
+    for (const side of ["server", "client"] as const) {
+        try { proguard[side] = await readFile(paths[side], "utf8"); } catch { /* side unavailable */ }
+    }
+    if (!proguard.client && !proguard.server) return null;
+    try { return composeModernSrgMappings(version, await readFile(tsrgPath, "utf8"), proguard); }
+    catch { return null; }
 }
 
 function parseMcpCsv(csv: string): Map<string, string> {
@@ -643,6 +796,13 @@ export async function translateSymbol(
             if (!map) return { ...notFound, note: "Mojmap not available for this version" };
             for (const [off, named] of map) if (named === normalized) return { found: true, source: symbol, target: off, type: "class" };
             return notFound;
+        }
+
+        if (from === "srg" && to === "mojmap") {
+            if (!supportsModernSrg(version)) return { ...notFound, note: `Modern SRG member translation is unsupported for ${version}` };
+            const mappings = await getModernSrgMappings(version);
+            if (!mappings) return { ...notFound, note: `Exact-version MCPConfig and Mojang mappings are unavailable for ${version}` };
+            return lookupModernSrgMapping(mappings, symbol);
         }
 
         // SRG/MCP direct routes (legacy Forge)
