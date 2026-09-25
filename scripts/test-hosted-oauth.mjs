@@ -29,6 +29,9 @@ let partner = true;
 let subject = 'customer:42';
 let serial = 0;
 let metadataRequests = 0;
+let upstreamExpiresIn = 300;
+let upstreamRefreshRequests = 0;
+const revokedUpstreamRefreshes = new Set();
 const provider = createServer(async (req, res) => {
     const url = new URL(req.url, issuer);
     const write = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); };
@@ -48,15 +51,20 @@ const provider = createServer(async (req, res) => {
         let raw = '';
         for await (const chunk of req) raw += chunk;
         const data = new URLSearchParams(raw);
-        if (data.get('grant_type') === 'refresh_token' && !data.get('refresh_token')?.startsWith('upstream-refresh-'))
+        if (data.get('grant_type') === 'refresh_token' &&
+            (!data.get('refresh_token')?.startsWith('upstream-refresh-') ||
+                revokedUpstreamRefreshes.has(data.get('refresh_token'))))
             return write(400, { error: 'invalid_grant' });
-        if (data.get('grant_type') === 'refresh_token')
+        if (data.get('grant_type') === 'refresh_token') {
+            upstreamRefreshRequests++;
             await new Promise(resolve => setTimeout(resolve, 100));
+        }
         if (data.get('grant_type') === 'authorization_code' && data.get('code') !== 'fake-code')
             return write(400, { error: 'invalid_grant' });
         const access = `upstream-${++serial}`;
         profiles.set(access, { sub: subject, is_partner: partner });
-        return write(200, { access_token: access, refresh_token: `upstream-refresh-${serial}`, token_type: 'Bearer', expires_in: 300 });
+        return write(200, { access_token: access, refresh_token: `upstream-refresh-${serial}`,
+            token_type: 'Bearer', expires_in: upstreamExpiresIn });
     }
     if (url.pathname === '/profile') {
         const profile = profiles.get(req.headers.authorization?.slice(7));
@@ -72,7 +80,9 @@ const env = { ...process.env, MCP_PORT: String(mcpPort), MCP_HOST: '127.0.0.1',
     MODLENS_HOSTED_PROXY_SECRET: '', MODLENS_HOSTED_MC_SOURCE: '0', MODLENS_OAUTH_PUBLIC_URL: resource,
     MODLENS_OAUTH_ISSUER: issuer, MODLENS_OAUTH_CLIENT_ID: 'test-modlens', MODLENS_OAUTH_SCOPES: 'partner.read offline_access',
     MODLENS_OAUTH_PROFILE_URL: issuer + '/profile', MODLENS_OAUTH_REQUIRED_FIELD: 'is_partner',
-    MODLENS_OAUTH_REQUIRED_VALUE: 'true', MODLENS_OAUTH_STORAGE_KEY: randomBytes(32).toString('base64') };
+    MODLENS_OAUTH_REQUIRED_VALUE: 'true', MODLENS_OAUTH_STORAGE_KEY: randomBytes(32).toString('base64'),
+    MODLENS_OAUTH_LOG: '1' };
+delete env.MODLENS_OAUTH_CODEX_REFRESH_WORKAROUND;
 let server;
 let serverOutput = '';
 async function start() {
@@ -188,8 +198,9 @@ try {
     assert.equal(registered.client_name, 'ChatGPT & Codex <test>');
     clientId = registered.client_id;
     const tokens = await login();
-    assert.match(tokens.access_token, /^mla_/);
+    assert.match(tokens.access_token, /^mlw_/);
     assert.match(tokens.refresh_token, /^mlr_/);
+    assert.equal(tokens.expires_in, 30 * 24 * 60 * 60, 'ModLens access token lasts 30 days');
     assert.equal((await initialize(tokens.access_token)).status, 200);
     const runtimeClient = new Client({ name: 'hosted-runtime-test', version: '1' });
     await runtimeClient.connect(new StreamableHTTPClientTransport(new URL(resource), {
@@ -263,7 +274,12 @@ try {
     assert.equal((await initialize(otherAccount.access_token, { 'mcp-session-id': sessionId })).status, 404,
         'one account cannot reuse another account session');
     profiles.delete(`upstream-${serial}`);
-    assert.equal((await initialize(otherAccount.access_token)).status, 401, 'revoked upstream access fails closed');
+    assert.equal((await initialize(otherAccount.access_token)).status, 200,
+        'upstream process-local access loss is recovered with its refresh token');
+    revokedUpstreamRefreshes.add(`upstream-refresh-${serial}`);
+    profiles.delete(`upstream-${serial}`);
+    assert.equal((await initialize(otherAccount.access_token)).status, 401,
+        'revoked upstream refresh fails closed');
     partner = false;
     assert.equal((await initialize(rotated.access_token)).status, 403);
     assert.equal((await initialize(rotated.access_token)).status, 401);
@@ -284,8 +300,36 @@ try {
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['http://127.0.0.1:54321/callback'] }) });
     assert.equal(unnamedRegistration.status, 201);
     clientId = (await unnamedRegistration.json()).client_id;
-    await login(null);
-    console.log('Hosted OAuth discovery, registration, sign-in, persistence, refresh, replay, session, revocation, partner, gateway-header and self-hosted checks passed.');
+    upstreamExpiresIn = 1;
+    const longLived = await login(null);
+    upstreamExpiresIn = 300;
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    const beforeUpstreamRefresh = upstreamRefreshRequests;
+    const concurrentAccess = await Promise.all(Array.from({ length: 4 }, () => initialize(longLived.access_token)));
+    for (const response of concurrentAccess)
+        assert.equal(response.status, 200, '30-day ModLens access survives upstream access expiry');
+    assert.equal(upstreamRefreshRequests, beforeUpstreamRefresh + 1,
+        'concurrent ModLens requests share one upstream token refresh');
+    await stop();
+    delete env.MODLENS_OAUTH_LOG;
+    await start();
+    assert.equal((await initialize(longLived.access_token)).status, 200);
+    assert.equal((await fetchManual(`http://127.0.0.1:${mcpPort}/oauth/token`, { method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ grant_type: 'refresh_token',
+            client_id: clientId, refresh_token: tokens.refresh_token }) })).status, 400);
+    assert.doesNotMatch(serverOutput, /\[modlens\] oauth /, 'OAuth diagnostics are off by default');
+    await stop();
+    env.MODLENS_OAUTH_CODEX_REFRESH_WORKAROUND = '0';
+    env.MODLENS_OAUTH_LOG = '1';
+    await start();
+    assert.equal((await initialize(longLived.access_token)).status, 401,
+        'switching off the workaround immediately rejects previously issued long-lived tokens');
+    const shortLived = await login(null);
+    assert.match(shortLived.access_token, /^mla_/);
+    assert.ok(shortLived.expires_in >= 290 && shortLived.expires_in <= 295,
+        'workaround can be switched off to restore short-lived access tokens');
+    assert.equal((await initialize(shortLived.access_token)).status, 200);
+    console.log('Hosted OAuth discovery, registration, sign-in, persistence, switchable month-long access, upstream refresh, logging switch, replay, session, revocation, partner, gateway-header and self-hosted checks passed.');
 } finally {
     await stop();
     await new Promise(resolve => provider.close(resolve));

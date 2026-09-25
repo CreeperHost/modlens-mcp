@@ -13,7 +13,8 @@ type UpstreamTokens = { access_token: string; refresh_token?: string; expires_in
 type AuthConfig = {
     resource: URL; issuer: string; clientId: string; clientSecret?: string; scopes: string;
     profileUrl: string; subjectField: string; requiredField?: string; requiredValue?: string;
-    key: Buffer; authorizeUrl: string; tokenUrl: string; requiresIss: boolean;
+    key: Buffer; authorizeUrl: string; tokenUrl: string; requiresIss: boolean; log: boolean;
+    codexRefreshWorkaround: boolean;
 };
 
 export class HostedOAuthError extends Error {
@@ -23,6 +24,12 @@ export class HostedOAuthError extends Error {
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = (prefix: string) => prefix + randomBytes(32).toString("base64url");
 const now = () => Math.floor(Date.now() / 1000);
+// Temporary Codex MCP OAuth workaround: see https://github.com/openai/codex/issues/17265.
+// Remove the long-lived branch in issue() once Codex reliably shares rotated refresh credentials.
+const CODEX_WORKAROUND_ACCESS_TOKEN_TTL = 30 * 24 * 60 * 60;
+const oauthLog = (enabled: boolean, event: string, fields: Record<string, string | number | boolean | undefined>) => {
+    if (enabled) console.error(`[modlens] oauth ${JSON.stringify({ event, ...fields })}`);
+};
 const json = (res: ServerResponse, status: number, value: unknown, headers: Record<string, string> = {}) => {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", Pragma: "no-cache", ...headers });
     res.end(JSON.stringify(value));
@@ -150,7 +157,7 @@ async function safeResponseExcerpt(response: Response): Promise<string> {
             "$1$2[redacted]");
 }
 
-async function providerMetadata(url: URL): Promise<Response> {
+async function providerMetadata(url: URL, log: boolean): Promise<Response> {
     const attempts = 4;
     for (let attempt = 1; attempt <= attempts; attempt++) {
         let response: Response;
@@ -158,18 +165,17 @@ async function providerMetadata(url: URL): Promise<Response> {
             response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(10000) });
         } catch (error) {
             if (attempt === attempts) throw new Error(`OAuth provider metadata request failed for ${url}`, { cause: error });
-            console.error(`[modlens] oauth ${JSON.stringify({ event: "provider_metadata_retry", endpoint: url.toString(),
-                attempt, reason: error instanceof Error ? error.name : "request_error" })}`);
+            oauthLog(log, "provider_metadata_retry", { endpoint: url.toString(), attempt,
+                reason: error instanceof Error ? error.name : "request_error" });
             await new Promise(resolve => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
             continue;
         }
-        console.error(`[modlens] oauth ${JSON.stringify({ event: "provider_metadata_response", endpoint: url.toString(),
+        oauthLog(log, "provider_metadata_response", { endpoint: url.toString(),
             attempt, status: response.status, contentType: response.headers.get("content-type") ?? "",
-            ...(response.ok ? {} : { response: await safeResponseExcerpt(response) }) })}`);
+            ...(response.ok || !log ? {} : { response: await safeResponseExcerpt(response) }) });
         if (response.ok || response.status === 404 || (response.status !== 429 && response.status < 500)) return response;
         if (attempt === attempts) return response;
-        console.error(`[modlens] oauth ${JSON.stringify({ event: "provider_metadata_retry", endpoint: url.toString(),
-            attempt, status: response.status })}`);
+        oauthLog(log, "provider_metadata_retry", { endpoint: url.toString(), attempt, status: response.status });
         await response.body?.cancel();
         await new Promise(resolve => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
     }
@@ -181,10 +187,11 @@ export class HostedOAuth {
     private readonly instance = randomBytes(6).toString("hex");
     private requestCounts = new Map<string, { minute: number; count: number }>();
     private refreshes = new Map<string, Promise<Record<string, unknown>>>();
+    private upstreamRefreshes = new Map<string, Promise<GrantRow>>();
     private constructor(private config: AuthConfig, private database: () => Promise<Database>) {}
 
     private audit(event: string, fields: Record<string, string | number | boolean | undefined> = {}): void {
-        console.error(`[modlens] oauth ${JSON.stringify({ event, instance: this.instance, ...fields })}`);
+        oauthLog(this.config.log, event, { instance: this.instance, ...fields });
     }
 
     private clientRef(clientId: string): string { return sha(clientId).slice(0, 12); }
@@ -192,6 +199,7 @@ export class HostedOAuth {
 
     private observeTokenResponse(req: IncomingMessage, res: ServerResponse,
         fields: Record<string, string | number | boolean | undefined>): void {
+        if (!this.config.log) return;
         const startedAt = performance.now();
         let finished = false;
         req.once("aborted", () => this.audit("token_request_aborted", fields));
@@ -230,6 +238,10 @@ export class HostedOAuth {
     }
 
     static async create(env: NodeJS.ProcessEnv = process.env, database: () => Promise<Database> = getDb): Promise<HostedOAuth> {
+        const log = env.MODLENS_OAUTH_LOG === "1";
+        const workaroundSetting = env.MODLENS_OAUTH_CODEX_REFRESH_WORKAROUND ?? "1";
+        if (workaroundSetting !== "0" && workaroundSetting !== "1")
+            throw new Error("MODLENS_OAUTH_CODEX_REFRESH_WORKAROUND must be 0 or 1");
         const resource = secureUrl(env.MODLENS_OAUTH_PUBLIC_URL ?? "", "MODLENS_OAUTH_PUBLIC_URL", true);
         const issuer = secureUrl(env.MODLENS_OAUTH_ISSUER ?? "", "MODLENS_OAUTH_ISSUER", true).toString().replace(/\/$/, "");
         const clientId = env.MODLENS_OAUTH_CLIENT_ID;
@@ -247,10 +259,10 @@ export class HostedOAuth {
             throw new Error("MODLENS_OAUTH_REQUIRED_FIELD and MODLENS_OAUTH_REQUIRED_VALUE must be configured together");
         const path = new URL(issuer).pathname.replace(/\/$/, "");
         let metadataUrl = new URL(`/.well-known/oauth-authorization-server${path === "/" ? "" : path}`, issuer);
-        let response = await providerMetadata(metadataUrl);
+        let response = await providerMetadata(metadataUrl, log);
         if (response.status === 404) {
             metadataUrl = new URL(".well-known/openid-configuration", issuer + "/");
-            response = await providerMetadata(metadataUrl);
+            response = await providerMetadata(metadataUrl, log);
         }
         if (!response.ok) throw new Error(`OAuth provider metadata unavailable: HTTP ${response.status} from ${metadataUrl}`);
         const metadata = await response.json() as Record<string, unknown>;
@@ -261,7 +273,8 @@ export class HostedOAuth {
             "MODLENS_OAUTH_PROFILE_URL", true).toString();
         const instance = new HostedOAuth({ resource, issuer, clientId, clientSecret: env.MODLENS_OAUTH_CLIENT_SECRET,
             scopes, profileUrl, subjectField, requiredField, requiredValue: env.MODLENS_OAUTH_REQUIRED_VALUE,
-            key, authorizeUrl, tokenUrl, requiresIss: metadata.authorization_response_iss_parameter_supported === true }, database);
+            key, authorizeUrl, tokenUrl, requiresIss: metadata.authorization_response_iss_parameter_supported === true,
+            log, codexRefreshWorkaround: workaroundSetting === "1" }, database);
         await instance.db();
         return instance;
     }
@@ -434,6 +447,8 @@ export class HostedOAuth {
         if (typeof value !== "string" || !/^Bearer m[a-z]+_[A-Za-z0-9_-]{43}$/.test(value))
             throw new HostedOAuthError("Bearer token required", 401, "invalid_token");
         const raw = value.slice(7);
+        if (!this.config.codexRefreshWorkaround && raw.startsWith("mlw_"))
+            throw new HostedOAuthError("Long-lived access token disabled", 401, "invalid_token");
         const db = await this.db();
         const rows = await db.$queryRawUnsafe<Array<GrantRow & { access_expires: bigint | number }>>(
             `SELECT g.*, a.expires AS access_expires FROM hosted_oauth_access a
@@ -441,9 +456,8 @@ export class HostedOAuth {
         if (rows.length !== 1 || rows[0].resource !== this.config.resource.toString())
             throw new HostedOAuthError("Invalid access token", 401, "invalid_token");
         const grant = rows[0];
-        if (Number(grant.upstream_expires) <= now()) throw new HostedOAuthError("Access token expired", 401, "invalid_token");
         try {
-            const profile = await this.profile(this.open(grant.upstream_access));
+            const { profile } = await this.profileForGrant(grant);
             if (!profile.allowed || profile.subject !== grant.subject) {
                 await this.revoke(grant.id, "profile_access_denied");
                 throw new HostedOAuthError("Account access denied", 403, "access_denied");
@@ -464,12 +478,54 @@ export class HostedOAuth {
     }
 
     private async issue(grant: GrantRow): Promise<Record<string, unknown>> {
-        const rawAccess = token("mla_");
-        const expires = Math.max(1, Math.min(300, Number(grant.upstream_expires) - now() - 5));
+        const rawAccess = token(this.config.codexRefreshWorkaround ? "mlw_" : "mla_");
+        const expires = this.config.codexRefreshWorkaround ? CODEX_WORKAROUND_ACCESS_TOKEN_TTL
+            : Math.max(1, Math.min(300, Number(grant.upstream_expires) - now() - 5));
         const db = await this.db();
         await db.$executeRawUnsafe(`INSERT INTO hosted_oauth_access (token_hash,grant_id,expires) VALUES ($1,$2,$3)`,
             sha(rawAccess), grant.id, now() + expires);
         return { access_token: rawAccess, token_type: "Bearer", expires_in: expires, scope: "modlens" };
+    }
+
+    private async currentUpstream(grant: GrantRow, force = false): Promise<GrantRow> {
+        if (!force && Number(grant.upstream_expires) > now() + 5) return grant;
+        let pending = this.upstreamRefreshes.get(grant.id);
+        if (!pending) {
+            pending = (async () => {
+                const db = await this.db();
+                const rows = await db.$queryRawUnsafe<GrantRow[]>(`SELECT * FROM hosted_oauth_grants WHERE id=$1`, grant.id);
+                const current = rows[0];
+                if (!current) throw new HostedOAuthError("Provider authorization expired", 401, "invalid_token");
+                if ((force && current.upstream_access !== grant.upstream_access) ||
+                    (!force && Number(current.upstream_expires) > now() + 5)) return current;
+                if (!current.upstream_refresh)
+                    throw new HostedOAuthError("Provider authorization expired", 401, "invalid_token");
+                const upstream = await this.upstreamToken(new URLSearchParams({ grant_type: "refresh_token",
+                    refresh_token: this.open(current.upstream_refresh) }));
+                current.upstream_access = this.seal(upstream.access_token);
+                current.upstream_refresh = this.seal(upstream.refresh_token ?? this.open(current.upstream_refresh));
+                current.upstream_expires = now() + Math.max(1, Math.min(86400, Number(upstream.expires_in) || 300));
+                await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET upstream_access=$2,upstream_refresh=$3,
+                    upstream_expires=$4 WHERE id=$1`, current.id, current.upstream_access,
+                    current.upstream_refresh, current.upstream_expires);
+                return current;
+            })();
+            this.upstreamRefreshes.set(grant.id, pending);
+            void pending.finally(() => this.upstreamRefreshes.delete(grant.id)).catch(() => {});
+        }
+        return pending;
+    }
+
+    private async profileForGrant(grant: GrantRow): Promise<{
+        current: GrantRow; profile: { subject: string; allowed: boolean };
+    }> {
+        const current = await this.currentUpstream(grant);
+        try { return { current, profile: await this.profile(this.open(current.upstream_access)) }; }
+        catch (error) {
+            if (!(error instanceof HostedOAuthError) || error.status !== 401) throw error;
+            const refreshed = await this.currentUpstream(current, true);
+            return { current: refreshed, profile: await this.profile(this.open(refreshed.upstream_access)) };
+        }
     }
 
     private async refresh(clientId: string, raw: string, requestRef: string): Promise<Record<string, unknown>> {
@@ -484,25 +540,15 @@ export class HostedOAuth {
         const grant = rows[0];
         let stage = "provider_token";
         try {
-            const oldUpstreamRefresh = grant.upstream_refresh!;
-            const upstream = await this.upstreamToken(new URLSearchParams({ grant_type: "refresh_token",
-                refresh_token: this.open(oldUpstreamRefresh) }));
-            grant.upstream_access = this.seal(upstream.access_token);
-            grant.upstream_refresh = this.seal(upstream.refresh_token ?? this.open(oldUpstreamRefresh));
-            grant.upstream_expires = now() + Math.max(1, Math.min(86400, Number(upstream.expires_in) || 300));
-            stage = "grant_update";
-            await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET upstream_access=$2,upstream_refresh=$3,
-                upstream_expires=$4 WHERE id=$1`, grant.id, grant.upstream_access,
-                grant.upstream_refresh, grant.upstream_expires);
             stage = "profile";
-            const profile = await this.profile(upstream.access_token);
+            const { current, profile } = await this.profileForGrant(grant);
             if (profile.subject !== grant.subject || !profile.allowed) throw new HostedOAuthError("Account access denied", 403, "access_denied");
             const next = token("mlr_");
             grant.refresh_hash = sha(next);
             stage = "rotation";
             await db.$executeRawUnsafe(`UPDATE hosted_oauth_grants SET refresh_hash=$2 WHERE id=$1`, grant.id, grant.refresh_hash);
             stage = "access_issue";
-            const access = await this.issue(grant);
+            const access = await this.issue(current);
             const response = { ...access, refresh_token: next };
             this.audit("refresh_issued", { request: requestRef, client: this.clientRef(clientId), grant: this.grantRef(grant.id),
                 previousRefreshRef: sha(raw).slice(0, 12), refreshRef: sha(next).slice(0, 12),
