@@ -3,6 +3,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { getDb } from "./db.js";
 import { guardHostedMod, attachLicenseNotices } from "./hosted-mod-license.js";
+import { ModReferenceError } from "./mod-reference.js";
 
 export interface HostedLimits {
     lines: number;
@@ -327,6 +328,7 @@ export async function runHostedTool(tool: string, input: Record<string, unknown>
         return result;
     } catch (error) {
         if (!(error instanceof HostedPolicyError)) console.error("[modlens] hosted policy failure", error);
-        return failure(error instanceof HostedPolicyError ? error.message : "Hosted request unavailable. Contact the operator.");
+        return failure(error instanceof HostedPolicyError || error instanceof ModReferenceError
+            ? error.message : "Hosted request unavailable. Contact the operator.");
     }
 }

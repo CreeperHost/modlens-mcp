@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync } from "node:fs";
-import { resolveModRef } from "./repositories/mod.js";
+import { stageModReference, ingestStagedMod, type StagedMod } from "./mod-reference.js";
 import { cachedModLicense, type LicenseDecision } from "./mod-license.js";
 import { projectLicenseArtifact } from "./tools/project.js";
 import { compactNotices } from "./license-notices.js";
@@ -35,10 +35,18 @@ export async function reviewHostedMod(args: Record<string, unknown>): Promise<Li
     }
     const ref = args.dbId ?? args.modId;
     if (typeof ref !== "string" && typeof ref !== "number") throw new Error("Specify modId/dbId, or a project class, to inspect its license.");
-    const mod = await resolveModRef(ref);
-    if (!mod) throw new Error("Mod not found.");
-    const metadata = mod.metadata as Record<string, unknown> | null;
-    return cachedModLicense(mod.jarPath, { version: mod.version, sourceUrl: typeof metadata?.sourceUrl === "string" ? metadata.sourceUrl : undefined });
+    const staged = await stageModReference({ modId: args.modId as string | number | undefined,
+        dbId: args.dbId as number | undefined, sha1: args.sha1 as string | undefined,
+        mcVersion: args.mcVersion as string | undefined, modVersion: args.modVersion as string | undefined,
+        loader: args.loader as string | undefined,
+        className: args.className as string | undefined });
+    return reviewStagedMod(staged);
+}
+
+async function reviewStagedMod(staged: StagedMod): Promise<LicenseDecision> {
+    const metadata = staged.mod?.metadata as Record<string, unknown> | null | undefined;
+    return cachedModLicense(staged.jarPath, { version: staged.version,
+        sourceUrl: typeof metadata?.sourceUrl === "string" ? metadata.sourceUrl : staged.sourceUrl });
 }
 
 export async function guardHostedMod(tool: string, args: Record<string, unknown>): Promise<{ blocked?: CallToolResult; notices?: LicenseDecision[] }> {
@@ -49,8 +57,18 @@ export async function guardHostedMod(tool: string, args: Record<string, unknown>
     if (!modSource && !bytecode && !project) return {};
     if (!project && args.modId === undefined && args.dbId === undefined && args.dbIdA === undefined) return { blocked: out({ execution: "license_review_required", executed: false,
         reason: "Specify modId/dbId for hosted source search so the correct artifact license can be checked. Metadata/class searches remain available." }) };
-    const decision = await reviewHostedMod(args);
+    const staged = project ? undefined : await stageModReference({ modId: args.modId as string | number | undefined,
+        dbId: args.dbId as number | undefined, sha1: args.sha1 as string | undefined,
+        mcVersion: args.mcVersion as string | undefined, modVersion: args.modVersion as string | undefined,
+        loader: args.loader as string | undefined,
+        className: args.className as string | undefined });
+    const decision = staged ? await reviewStagedMod(staged) : await reviewHostedMod(args);
     if (decision.disposition !== "hosted_allowed") return { blocked: out({ licenseReview: decision, local: localModPlan(decision, args) }) };
+    if (staged) {
+        const mod = await ingestStagedMod(staged);
+        args.dbId = mod.id;
+        args.modId = mod.id;
+    }
     return { notices: [decision] };
 }
 

@@ -2,8 +2,13 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { hostedLimits, runHostedTool, type HostedBudget } from "./hosted-policy.js";
 import { cachedModLicense } from "./mod-license.js";
 import { licenseTemplates } from "./license-templates.js";
+import { stageModReference, ingestStagedMod, ModReferenceError } from "./mod-reference.js";
 
-vi.mock("./repositories/mod.js", () => ({ resolveModRef: vi.fn(async () => ({ jarPath: "/private/fixture.jar", version: "1.0", metadata: {} })) }));
+vi.mock("./mod-reference.js", () => ({
+    stageModReference: vi.fn(async () => ({ jarPath: "/private/fixture.jar", version: "1.0" })),
+    ingestStagedMod: vi.fn(async () => ({ id: 7 })),
+    ModReferenceError: class extends Error {},
+}));
 vi.mock("./mod-license.js", () => ({ cachedModLicense: vi.fn() }));
 vi.mock("./tools/project.js", () => ({ projectLicenseArtifact: vi.fn(async () => "/private/project.jar") }));
 const budget = { charge: vi.fn(async () => {}) } as unknown as HostedBudget;
@@ -19,6 +24,7 @@ it("retains complete notices after using the entire source line allowance", asyn
     const result = await runHostedTool("mod", { action: "source", modId: "fixture", path: "example/Fixture.java" }, "user", limits, budget, run);
     expect(result.isError).not.toBe(true);
     expect((result.content[0] as any).text.split("\n")).toHaveLength(200);
+    expect(ingestStagedMod).toHaveBeenCalledOnce();
     const last = JSON.parse((result.content.at(-1) as any).text);
     expect(last.licenseCompliance[0].notices).toEqual(decision.notices);
 });
@@ -33,8 +39,30 @@ it("returns a local consent plan before running any unlicensed source route", as
         const plan = JSON.parse((result.content[0] as any).text).local;
         expect(plan).toMatchObject({ executed: false, requiresUserConsent: true, request: { localJarPath: "<absolute-path-to-local-mod.jar>", sha256: decision.sha256, acceptedLocalDecompilation: false, startLine: 501 } });
         expect(run).not.toHaveBeenCalled();
+        expect(stageModReference).toHaveBeenCalled();
+        expect(ingestStagedMod).not.toHaveBeenCalled();
         expect(JSON.stringify(result)).not.toContain("/private/");
     }
+});
+it("stages a missing SHA-1 JAR for review and ingests it only after hosted approval", async () => {
+    const run = vi.fn(async () => ({ content: [{ type: "text" as const, text: "source" }] }));
+    const result = await runHostedTool("mod", { action: "decompile_class", modId: "fixture", sha1: decision.sha1,
+        className: "example.Fixture" }, "user", limits, budget, run);
+    expect(result.isError).not.toBe(true);
+    expect(stageModReference).toHaveBeenCalledWith(expect.objectContaining({ modId: "fixture", sha1: decision.sha1,
+        className: "example.Fixture" }));
+    expect(cachedModLicense).toHaveBeenCalledWith("/private/fixture.jar", expect.anything());
+    expect(ingestStagedMod).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ dbId: 7, modId: 7 }));
+});
+it("returns an actionable ambiguity without running hosted source", async () => {
+    vi.mocked(stageModReference).mockRejectedValueOnce(new ModReferenceError("Ambiguous mod fixture; provide the JAR SHA-1"));
+    const run = vi.fn();
+    const result = await runHostedTool("mod", { action: "decompile_class", modId: "fixture", className: "example.Fixture" },
+        "user", limits, budget, run);
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as any).text).toContain("provide the JAR SHA-1");
+    expect(run).not.toHaveBeenCalled();
 });
 it("does not execute a global mod source search without an artifact license scope", async () => {
     const run = vi.fn();

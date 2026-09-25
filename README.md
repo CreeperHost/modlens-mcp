@@ -646,7 +646,7 @@ All tool actions have been consolidated into **24 grouped tools** to stay within
 | `source_urls` | query | GitHub/GitLab URLs from manifests |
 | `decompile` | dbId, force | Bulk decompile JAR via Vineflower (background) |
 | `decompile_status` | dbId | Poll background decompile job |
-| `decompile_class` | dbId, className | Decompile a single class on demand |
+| `decompile_class` | modId or dbId, className, sha1? | Resolve the exact JAR and decompile a single class on demand |
 | `source` | dbId, path | Browse or read decompiled source tree |
 | `search_source` | query, dbId?, isRegex, limit | Text/regex search across decompiled source — omit `dbId` to search **all** decompiled mods (results include `modId` + `modVersion`) |
 | `reindex` | dbId? | Re-index class names |
@@ -1088,13 +1088,15 @@ The first hosted Minecraft request for a version queues private full-version dec
 
 The byte allowance includes all successful tool content, including metadata, search snippets and bytecode. It measures UTF-8 JSON content before transport compression. Cached files and inbound upload bytes are excluded. Each source text field has a 32 KiB cap. Searches with `limit`/`top` are capped at 50 results; responses exceeding the byte limit require a narrower query.
 
-Use `startLine` (1-based) and `maxLines` for team `mc_source get_source/bytecode`, `mod source/decompile_class`, `mod_bytecode bytecode`, and `project source/bytecode`. A range may start anywhere; the hosted cap bounds its length. Minecraft source indexes populate automatically after the first hosted request for a version. Ingest mods through the operator's local interface; hosted clients can upload their own Gradle environment through `project`.
+Use `startLine` (1-based) and `maxLines` for team `mc_source get_source/bytecode`, `mod source/decompile_class`, `mod_bytecode bytecode`, and `project source/bytecode`. A range may start anywhere; the hosted cap bounds its length. Minecraft source indexes populate automatically after the first hosted request for a version. A hosted mod reader can fetch a missing JAR from modpacks.ch when it resolves one exact artifact; provide `sha1` to select a particular release. Hosted source and bytecode are checked against that JAR's licence before any content is returned. Hosted clients can upload their own Gradle environment through `project`.
 
 To allow Minecraft source for specific teams, set `MODLENS_HOSTED_MC_SOURCE=1` and `MODLENS_HOSTED_MC_SOURCE_TEAMS` to comma-separated team IDs. This requires `MODLENS_HOSTED_PROXY_SECRET`; the authenticated gateway must inject `x-modlens-team-id` for verified members and remove caller-provided `x-modlens-*` headers. Other users retain metadata-only Minecraft access. Team access uses the same source and usage limits above. Local stdio is unaffected.
 
 ### Mod source access
 
 Hosted mod source responses include licence and attribution notices. Use `mod_license` with `action=check` and `modId`/`dbId` to check availability. For uploaded projects, supply `projectKey`, `environmentId` and `className` instead.
+
+Before deploying this resolver against an existing PostgreSQL or PGlite database, run `npx prisma db push` with that database's `DATABASE_URL`. This adds the nullable `mods.sha1` column and index before the new server starts. Existing SQLite databases add them during startup without replacing mod rows.
 
 When hosted source is unavailable, `action=local_plan` provides instructions for decompiling your local JAR with your explicit consent. Run the returned request on your computer:
 

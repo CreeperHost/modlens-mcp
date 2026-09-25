@@ -96,6 +96,7 @@ import { hostedToolMetadata } from "./hosted-tool-catalog.js";
 import { HostedOAuth, HostedOAuthError } from "./hosted-oauth.js";
 import { isRfc1918Peer } from "./private-network.js";
 import { reviewHostedMod, localModPlan } from "./hosted-mod-license.js";
+import { resolveModReference } from "./mod-reference.js";
 
 // Load .env — try ~/.modlens/.env first (npx/installed users), then local .env (git-clone users)
 import { readFileSync, existsSync } from "fs";
@@ -227,7 +228,32 @@ function createMcpServer(principal?: string, allowMinecraftSource = false): McpS
     });
     const limits = principal === undefined ? undefined : hostedLimits();
     function registerTool<S extends z.ZodRawShape>(name: string, description: string, schema: S, handler: ToolCallback<S>): void {
-        if (!limits || principal === undefined) { server.tool(name, description, schema, handler); return; }
+        const runReader = async (args: Record<string, unknown>, extra: unknown) => {
+            const action = String(args.action ?? args.report ?? "");
+            const readers = new Set(["mod", "mod_bytecode", "mod_mixins", "mod_jar", "mod_data", "mod_tags", "gradle", "reports", "pack_tools", "mc_data"]);
+            const scoped = name === "mod" ? ["get", "dependencies", "decompile", "decompile_status", "decompile_class",
+                "source", "search_source", "search_indexed", "search_semantic", "graph_query", "graph_report",
+                "graph_status", "embed_status", "get_paths", "index_fts", "index_semantic"].includes(action)
+                : name === "mod_bytecode" ? !["diff", "diff_detailed", "cache_diff", "cross_refs"].includes(action)
+                : name === "mod_mixins" ? ["targets", "resolve", "at_entries", "aw_entries"].includes(action)
+                : name === "mod_data" ? ["list", "get"].includes(action)
+                : name === "mod_tags" ? ["index", "mod_list"].includes(action)
+                : name === "gradle" ? action === "get_files"
+                : name === "pack_tools" ? action === "sidedness"
+                : name === "mc_data" ? action === "entity_attributes"
+                : name === "reports" ? action === "mod_overview" : true;
+            if (readers.has(name) && scoped && (args.modId !== undefined || args.dbId !== undefined)) {
+                const mod = await resolveModReference({ modId: args.modId as string | number | undefined,
+                    dbId: args.dbId as number | undefined, sha1: args.sha1 as string | undefined,
+                    mcVersion: args.mcVersion as string | undefined, modVersion: args.modVersion as string | undefined,
+                    loader: args.loader as string | undefined,
+                    className: ["decompile_class", "bytecode", "class_members"].includes(action)
+                        ? args.className as string | undefined : undefined });
+                args = { ...args, modId: mod.id, dbId: mod.id };
+            }
+            return (handler as (args: Record<string, unknown>, extra: unknown) => any)(args, extra);
+        };
+        if (!limits || principal === undefined) { server.tool(name, description, schema, safe(runReader) as ToolCallback<S>); return; }
         const actions = hostedActions(name, allowMinecraftSource);
         if (!actions) return;
         const actionSchema = schema.action;
@@ -249,7 +275,7 @@ function createMcpServer(principal?: string, allowMinecraftSource = false): McpS
             inputSchema: publicSchema, annotations: metadata.annotations }, (async (args: Record<string, unknown>, extra: unknown) =>
             runHostedTool(name, args, principal, limits, hostedBudget,
                 async bounded => {
-                    const result = await (handler as (args: Record<string, unknown>, extra: unknown) => any)(bounded, extra);
+                    const result = await runReader(bounded, extra);
                     if (name === "mc_source" && (!result.isError || ["search_indexed", "search_code"].includes(String(bounded.action)))) {
                         for (const version of [bounded.version, bounded.mcVersion, bounded.versionA, bounded.versionB]) {
                             scheduleHostedMinecraftVersionIndex(version);
@@ -272,6 +298,7 @@ registerTool("mod_license",
     {
         action: z.enum(["check", "local_plan"]),
         modId: z.union([z.string(), z.number()]).optional(), dbId: z.number().int().positive().optional(),
+        sha1: z.string().optional().describe("Exact JAR SHA-1 (40 hexadecimal characters)"),
         projectKey: z.string().optional(), environmentId: z.string().optional(), className: z.string().optional(),
         operation: z.enum(["source", "bytecode"]).optional(),
         startLine: z.number().int().positive().optional(), maxLines: z.number().int().positive().max(10000).optional(),
@@ -311,7 +338,7 @@ registerTool("runtime",
 
 registerTool(
     "mod",
-    "Mod database, decompile, and source browser. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|refresh_metadata|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). refresh_metadata: re-parse all mods with degraded metadata (filename/@Mod annotation) and upgrade if a higher-quality manifest is found. graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: validate an exported bundle and open a draft GitHub registry PR (bundlePath required). embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: validate an exported bundle and open a draft GitHub registry PR (bundlePath required). Auto-behaviors: decompile_status auto-queues embedding (MODLENS_AUTO_EMBED) and graph build (MODLENS_AUTO_GRAPH). Pass autoEmbed/autoGraph to override per-call.",
+    "Mod database, decompile, and source browser. Mod readers accept optional sha1 for an exact JAR and can resolve an unambiguous missing mod through modpacks.ch. action=ingest|list|get|search|stats|dependencies|dep_graph|version_conflicts|source_urls|decompile|decompile_status|decompile_class|source|search_source|reindex|batch_ingest|batch_decompile|refresh_metadata|index_fts|search_indexed|index_semantic|search_semantic|get_paths|delete|graph_build|graph_status|graph_query|graph_report|graph_enrich_next|graph_enrich_submit|graph_download|graph_export|graph_submit|embed_export|embed_download|embed_download_all|embed_status|embed_submit. index_fts/search_indexed: BM25-ranked FTS over source code. index_semantic/search_semantic: vector search (requires Ollama). refresh_metadata: re-parse all mods with degraded metadata (filename/@Mod annotation) and upgrade if a higher-quality manifest is found. graph_enrich_next: get next un-enriched chunk for chat enrichment. graph_enrich_submit: submit enriched nodes/edges (chunkIndex, nodes, edges). graph_download: download pre-built graph from registry (targetType=mod|vanilla|modloader with targetId/targetVersion). graph_export: export a mod's local graph as a shareable gzipped bundle. graph_submit: validate an exported bundle and open a draft GitHub registry PR (bundlePath required). embed_export/embed_download/embed_status: targetType-aware embeddings actions for mod/vanilla/modloader. embed_download: downloads registry embeddings; protects local embeddings by default (use force=true to overwrite). embed_download_all: download embeddings for all mods. embed_submit: validate an exported bundle and open a draft GitHub registry PR (bundlePath required). Auto-behaviors: decompile_status auto-queues embedding (MODLENS_AUTO_EMBED) and graph build (MODLENS_AUTO_GRAPH). Pass autoEmbed/autoGraph to override per-call.",
     {
         action: z.enum([
             "ingest","list","get","search","stats","dependencies","dep_graph",
@@ -325,6 +352,7 @@ registerTool(
         jarPath:      z.string().optional(),
         modId:        z.union([z.string(), z.number()]).optional().describe("mod ID or DB id"),
         dbId:         z.number().optional().describe("DB id"),
+        sha1:        z.string().optional().describe("Exact JAR SHA-1"),
         query:        z.string().optional(),
         path:         z.string().optional(),
         startLine:    z.number().int().positive().optional().describe("First source line, 1-based"),
@@ -474,7 +502,7 @@ registerTool(
 
 registerTool(
     "mod_bytecode",
-    "Mod JAR bytecode and class analysis — for INGESTED MODS only (requires dbId or modId of an ingested mod). For vanilla Minecraft classes use mc_source instead. action=search_class|class_members|bytecode|find_refs|cross_refs|inheritance|diff|diff_detailed|cache_diff|find_implementors|scan_registrations|annotated_by|event_listeners|optional_integrations|network_payloads|config_schema. Most actions require dbId or modId. cross_refs/find_implementors/annotated_by/event_listeners can omit modId to search all mods. diff/diff_detailed/cache_diff require dbIdA+dbIdB. diff_detailed gives AST-level method/field changes with breaking-change flags (add semantic=true for cosine similarity, requires mod index_semantic). cache_diff forces a (re)compute and writes to DB. Set env AUTO_CACHE_MOD_DIFFS=1 to auto-cache all diff_detailed calls.",
+    "Mod JAR bytecode and class analysis. A modId may resolve a missing exact JAR through modpacks.ch; sha1 identifies a specific file. For vanilla Minecraft classes use mc_source instead. action=search_class|class_members|bytecode|find_refs|cross_refs|inheritance|diff|diff_detailed|cache_diff|find_implementors|scan_registrations|annotated_by|event_listeners|optional_integrations|network_payloads|config_schema. Most actions require dbId or modId. cross_refs/find_implementors/annotated_by/event_listeners can omit modId to search all mods. diff/diff_detailed/cache_diff require dbIdA+dbIdB. diff_detailed gives AST-level method/field changes with breaking-change flags (add semantic=true for cosine similarity, requires mod index_semantic). cache_diff forces a (re)compute and writes to DB. Set env AUTO_CACHE_MOD_DIFFS=1 to auto-cache all diff_detailed calls.",
     {
         action:     z.enum(["search_class","class_members","bytecode","find_refs","cross_refs","inheritance","diff","diff_detailed","cache_diff","find_implementors","scan_registrations","annotated_by","event_listeners","optional_integrations","network_payloads","config_schema"]),
         dbId:      z.number().optional().describe("DB id"),
@@ -486,6 +514,7 @@ registerTool(
         annotation:z.string().optional().describe("slash/dot annotation class"),
         event:     z.string().optional().describe("slash/dot event class"),
         modId:     z.union([z.string(), z.number()]).optional().describe("Mod ID string (e.g. 'polylib') or numeric DB id. Resolved via DB lookup."),
+        sha1:      z.string().optional().describe("Exact JAR SHA-1"),
         transitive:z.boolean().optional(),
         mcVersion: z.string().optional(),
         loader:    z.string().optional(),
@@ -530,6 +559,7 @@ registerTool(
         action:        z.enum(["targets","resolve","conflicts","targets_in_package","at_conflicts","at_entries","aw_entries"]),
         modId:         z.union([z.string(), z.number()]).optional().describe("mod ID or DB id"),
         dbId:          z.number().optional().describe("DB id"),
+        sha1:          z.string().optional().describe("Exact JAR SHA-1"),
         targetClass:   z.string().optional().describe("slash/dot class name"),
         packagePrefix: z.string().optional().describe("slash/dot package prefix"),
         mcVersion:     z.string().optional(),
@@ -1010,6 +1040,7 @@ registerTool(
         id:             z.string().optional(),
         entity:         z.string().optional().describe("entity id e.g. 'player'"),
         modId:          z.union([z.string(), z.number()]).optional().describe("mod ID or DB id"),
+        sha1:           z.string().optional().describe("Exact JAR SHA-1 for entity_attributes modId"),
         limit:          z.number().optional().describe("Max results (lang)"),
     },
     safe(async ({ action, version, registry, tagId, namespace, entry, type, outputItem, recipeId, item, category, path, filter, block, modelPath, resolveParents, biomeId, id, entity, modId, limit }) => {
@@ -1084,6 +1115,7 @@ registerTool(
     {
         action:    z.enum(["list_files","get_file","lang","sounds","atlas","registry_entries","manifest","list_configs","get_config"]),
         modId:     z.union([z.string(), z.number()]).describe("mod ID or DB id"),
+        sha1:      z.string().optional().describe("Exact JAR SHA-1"),
         prefix:    z.string().optional(),
         path:      z.string().optional().describe("internal JAR path"),
         filter:    z.string().optional(),
@@ -1118,6 +1150,7 @@ registerTool(
         action:    z.enum(["list","get","diff","trace_item"]).describe("list/get: JAR data operations; diff: compare two mod versions; trace_item: recipe chain"),
         type:      z.enum(["recipe","loot_table","advancement","blockstate","model","biome","structure","data_tag","particle","damage_type","enchantment","configured_feature","placed_feature","structure_set","noise","density_function","processor_list","template_pool","dimension_type","dimension","trim_material","trim_pattern","painting_variant","wolf_variant","cat_variant","chat_type"]).describe("Data type to query"),
         modId:     z.union([z.string(), z.number()]).optional().describe("mod ID or DB id"),
+        sha1:      z.string().optional().describe("Exact JAR SHA-1"),
         dbIdA:     z.number().optional().describe("older DB id"),
         dbIdB:     z.number().optional().describe("newer DB id"),
         itemId:    z.string().optional().describe("resource id e.g. 'mekanism:steel_ingot'"),
@@ -1159,6 +1192,7 @@ registerTool(
     {
         action:   z.enum(["index","index_all","namespaces","contributors","expand","mod_list","find_conflicts","search"]),
         modId:    z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (index, mod_list)"),
+        sha1:     z.string().optional().describe("Exact JAR SHA-1"),
         tagPath:  z.string().optional().describe("Tag path to look up contributors or expand (contributors, expand), e.g. 'c:ores/iron', '#forge:storage_blocks'"),
         registry: z.string().optional().describe("block|item|entity_type|fluid|..."),
         query:    z.string().optional(),
@@ -1215,6 +1249,7 @@ registerTool(
     {
         action:      z.enum(["get_files","search","compare_deps"]),
         modId:       z.union([z.string(), z.number()]).optional().describe("Mod ID string or DB id (get_files)"),
+        sha1:        z.string().optional().describe("Exact JAR SHA-1"),
         query:       z.string().optional(),
         modIdFilter: z.string().optional().describe("modId substring filter"),
         groupFilter: z.string().optional().describe("group:artifact substring"),
@@ -1252,6 +1287,7 @@ registerTool(
         report:       z.enum(["mixin_conflicts","tag_conflicts","version_conflicts","mod_overview","gradle_deps","pack_compat","dep_graph","sidedness","mod_complexity","pack_changelog"]),
         savePath:     z.string().optional().describe("Absolute path to save the .md file, e.g. 'C:/reports/mixin_conflicts.md'"),
         modId:        z.union([z.string(), z.number()]).optional(),
+        sha1:         z.string().optional().describe("Exact JAR SHA-1"),
         loader:       z.string().optional(),
         mcVersion:    z.string().optional(),
         registry:     z.string().optional(),
@@ -1286,6 +1322,7 @@ registerTool(
     {
         action:      z.enum(["asset_conflicts","vanilla_overrides","sidedness","pack_sidedness","complexity","pack_changelog","data_conflicts","pack_graph","config_diff","health"]),
         modId:       z.union([z.string(), z.number()]).optional(),
+        sha1:        z.string().optional().describe("Exact JAR SHA-1"),
         assetType:   z.enum(["textures","models","sounds","blockstates","shaders","all"]).optional().describe("Asset sub-folder filter (asset_conflicts)"),
         dataType:    z.enum(["recipe","loot_tables","advancements","tags","structures","all"]).optional().describe("Data sub-folder filter (data_conflicts)"),
         overrideType:z.enum(["data","assets","all"]).optional().describe("Override type filter (vanilla_overrides)"),
