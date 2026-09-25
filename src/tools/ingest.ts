@@ -61,6 +61,7 @@ export async function ingestMod(jarPath: string, skipSource = false, replace = f
     assertHostAccessiblePath(jarPath);
     const existing = await findModByJarPath(jarPath);
     if (existing) {
+        if (!existing.sha1) await updateMod(existing.id, { sha1: (await computeHashes(jarPath)).sha1 });
         // Re-parse to check if the JAR now has higher-quality metadata
         const oldSource = (existing.metadataSource ?? "filename") as MetadataSource;
         const oldQuality = METADATA_QUALITY[oldSource] ?? 0;
@@ -139,6 +140,7 @@ export async function ingestMod(jarPath: string, skipSource = false, replace = f
         loader: manifest.loader,
         jarPath,
         sha256: hashes.sha256,
+        sha1: hashes.sha1,
         sha512: hashes.sha512,
         murmur2: hashes.murmur2,
         hasMixins: manifest.hasMixins,

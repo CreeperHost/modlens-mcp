@@ -47,6 +47,12 @@ export function initializeSqliteDatabase(
                     db.exec(entry.sql);
                 }
             }
+            // Existing SQLite databases predate the nullable artifact identity column.
+            if (has("table", "mods")) {
+                const columns = db.prepare("PRAGMA table_info(mods)").all() as Array<{ name: string }>;
+                if (!columns.some(column => column.name === "sha1")) db.exec("ALTER TABLE mods ADD COLUMN sha1 TEXT");
+                db.exec("CREATE INDEX IF NOT EXISTS mods_sha1_idx ON mods(sha1)");
+            }
             for (const index of indexes) {
                 if (!has("table", index.source)) continue;
                 const backfill = !has("table", index.table)

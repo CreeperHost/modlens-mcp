@@ -1,11 +1,13 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { mcVersionWhere, resolveModRef, resolveModRefSlim } from "./mod.js";
-const database = vi.hoisted(() => ({ findUnique: vi.fn(), findFirst: vi.fn() }));
+const database = vi.hoisted(() => ({ findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn() }));
 afterEach(() => vi.clearAllMocks());
-vi.mock("../db.js", () => ({getDb: async () => ({mod:{...database, findMany:async () => [
+vi.mock("../db.js", () => ({getDb: async () => ({mod: database})}));
+const versions = [
     "1.21.1", "1.21.11", "1.21.1.0", "1.211", "[1.21.1,)", "[1.21,1.22)", ">=1.21 <1.22",
     "1.7.2", "1.7.10", "[1.7.10,1.8)", "1.12.2", "[1.12,1.13)", ">=1.16.2 <1.17",
-].map(mcVersion=>({mcVersion}))}})}));
+].map(mcVersion=>({mcVersion}));
+database.findMany.mockImplementation(async (args: any) => args?.distinct?.includes("mcVersion") ? versions : []);
 
 describe("mcVersionWhere", () => {
     it.each([
@@ -36,12 +38,20 @@ describe("mcVersionWhere", () => {
 describe.each([resolveModRef, resolveModRefSlim])("mod reference resolution", resolve => {
     it.each([undefined, null, ""])("does not query the first record for a missing reference (%s)", async ref => {
         expect(await resolve(ref as any)).toBeNull();
-        expect(database.findFirst).not.toHaveBeenCalled();
+        expect(database.findMany).not.toHaveBeenCalled();
         expect(database.findUnique).not.toHaveBeenCalled();
     });
     it("does not interpret a mod name's numeric prefix as a database ID", async () => {
         await resolve("3d-example");
         expect(database.findUnique).not.toHaveBeenCalled();
-        expect(database.findFirst).toHaveBeenCalledOnce();
+        expect(database.findMany).toHaveBeenCalledOnce();
+    });
+    it("does not select an integration mod by substring", async () => {
+        database.findMany.mockResolvedValueOnce([{ modId: "refinedstorage_mekanism_integration", id: 9 }]);
+        expect(await resolve("Mekanism")).toBeNull();
+    });
+    it("rejects ambiguous exact releases", async () => {
+        database.findMany.mockResolvedValueOnce([{ modId: "mekanism", id: 1 }, { modId: "Mekanism", id: 2 }]);
+        await expect(resolve("Mekanism")).rejects.toThrow("Multiple releases");
     });
 });

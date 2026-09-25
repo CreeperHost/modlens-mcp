@@ -17,6 +17,7 @@ model Mod {
   loader        String   // fabric | neoforge | forge | quilt | unknown
   jarPath       String   @unique @map("jar_path")
   sha256        String?
+  sha1          String?
   murmur2       String?
   sha512        String?
   sourcePath    String?  @map("source_path")
@@ -47,6 +48,7 @@ model Mod {
 
   @@unique([modId, version, mcVersion, loader])
   @@index([modId])
+  @@index([sha1])
   @@index([mcVersion])
   @@index([loader])
   @@index([modrinthId])

@@ -115,6 +115,18 @@ describe("SQLite application schema and public model shapes", () => {
         expect(await db.packVersion.count()).toBe(0);
         expect(await db.$queryRawUnsafe("SELECT count(*) AS n FROM fts_mod_source")).toHaveLength(1);
     });
+    it("adds SHA-1 to an existing SQLite database without losing mod rows", async () => {
+        const existing = await createFixtureMod();
+        await disconnect();
+        const raw = new Database(path);
+        raw.exec("DROP INDEX IF EXISTS mods_sha1_idx; ALTER TABLE mods DROP COLUMN sha1");
+        raw.close();
+        initializeSqliteDatabase(path, templatePath);
+        const db = await getDb();
+        expect((await db.mod.findUnique({ where: { id: existing.id } }))?.modId).toBe("fixture");
+        await db.mod.update({ where: { id: existing.id }, data: { sha1: "a".repeat(40) } });
+        expect((await db.mod.findFirst({ where: { sha1: "a".repeat(40) } }))?.id).toBe(existing.id);
+    });
     it("decodes SQLite float32 embeddings without a PostgreSQL cast", () => {
         const bytes = Buffer.alloc(8); bytes.writeFloatLE(0.25,0); bytes.writeFloatLE(-1.5,4);
         expect(decodeStoredEmbedding(bytes)).toEqual([0.25,-1.5]);

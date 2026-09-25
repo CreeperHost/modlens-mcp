@@ -78,13 +78,13 @@ const FAKE_MANIFEST = {
     metadataSource: "fabric.mod.json" as const,
 };
 
-const FAKE_HASHES = { sha256: "aaa", sha512: "bbb", murmur2: "12345" };
+const FAKE_HASHES = { sha1: "ccc", sha256: "aaa", sha512: "bbb", murmur2: "12345" };
 
 const FAKE_DB_MOD = {
     id: 1, jarPath: "/mods/testmod.jar", modId: "testmod",
     displayName: "Test Mod", version: "1.0.0", mcVersion: "1.21.1",
     loader: "fabric", description: "", metadata: {},
-    sha256: "aaa", sha512: "bbb", murmur2: "12345",
+    sha1: "ccc", sha256: "aaa", sha512: "bbb", murmur2: "12345",
     hasMixins: false, hasAt: false, hasAw: false,
     mixinConfigs: [], mixinTargets: [], atEntries: [], awEntries: [],
     dependencies: [], createdAt: new Date(),
@@ -151,6 +151,12 @@ describe("ingestMod — already_ingested", () => {
 
         expect(result.status).toBe("already_ingested");
         expect(repo.updateMod).not.toHaveBeenCalled();
+    });
+
+    it("backfills SHA-1 on a previously ingested JAR", async () => {
+        vi.mocked(repo.findModByJarPath).mockResolvedValue({ ...FAKE_DB_MOD, sha1: null } as any);
+        await ingestMod("/mods/testmod.jar");
+        expect(repo.updateMod).toHaveBeenCalledWith(1, { sha1: "ccc" });
     });
 });
 

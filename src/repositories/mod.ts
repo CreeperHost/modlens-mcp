@@ -68,6 +68,18 @@ export async function findModByModId(modId: string): Promise<Mod | null> {
     return db.mod.findFirst({ where: { modId } });
 }
 
+/** Exact mod ID candidates; LIKE supplies ASCII case folding on SQLite. */
+export async function findModsByExactModId(modId: string): Promise<Mod[]> {
+    const db = await getDb();
+    const rows = await db.mod.findMany({ where: { modId: { contains: modId, ...caseInsensitive() } } });
+    return rows.filter(row => row.modId.toLowerCase() === modId.toLowerCase());
+}
+
+export async function findModBySha1(sha1: string): Promise<Mod | null> {
+    const db = await getDb();
+    return db.mod.findFirst({ where: { sha1 } });
+}
+
 export async function findModByModIdLike(modId: string): Promise<Mod | null> {
     const db = await getDb();
     return db.mod.findFirst({ where: { modId: { contains: modId } } });
@@ -82,7 +94,9 @@ export async function resolveModRef(ref: string | number): Promise<Mod | null> {
         const byId = await findModById(n);
         if (byId) return byId;
     }
-    return findModByModId(ref);
+    const matches = await findModsByExactModId(ref);
+    if (matches.length > 1) throw new Error(`Multiple releases of ${ref} are indexed; specify a SHA-1 or database ID.`);
+    return matches[0] ?? null;
 }
 
 /** Slim resolveModRef — returns only id, modId, displayName, version, jarPath. */
@@ -98,7 +112,10 @@ export async function resolveModRefSlim(ref: string | number): Promise<ModRef | 
         const byId = await db.mod.findUnique({ where: { id: n }, select: sel });
         if (byId) return byId;
     }
-    return db.mod.findFirst({ where: { modId: { contains: String(ref) } }, select: sel });
+    const matches = await db.mod.findMany({ where: { modId: { contains: String(ref), ...caseInsensitive() } }, select: sel });
+    const exact = matches.filter(row => row.modId.toLowerCase() === String(ref).toLowerCase());
+    if (exact.length > 1) throw new Error(`Multiple releases of ${ref} are indexed; specify a SHA-1 or database ID.`);
+    return exact[0] ?? null;
 }
 
 export async function findModByDupKey(
