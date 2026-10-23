@@ -155,11 +155,13 @@ Minecraft compatibility validation: `npm run test:minecraft:eras` exercises the 
 
 | Requirement | Notes |
 |-------------|-------|
-| **Node.js 22+** | Runtime for the MCP server |
+| **Node.js** | Use 22.23.4+ on 22.x, 24.22.1+ on 24.x, or 26.12.1+ on 26.x for the MCP server runtime. |
 | **Docker** | *Optional* — only for the PostgreSQL backend (`docker compose`). Not needed for the default embedded SQLite. |
 | **JDK 21+** | Required for decompilation (Vineflower) and bytecode analysis (`javap`). Eclipse Adoptium recommended — auto-discovered at `C:/Program Files/Eclipse Adoptium`, `C:/Program Files/Java`, `C:/Program Files/Microsoft`, or via `JAVA_HOME` |
 | **Vineflower** | Decompiler JAR — **auto-downloaded** from Maven Central on first use |
 | **mcsrc-indexer.jar** | JAR bytecode indexer — **auto-downloaded** from the modlens-mcp GitHub release on first use |
+
+When running with `npx` or from a local checkout, ModLens uses your installed Node.js runtime. Updating the npm package does not update Node.js; upgrade the runtime to address CVE-2026-111497.
 
 **Optional environment variables:**
 

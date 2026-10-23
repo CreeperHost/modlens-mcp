@@ -1,5 +1,5 @@
 # ── Stage 1: build ──────────────────────────────────────────────────────────
-FROM node:22-slim AS builder
+FROM node:22.23.4-slim AS builder
 WORKDIR /app
 
 # openssl lets Prisma correctly detect the engine for this platform
@@ -22,7 +22,7 @@ COPY scripts/ ./scripts/
 RUN npm run build
 
 # ── Stage 2: runtime ────────────────────────────────────────────────────────
-FROM node:22-slim
+FROM node:22.23.4-slim
 
 # Java 21 (Temurin): required by Vineflower decompiler + bytecode indexer.
 # Debian's default-jre is only 17; the tools need 21+ (see README prerequisites).
