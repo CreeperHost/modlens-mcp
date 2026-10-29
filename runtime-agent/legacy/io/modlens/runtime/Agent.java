@@ -38,7 +38,7 @@ public final class Agent {
                 for (String name : new String[] { "LegacyHooks", "LegacyHooks$Handler" }) {
                     String entry = "io/modlens/runtime/legacy/" + name + ".class";
                     out.putNextEntry(new JarEntry(entry));
-                    InputStream resource = Agent.class.getResourceAsStream("/" + entry);
+                    InputStream resource = Agent.class.getResourceAsStream("/bootstrap/" + entry);
                     if (resource == null) throw new IllegalStateException("Missing " + entry);
                     try {
                         byte[] bytes = new byte[8192];

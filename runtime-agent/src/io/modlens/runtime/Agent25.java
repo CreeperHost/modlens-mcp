@@ -17,7 +17,8 @@ public final class Agent25 {
                 for (String name : new String[] { "Hooks", "Hooks$Handler" }) {
                     String entry = "io/modlens/runtime/bridge/" + name + ".class";
                     out.putNextEntry(new JarEntry(entry));
-                    try (var in = Agent25.class.getResourceAsStream("/" + entry)) {
+                    try (var in = Agent25.class.getResourceAsStream("/bootstrap/" + entry)) {
+                        if (in == null) throw new IllegalStateException("Missing " + entry);
                         in.transferTo(out);
                     }
                     out.closeEntry();
