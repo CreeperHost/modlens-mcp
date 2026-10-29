@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile, rm, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -96,6 +96,14 @@ try {
         args.map((a) => `"${a.replaceAll("\\", "/").replaceAll('"', '\\"')}"`).join("\n"),
     );
     execFileSync(javaTool("javac"), ["@" + join(build, "javac.args")], { stdio: "inherit" });
+    // Keep bootstrap-only classes off the agent's ordinary class path. Fabric Knot
+    // otherwise finds the agent JAR resource and rejects it as an isolated parent.
+    for (const dir of ["io/modlens/runtime/legacy", "io/modlens/runtime/bridge"]) {
+        const names = dir.endsWith("legacy") ? ["LegacyHooks.class", "LegacyHooks$Handler.class"] : ["Hooks.class", "Hooks$Handler.class"];
+        const destination = join(build, "bootstrap", dir);
+        await mkdir(destination, { recursive: true });
+        for (const name of names) await rename(join(build, dir, name), join(destination, name));
+    }
     await writeFile(
         join(build, "MANIFEST.MF"),
         "Manifest-Version: 1.0\nPremain-Class: io.modlens.runtime.Agent\nCan-Redefine-Classes: false\nCan-Retransform-Classes: false\n\n",
@@ -111,6 +119,9 @@ try {
             "-C",
             build,
             "io",
+            "-C",
+            build,
+            "bootstrap",
             "-C",
             build,
             "META-INF/licenses",

@@ -10,6 +10,8 @@ entry point, a Java 11 JFR module, and a Java 25 SDL adapter. It includes a
 relocated ASM 9.9.1 copy for GLFW and LWJGL2 hooks; see
 `vendor/ASM-LICENSE.txt`. No native agent or desktop-control service is needed.
 
-The bootstrap bridges contain only JDK types. The 26.3 transformer uses the JDK
+The bootstrap bridges contain only JDK types and are stored as bootstrap-only
+resources, so isolated development loaders can resolve the shared bridge without
+seeing a restricted agent-JAR class resource. The 26.3 transformer uses the JDK
 Class-File API; the older paths use relocated ASM. Inspect connected capabilities
 for the active input backend, screenshot, and JFR support.
